@@ -50,6 +50,7 @@ See `.env.example` for the full, commented list. The essentials:
 | `PACKETCAPTURE_OWNER_EMAIL` | Included in LetsMesh JWT claims, if used |
 | `PACKETCAPTURE_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` |
 | `PACKETCAPTURE_BOTS_CONFIG_FILE` | Path to your channel bots config (see below) |
+| `PACKETCAPTURE_METRICS_UI_ENABLED` | `true` to serve the live metrics dashboard (see below); default `false` |
 
 #### MQTT brokers
 
@@ -122,6 +123,43 @@ Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
 times the mesh relays it to you.
 
+### 3. Metrics UI (optional)
+
+An optional live dashboard shows radio/MQTT/bot status and packet counters,
+served over plain HTTP with no server-side dependency. It's off by default.
+
+```sh
+PACKETCAPTURE_METRICS_UI_ENABLED=true
+```
+
+Then open `http://127.0.0.1:8090/` (or your configured host/port) while
+the observer is running. It has **no authentication**, so the listener
+defaults to `127.0.0.1` (loopback-only, not reachable from the network).
+Only set `PACKETCAPTURE_METRICS_UI_HOST` to `0.0.0.0` or a LAN address if
+you understand the dashboard and its `/api/metrics*` endpoints will then be
+reachable by anyone who can reach that address - put your own
+reverse proxy and authentication in front of it if you need remote access.
+
+The packet-activity chart is rendered client-side with
+[Chart.js](https://www.chartjs.org/), loaded by the browser directly from
+the jsdelivr CDN (pinned to an exact version with Subresource Integrity, so
+the browser refuses it if the served bytes ever don't match) rather than
+vendored into this app - an explicit, scoped exception to the "no further
+dependencies" rule in [`AGENTS.md`](AGENTS.md), made because it's a
+browser-side visualization library, not a server dependency. Practically,
+this means **the chart specifically needs the viewing browser to have
+outbound internet access**; everything else on the dashboard (tiles,
+tables, live SSE updates) works with no internet access at all, and the
+chart degrades to a visible "unavailable" message rather than breaking the
+page if the CDN can't be reached.
+
+| Variable | Purpose |
+| --- | --- |
+| `PACKETCAPTURE_METRICS_UI_HOST` | Bind address; default `127.0.0.1` |
+| `PACKETCAPTURE_METRICS_UI_PORT` | Bind port; default `8090` |
+| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often the dashboard samples health state; default `10000` |
+| `PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS` | In-memory trend-chart retention window; default `3600000` (1h), not persisted across restarts |
+
 ## Run
 
 ```sh
@@ -154,7 +192,8 @@ src/
   packets/    raw radio event -> normalize -> validate -> decode -> deduplicate pipeline
   mqtt/       broker connections, topic templates, observer status, LetsMesh on-device JWT auth
   bots/       channel bots: channel discovery/creation, message decrypt, trigger matching, replies
-  health/     internal health-state snapshot (no HTTP endpoint in this version)
+  health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
+  web/        optional live metrics dashboard (plain node:http + SSE), gated by PACKETCAPTURE_METRICS_UI_ENABLED
 ```
 
 Engineering conventions (validation, logging, protected boundaries, dependency policy) are in [`AGENTS.md`](AGENTS.md).

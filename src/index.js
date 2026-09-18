@@ -10,6 +10,8 @@ import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
 import { ServiceHealth } from './health/service-health.js';
+import { MetricsHistory } from './web/metrics-history.js';
+import { MetricsServer } from './web/metrics-server.js';
 import packageInfo from '../package.json' with { type: 'json' };
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
@@ -154,6 +156,25 @@ function main() {
   }, HEALTH_LOG_INTERVAL_MS);
   healthLogTimer.unref();
 
+  let metricsServer = null;
+  if (config.metricsUi.enabled) {
+    const metricsHistory = new MetricsHistory({
+      historyWindowMs: config.metricsUi.historyWindowMs,
+      sampleIntervalMs: config.metricsUi.sampleIntervalMs
+    });
+    metricsServer = new MetricsServer({
+      serviceHealth,
+      metricsHistory,
+      host: config.metricsUi.host,
+      port: config.metricsUi.port,
+      sampleIntervalMs: config.metricsUi.sampleIntervalMs,
+      logger
+    });
+    metricsServer.start().catch((err) => {
+      logger.warn('services.metricsUi', 'failed to start metrics UI', { error: err.message });
+    });
+  }
+
   radioManager.start();
 
   let shuttingDown = false;
@@ -173,6 +194,9 @@ function main() {
     clearInterval(healthLogTimer);
     for (const stop of stopTokenRefreshLoops) {
       stop();
+    }
+    if (metricsServer) {
+      await metricsServer.stop();
     }
 
     const deviceInfo = radioManager.getDeviceInfo();

@@ -82,6 +82,16 @@ function readLogging(env) {
   };
 }
 
+function readMetricsUi(env) {
+  return {
+    enabled: readBoolean(env, 'PACKETCAPTURE_METRICS_UI_ENABLED', false),
+    host: readString(env, 'PACKETCAPTURE_METRICS_UI_HOST', '127.0.0.1'),
+    port: readInteger(env, 'PACKETCAPTURE_METRICS_UI_PORT', 8090),
+    sampleIntervalMs: readInteger(env, 'PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS', 10000),
+    historyWindowMs: readInteger(env, 'PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS', 3600000)
+  };
+}
+
 function isBrokerSlotConfigured(env, slot) {
   const prefix = `PACKETCAPTURE_MQTT${slot}_`;
   return Object.keys(env).some((key) => key.startsWith(prefix));
@@ -166,7 +176,8 @@ export function loadConfig(env = process.env) {
     observer: readObserver(env),
     logging: readLogging(env),
     brokers: readBrokers(env),
-    bots: readBots(env)
+    bots: readBots(env),
+    metricsUi: readMetricsUi(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {
@@ -183,6 +194,12 @@ export function loadConfig(env = process.env) {
 
   if (!config.observer.iata) {
     throw new ConfigError('PACKETCAPTURE_IATA is required');
+  }
+
+  if (config.metricsUi.historyWindowMs < config.metricsUi.sampleIntervalMs) {
+    throw new ConfigError(
+      'PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS must be greater than or equal to PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS'
+    );
   }
 
   for (const broker of config.brokers) {

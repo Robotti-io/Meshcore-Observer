@@ -9,7 +9,10 @@ const nodeGlobals = {
   clearTimeout: 'readonly',
   setInterval: 'readonly',
   clearInterval: 'readonly',
-  setImmediate: 'readonly'
+  setImmediate: 'readonly',
+  fetch: 'readonly',
+  AbortController: 'readonly',
+  TextDecoder: 'readonly'
 };
 
 export default [

@@ -2,7 +2,7 @@ export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi'],
   properties: {
     radio: {
       type: 'object',
@@ -43,6 +43,18 @@ export const configSchema = {
       required: ['level'],
       properties: {
         level: { enum: ['debug', 'info', 'warn', 'error'] }
+      }
+    },
+    metricsUi: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['enabled', 'host', 'port', 'sampleIntervalMs', 'historyWindowMs'],
+      properties: {
+        enabled: { type: 'boolean' },
+        host: { type: 'string', minLength: 1 },
+        port: { type: 'integer', minimum: 1, maximum: 65535 },
+        sampleIntervalMs: { type: 'integer', minimum: 1000 },
+        historyWindowMs: { type: 'integer', minimum: 1000 }
       }
     },
     brokers: {

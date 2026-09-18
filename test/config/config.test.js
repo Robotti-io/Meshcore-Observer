@@ -199,3 +199,46 @@ test('rejects a malformed bots config file', () => {
     assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BOTS_CONFIG_FILE: filePath })), ConfigError);
   });
 });
+
+test('defaults metricsUi to disabled and loopback-only', () => {
+  const config = loadConfig(baseEnv());
+  assert.deepEqual(config.metricsUi, {
+    enabled: false,
+    host: '127.0.0.1',
+    port: 8090,
+    sampleIntervalMs: 10000,
+    historyWindowMs: 3600000
+  });
+});
+
+test('reads metricsUi overrides from the environment', () => {
+  const config = loadConfig(
+    baseEnv({
+      PACKETCAPTURE_METRICS_UI_ENABLED: 'true',
+      PACKETCAPTURE_METRICS_UI_HOST: '0.0.0.0',
+      PACKETCAPTURE_METRICS_UI_PORT: '9000',
+      PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '5000',
+      PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS: '60000'
+    })
+  );
+  assert.deepEqual(config.metricsUi, {
+    enabled: true,
+    host: '0.0.0.0',
+    port: 9000,
+    sampleIntervalMs: 5000,
+    historyWindowMs: 60000
+  });
+});
+
+test('rejects a metricsUi history window shorter than its sample interval', () => {
+  assert.throws(
+    () =>
+      loadConfig(
+        baseEnv({
+          PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '60000',
+          PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS: '10000'
+        })
+      ),
+    ConfigError
+  );
+});

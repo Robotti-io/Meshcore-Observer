@@ -64,6 +64,7 @@ test('reports a sensible initial snapshot before anything has happened', () => {
   assert.equal(snapshot.radioReconnectCount, 0);
   assert.equal(snapshot.packetsReceived, 0);
   assert.equal(snapshot.packetsPublished, 0);
+  assert.deepEqual(snapshot.packetsByType, {});
   assert.deepEqual(snapshot.mqtt, { okimesh: { connected: false, lastConnectedAt: null } });
   assert.deepEqual(snapshot.bots, [{ name: 'echo', enabled: true, ready: false, repliesSent: 0 }]);
 });
@@ -126,6 +127,23 @@ test('counts raw packets received and packets that made it through the pipeline 
   const snapshot = health.snapshot();
   assert.equal(snapshot.packetsReceived, 3);
   assert.equal(snapshot.packetsPublished, 1);
+});
+
+test('tallies published packets by their packet_type code', () => {
+  const packetPipeline = fakePacketPipeline();
+  const health = new ServiceHealth({
+    radioManager: fakeRadioManager(),
+    mqttManager: fakeMqttManager(),
+    packetPipeline,
+    bots: []
+  });
+
+  packetPipeline.emit('packet', { packet_type: '4' }); // ADVERT
+  packetPipeline.emit('packet', { packet_type: '4' });
+  packetPipeline.emit('packet', { packet_type: '5' }); // GRP_TXT
+  packetPipeline.emit('packet', { packet_type: '15' }); // RAW_CUSTOM
+
+  assert.deepEqual(health.snapshot().packetsByType, { 4: 2, 5: 1, 15: 1 });
 });
 
 test('tracks per-broker lastConnectedAt while connected reflects the current state live', () => {

@@ -2,9 +2,10 @@
  * Aggregates internal health state from the radio, MQTT, packet, and
  * channel bot services into one queryable snapshot (see
  * docs/project_plan.spec.md Section 23, evolved from a single echoBot
- * object to a `bots` array to match the multi-bot architecture). No HTTP
- * endpoint - that is an explicitly separate, unapproved change; this
- * module only builds the data a future endpoint/probe could expose.
+ * object to a `bots` array to match the multi-bot architecture). This
+ * module only builds the data; it stays HTTP-agnostic. The optional,
+ * env-flag-gated metrics dashboard in src/web/ (see metrics-server.js) is
+ * the sole current consumer of snapshot().
  *
  * Cumulative counters (reconnects, packets, per-broker last-connected time)
  * are tracked via events as they happen; point-in-time state (is the radio
@@ -24,6 +25,11 @@ export class ServiceHealth {
   #hasConnectedOnce = false;
   #packetsReceived = 0;
   #packetsPublished = 0;
+  // Keyed by the decoded packet's `packet_type` string (the MeshCore
+  // PAYLOAD_TYPE_* numeric code from @liamcottle/meshcore.js, e.g. "4" for
+  // ADVERT) - human-readable labels are a display-layer concern, not this
+  // module's.
+  #packetsByType = new Map();
   #mqttLastConnectedAt = new Map();
 
   /**
@@ -49,8 +55,9 @@ export class ServiceHealth {
     radioManager.on('radio.packet', () => {
       this.#packetsReceived += 1;
     });
-    packetPipeline.on('packet', () => {
+    packetPipeline.on('packet', (packet) => {
       this.#packetsPublished += 1;
+      this.#packetsByType.set(packet.packet_type, (this.#packetsByType.get(packet.packet_type) ?? 0) + 1);
     });
     mqttManager.on('broker.connected', (brokerId) => {
       this.#mqttLastConnectedAt.set(brokerId, this.#now());
@@ -73,6 +80,7 @@ export class ServiceHealth {
       radioReconnectCount: this.#radioReconnectCount,
       packetsReceived: this.#packetsReceived,
       packetsPublished: this.#packetsPublished,
+      packetsByType: Object.fromEntries(this.#packetsByType),
       mqtt,
       bots: this.#bots.map(({ name, enabled, bot }) => ({
         name,
