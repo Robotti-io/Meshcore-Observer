@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.local
+bots.config.json
+*.log
+coverage/
+.claude/

@@ -1,0 +1,36 @@
+{
+  "name": "meshcore-observer",
+  "version": "1.0.0",
+  "description": "A meshcore observer & echo bot",
+  "license": "ISC",
+  "author": "Robotti Tech Services",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "main": "src/index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env.local src/index.js",
+    "dev": "node --watch --env-file-if-exists=.env.local src/index.js",
+    "test": "node --test",
+    "lint": "eslint .",
+    "task:register": "powershell -ExecutionPolicy Bypass -File scripts/register-scheduled-task.ps1",
+    "task:unregister": "powershell -ExecutionPolicy Bypass -File scripts/unregister-scheduled-task.ps1"
+  },
+  "dependencies": {
+    "@liamcottle/meshcore.js": "^1.15.0",
+    "ajv": "^8.20.0",
+    "mqtt": "^5.16.0"
+  },
+  "allowScripts": {
+    "@serialport/bindings-cpp@13.0.0": true
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.10.0",
+    "nodemon": "^3.1.14"
+  }
+}
