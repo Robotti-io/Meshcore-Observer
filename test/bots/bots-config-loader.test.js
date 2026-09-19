@@ -38,6 +38,21 @@ test('loads and validates a well-formed bots config file', () => {
   assert.equal(result[0].commands[0].trigger, '!echo');
 });
 
+test('accepts a command with an optional overflowResponse', () => {
+  const bot = {
+    ...VALID_BOT,
+    commands: [
+      {
+        trigger: '!echo',
+        response: '🔁 @[{sender}]! {hopCount} hops via {path}',
+        overflowResponse: '🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}'
+      }
+    ]
+  };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].commands[0].overflowResponse, '🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}');
+});
+
 test('accepts an optional per-bot maxMessageBytes', () => {
   const bot = { ...VALID_BOT, maxMessageBytes: 100 };
   const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));

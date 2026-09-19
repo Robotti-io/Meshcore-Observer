@@ -187,6 +187,35 @@ test('loads bots from an explicitly configured bots config file', () => {
   });
 });
 
+test('loads a bot command with an overflowResponse through the full loadConfig pipeline', () => {
+  // Regression coverage: config/schema.js's `bots` block is a hand-
+  // maintained mirror of bots/schemas.js's botsConfigSchema (see the
+  // comment above it) - loadBotsConfig() validates against the latter,
+  // but loadConfig() then re-validates the whole assembled config,
+  // including bots, against the former. A field added to only one of the
+  // two copies passes loadBotsConfig() in isolation but throws here.
+  const bots = [
+    {
+      name: 'echo',
+      channel: '#echo',
+      enabled: true,
+      minHops: 1,
+      commands: [
+        {
+          trigger: '!echo',
+          response: '🔁 {sender} {hopCount} {path}',
+          overflowResponse: '🔁 {sender} {hopCount} {hash}'
+        }
+      ]
+    }
+  ];
+
+  withTempBotsFile(JSON.stringify(bots), (filePath) => {
+    const config = loadConfig(baseEnv({ PACKETCAPTURE_BOTS_CONFIG_FILE: filePath }));
+    assert.equal(config.bots[0].commands[0].overflowResponse, '🔁 {sender} {hopCount} {hash}');
+  });
+});
+
 test('rejects an explicitly configured bots config file path that does not exist', () => {
   assert.throws(
     () => loadConfig(baseEnv({ PACKETCAPTURE_BOTS_CONFIG_FILE: 'does-not-exist.json' })),

@@ -40,20 +40,34 @@ export function truncateToUtf8Bytes(str, maxBytes) {
  * stages rather than sending an oversized message the mesh won't repeat
  * properly (or refuse outright):
  *   1. the full template, as authored;
- *   2. if too long and `values.path` is set, the same template re-rendered
- *      with an empty path (the hop-path list is the one field expected to
- *      grow unboundedly with mesh size, so it's the first thing dropped);
- *   3. if still too long, a hard UTF-8-safe truncation of whichever of the
+ *   2. if too long and `overflowTemplate` is configured for this command,
+ *      that template instead - an operator-authored short form (e.g.
+ *      swapping a hop-path listing for a `{hash}` packet link) rather than
+ *      this module guessing what to cut. Real path lengths scale with mesh
+ *      size/hop count and can push a reply well past the byte budget - a
+ *      16-hop path alone was the concrete case this stage exists for;
+ *   3. else if too long and `values.path` is set (no overflow template
+ *      configured), the same template re-rendered with an empty path -
+ *      the old default behavior, kept for backward compatibility;
+ *   4. if still too long, a hard UTF-8-safe truncation of whichever of the
  *      above was closest to fitting.
  *
- * @param {{template: string, values: object, maxBytes?: number}} options
+ * @param {{template: string, overflowTemplate?: string, values: object, maxBytes?: number}} options
  * @returns {{message: string, degraded: boolean}} `degraded` is true if the
  * full templated response did not fit and something had to give.
  */
-export function renderResponse({ template, values, maxBytes = DEFAULT_MAX_MESSAGE_BYTES }) {
+export function renderResponse({ template, overflowTemplate, values, maxBytes = DEFAULT_MAX_MESSAGE_BYTES }) {
   const full = renderTemplate(template, values);
   if (Buffer.byteLength(full, 'utf8') <= maxBytes) {
     return { message: full, degraded: false };
+  }
+
+  if (overflowTemplate) {
+    const overflow = renderTemplate(overflowTemplate, values);
+    if (Buffer.byteLength(overflow, 'utf8') <= maxBytes) {
+      return { message: overflow, degraded: true };
+    }
+    return { message: truncateToUtf8Bytes(overflow, maxBytes), degraded: true };
   }
 
   if (values.path) {

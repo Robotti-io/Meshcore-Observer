@@ -73,7 +73,7 @@ export class ChannelBot {
     this.#enabled = botConfig.enabled;
     this.#minHops = botConfig.minHops;
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
-    this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command.response]));
+    this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
     this.#logger = logger;
     this.#deduplicator = deduplicator;
   }
@@ -195,8 +195,8 @@ export class ChannelBot {
       return;
     }
 
-    const template = this.#commands.get(decrypted.text);
-    if (!template) {
+    const command = this.#commands.get(decrypted.text);
+    if (!command) {
       this.#logger.debug('bots.channelBot', 'decrypted message did not match any configured trigger', {
         bot: this.#name,
         sender: decrypted.sender,
@@ -253,9 +253,10 @@ export class ChannelBot {
   }
 
   async #reply({ trigger, sender, hopCount, path, hash }) {
-    const template = this.#commands.get(trigger);
+    const command = this.#commands.get(trigger);
     const { message, degraded } = renderResponse({
-      template,
+      template: command.response,
+      overflowTemplate: command.overflowResponse,
       values: { sender, hopCount, path, trigger, hash },
       maxBytes: this.#maxMessageBytes
     });

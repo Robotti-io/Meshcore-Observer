@@ -22,7 +22,8 @@ export const botsConfigSchema = {
           required: ['trigger', 'response'],
           properties: {
             trigger: { type: 'string', minLength: 1 },
-            response: { type: 'string', minLength: 1 }
+            response: { type: 'string', minLength: 1 },
+            overflowResponse: { type: 'string', minLength: 1 }
           }
         }
       }

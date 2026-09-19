@@ -74,6 +74,46 @@ test('renderResponse hard-truncates directly when there is no path field at all'
   assert.ok(Buffer.byteLength(message, 'utf8') <= 20);
 });
 
+test('renderResponse uses overflowTemplate instead of dropping the path when configured and it fits', () => {
+  const longPath = Array.from({ length: 30 }, (_, i) => i.toString(16).padStart(2, '0').toUpperCase()).join('➡️');
+  const { message, degraded } = renderResponse({
+    template: '🔁 @[{sender}]! {hopCount} hops via {path}',
+    overflowTemplate: '🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}',
+    values: { sender: 'Jeymz', hopCount: 30, path: longPath, hash: 'abc123' },
+    maxBytes: 120
+  });
+
+  assert.equal(degraded, true);
+  assert.equal(message, '🔁 @[Jeymz]! 30 hops - 🔗 https://map.okimesh.org/#/packets/abc123');
+  assert.ok(!message.includes(longPath));
+});
+
+test('renderResponse hard-truncates the overflowTemplate rather than falling back to dropping path', () => {
+  const longPath = Array.from({ length: 30 }, (_, i) => i.toString(16).padStart(2, '0').toUpperCase()).join('➡️');
+  const { message, degraded } = renderResponse({
+    template: '🔁 @[{sender}]! {hopCount} hops via {path}',
+    overflowTemplate: 'still way too long even without the path: {hash} {hash} {hash} {hash} {hash}',
+    values: { sender: 'Jeymz', hopCount: 30, path: longPath, hash: 'abc123' },
+    maxBytes: 20
+  });
+
+  assert.equal(degraded, true);
+  assert.ok(Buffer.byteLength(message, 'utf8') <= 20);
+  assert.ok(!message.includes(longPath));
+});
+
+test('renderResponse ignores an unconfigured overflowTemplate and falls back to dropping the path', () => {
+  const longPath = Array.from({ length: 30 }, (_, i) => i.toString(16).padStart(2, '0').toUpperCase()).join('➡️');
+  const { message, degraded } = renderResponse({
+    template: '🔁 @[{sender}]! {hopCount} hops via {path}',
+    values: { sender: 'Jeymz', hopCount: 30, path: longPath },
+    maxBytes: 120
+  });
+
+  assert.equal(degraded, true);
+  assert.equal(message, '🔁 @[Jeymz]! 30 hops via ');
+});
+
 test('renderResponse uses the default max byte budget of 120 when none is given', () => {
   const longPath = Array.from({ length: 30 }, (_, i) => i.toString(16).padStart(2, '0').toUpperCase()).join('➡️');
   const { degraded } = renderResponse({

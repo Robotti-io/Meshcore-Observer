@@ -108,8 +108,11 @@ response-template commands:
     "minHops": 1,                // reject messages heard with fewer relay hops than this
     "maxMessageBytes": 120,      // channel messages have a real mesh-repeating limit; replies degrade gracefully rather than exceed it
     "commands": [
-      { "trigger": "!echo", "response": "🔁 @[{sender}]! {hopCount} hops via {path}" },
-      { "trigger": "!spam", "response": "🔁 @[{sender}]! {hopCount} hops via {path}" },
+      {
+        "trigger": "!echo",
+        "response": "🔁 @[{sender}]! {hopCount} hops via {path}",
+        "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
+      },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
       { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link" },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
@@ -127,6 +130,16 @@ dashboard: `https://map.okimesh.org/#/packets/{hash}`).
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
 times the mesh relays it to you.
+
+A command's `overflowResponse` is optional. When the rendered `response`
+doesn't fit `maxMessageBytes` (the hop-path listing is the field most
+likely to grow past it - a real path from a heavily-relayed message can run
+well past 100 bytes on its own), `overflowResponse` is rendered instead,
+with the same placeholders available. This is the place to swap a long
+`{path}` listing for something short and still useful, like the `{hash}`
+packet link shown above. Without an `overflowResponse`, a command falls
+back to the old behavior: the same `response` re-rendered with `{path}`
+emptied out, then hard truncation as a last resort if it's still too long.
 
 ### 3. Metrics UI (optional)
 

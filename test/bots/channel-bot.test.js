@@ -411,3 +411,38 @@ test('degrades a too-long response by dropping the path, staying within the conf
   assert.ok(Buffer.byteLength(message, 'utf8') <= 40);
   assert.ok(!message.includes('➡️'));
 });
+
+test('degrades a too-long response to its configured overflowResponse (e.g. a hash link) instead of dropping the path', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({
+      minHops: 0,
+      maxMessageBytes: 100,
+      commands: [
+        {
+          trigger: '!echo',
+          response: '🔁 @[{sender}]! {hopCount} hops via {path}',
+          overflowResponse: '🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}'
+        }
+      ]
+    }),
+    logger: silentLogger()
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  const manyHops = Array.from({ length: 20 }, (_, i) => i.toString(16).padStart(2, '0'));
+  const frame = buildGrpTxtFrame({ channelKey, hops: manyHops, text: 'Jeymz: !echo', routeType: RouteType.FLOOD });
+  radioManager.emitPacket(frame);
+  await flush();
+
+  const packet = Packet.fromBytes(frame);
+  const expectedHash = calculatePacketHash(packet.payload_type, packet.pathLen, Buffer.from(packet.payload)).toLowerCase();
+
+  assert.equal(radioManager.commandCalls.length, 1);
+  const { message } = radioManager.commandCalls[0];
+  assert.ok(Buffer.byteLength(message, 'utf8') <= 100);
+  assert.ok(!message.includes('➡️'));
+  assert.equal(message, `🔁 @[Jeymz]! 20 hops - 🔗 https://map.okimesh.org/#/packets/${expectedHash}`);
+});
