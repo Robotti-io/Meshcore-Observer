@@ -108,7 +108,12 @@ response-template commands:
     "minHops": 1,                // reject messages heard with fewer relay hops than this
     "maxMessageBytes": 120,      // channel messages have a real mesh-repeating limit; replies degrade gracefully rather than exceed it
     "commands": [
-      { "trigger": "!echo", "response": "🔁 @[{sender}]! {hopCount} hops via {path}" }
+      { "trigger": "!echo", "response": "🔁 @[{sender}]! {hopCount} hops via {path}" },
+      { "trigger": "!spam", "response": "🔁 @[{sender}]! {hopCount} hops via {path}" },
+      { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
+      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link" },
+      { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
+      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" }
     ]
   }
 ]

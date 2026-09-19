@@ -76,6 +76,7 @@ export function renderDashboardHtml() {
   #connection-indicator.down { color: #c4432b; opacity: 1; }
   section { margin-bottom: 1.75rem; }
   section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 0 0 0.6rem; }
+  .section-note { font-size: 0.8rem; opacity: 0.7; margin: -0.4rem 0 0.6rem; }
   #tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
   .tile { border: 1px solid color-mix(in srgb, canvastext 20%, transparent); border-radius: 8px; padding: 0.85rem 1rem; }
   .tile h2 { margin: 0 0 0.35rem; font-size: 0.8rem; }
@@ -107,6 +108,7 @@ export function renderDashboardHtml() {
 
 <section>
   <h2>Packet activity</h2>
+  <p class="section-note">Grouped into 30-minute windows</p>
   <div id="chart-wrap">
     <canvas id="chart"></canvas>
     <div id="chart-fallback">Chart unavailable - Chart.js could not be loaded from the CDN (no internet access?). Totals below are still live.</div>
@@ -137,8 +139,14 @@ export function renderDashboardHtml() {
 <script>
 (function () {
   const MAX_CHART_POINTS = 1000;
+  // The chart plots one point per wall-clock time bucket, not one per raw
+  // sample - with sub-30-minute polling (down to 1s) that keeps the line
+  // chart readable instead of thousands of near-identical points. Each
+  // bucket sums the per-interval deltas that fall within it.
+  const CHART_BUCKET_MS = 30 * 60 * 1000;
   let lastSample = null;
   let chart = null;
+  let currentChartBucketStart = null;
 
   // Fixed categorical order - never reordered or generated. MeshCore
   // PAYLOAD_TYPE_* codes (see @liamcottle/meshcore.js) not explicitly
@@ -173,6 +181,14 @@ export function renderDashboardHtml() {
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function chartBucketStart(date) {
+    return Math.floor(date.getTime() / CHART_BUCKET_MS) * CHART_BUCKET_MS;
+  }
+
+  function chartBucketLabel(bucketStartMs) {
+    return new Date(bucketStartMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
   function formatDuration(ms) {
@@ -329,10 +345,6 @@ export function renderDashboardHtml() {
     });
   }
 
-  function labelForDate(date) {
-    return date.toLocaleTimeString();
-  }
-
   function trimChart() {
     while (chart.data.labels.length > MAX_CHART_POINTS) {
       chart.data.labels.shift();
@@ -340,23 +352,59 @@ export function renderDashboardHtml() {
     }
   }
 
+  // Bulk-fills the chart from history by summing each raw sample-to-sample
+  // delta into its 30-minute wall-clock bucket, so it starts already
+  // grouped the same way live updates keep it grouped below.
   function seedChart(historySamples) {
     if (!chart) return;
+
+    const bucketOrder = [];
+    const bucketTotals = new Map();
     for (let i = 1; i < historySamples.length; i += 1) {
       const point = deltaPoint(historySamples[i - 1], historySamples[i]);
-      chart.data.labels.push(labelForDate(new Date(historySamples[i].timestamp)));
-      SERIES.forEach((series, idx) => chart.data.datasets[idx].data.push(point[series.key]));
+      const key = chartBucketStart(new Date(historySamples[i].timestamp));
+      if (!bucketTotals.has(key)) {
+        bucketTotals.set(key, Object.fromEntries(SERIES.map((s) => [s.key, 0])));
+        bucketOrder.push(key);
+      }
+      const totals = bucketTotals.get(key);
+      SERIES.forEach((series) => {
+        totals[series.key] += point[series.key];
+      });
     }
+
+    bucketOrder.forEach((key) => {
+      chart.data.labels.push(chartBucketLabel(key));
+      const totals = bucketTotals.get(key);
+      SERIES.forEach((series, idx) => chart.data.datasets[idx].data.push(totals[series.key]));
+    });
+    currentChartBucketStart = bucketOrder.length ? bucketOrder[bucketOrder.length - 1] : null;
+
     trimChart();
     chart.update();
   }
 
+  // Adds one interval's delta into the chart. While still inside the same
+  // 30-minute wall-clock window as the last plotted point, it accumulates
+  // into that point in place (so a 1-second poll rate doesn't add a new
+  // point every second); crossing into a new window starts a new one.
   function pushPoint(prevSample, currSample) {
     if (!chart) return;
     const point = deltaPoint(prevSample, currSample);
-    chart.data.labels.push(labelForDate(new Date()));
-    SERIES.forEach((series, idx) => chart.data.datasets[idx].data.push(point[series.key]));
-    trimChart();
+    const key = chartBucketStart(new Date());
+
+    if (key === currentChartBucketStart && chart.data.labels.length > 0) {
+      SERIES.forEach((series, idx) => {
+        const data = chart.data.datasets[idx].data;
+        data[data.length - 1] += point[series.key];
+      });
+    } else {
+      chart.data.labels.push(chartBucketLabel(key));
+      SERIES.forEach((series, idx) => chart.data.datasets[idx].data.push(point[series.key]));
+      currentChartBucketStart = key;
+      trimChart();
+    }
+
     chart.update('none');
   }
 
