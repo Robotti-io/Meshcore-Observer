@@ -236,7 +236,9 @@ test('defaults metricsUi to disabled and loopback-only', () => {
     host: '127.0.0.1',
     port: 8090,
     sampleIntervalMs: 10000,
-    historyWindowMs: 3600000
+    dbPath: 'data/metrics.sqlite3',
+    retentionDays: 0,
+    maxChartBuckets: 180
   });
 });
 
@@ -247,7 +249,9 @@ test('reads metricsUi overrides from the environment', () => {
       PACKETCAPTURE_METRICS_UI_HOST: '0.0.0.0',
       PACKETCAPTURE_METRICS_UI_PORT: '9000',
       PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '5000',
-      PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS: '60000'
+      PACKETCAPTURE_METRICS_UI_DB_PATH: 'var/custom-metrics.sqlite3',
+      PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '30',
+      PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS: '90'
     })
   );
   assert.deepEqual(config.metricsUi, {
@@ -255,19 +259,22 @@ test('reads metricsUi overrides from the environment', () => {
     host: '0.0.0.0',
     port: 9000,
     sampleIntervalMs: 5000,
-    historyWindowMs: 60000
+    dbPath: 'var/custom-metrics.sqlite3',
+    retentionDays: 30,
+    maxChartBuckets: 90
   });
 });
 
-test('rejects a metricsUi history window shorter than its sample interval', () => {
+test('rejects a negative metricsUi retention window', () => {
   assert.throws(
-    () =>
-      loadConfig(
-        baseEnv({
-          PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '60000',
-          PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS: '10000'
-        })
-      ),
+    () => loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '-1' })),
+    ConfigError
+  );
+});
+
+test('rejects a metricsUi max chart bucket count below the schema minimum', () => {
+  assert.throws(
+    () => loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS: '1' })),
     ConfigError
   );
 });

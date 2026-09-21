@@ -10,14 +10,21 @@ import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
 import { ServiceHealth } from './health/service-health.js';
-import { MetricsHistory } from './web/metrics-history.js';
 import { MetricsServer } from './web/metrics-server.js';
 import packageInfo from '../package.json' with { type: 'json' };
+
+// src/metrics/store.js is imported dynamically, only when the metrics UI is
+// enabled (see below) - it statically imports node:sqlite, which requires
+// Node >=22.13.0 (see docs/plans/feat-improved_metrics_reporting.md). A
+// dynamic import lets a too-old runtime fail with a clear, caught warning
+// that just disables the metrics UI, rather than crashing every startup
+// (including ones that never touch the metrics UI at all) with a raw
+// ERR_UNKNOWN_BUILTIN_MODULE from a top-level import.
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
 const HEALTH_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
-function main() {
+async function main() {
   let config;
   try {
     config = loadConfig();
@@ -136,10 +143,34 @@ function main() {
     });
   });
 
+  // Constructed before the bots below (rather than alongside the rest of
+  // the metrics UI further down) so each ChannelBot can be given a
+  // recordBotCommand hook at construction time.
+  let metricsStore = null;
+  if (config.metricsUi.enabled) {
+    try {
+      const { MetricsStore } = await import('./metrics/store.js');
+      metricsStore = new MetricsStore({ dbPath: config.metricsUi.dbPath });
+    } catch (err) {
+      logger.warn(
+        'services.metricsUi',
+        'metrics UI disabled: could not open the persisted metrics store (node:sqlite requires Node >=22.13.0)',
+        { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
+      );
+    }
+  }
+
   const bots = config.bots.map((botConfig) => ({
     name: botConfig.name,
     enabled: botConfig.enabled,
-    bot: new ChannelBot({ radioManager, botConfig, logger })
+    bot: new ChannelBot({
+      radioManager,
+      botConfig,
+      logger,
+      recordBotCommand: metricsStore
+        ? (botName, trigger, occurredAt) => metricsStore.recordBotCommand({ botName, trigger, occurredAt })
+        : undefined
+    })
   }));
   for (const { bot } of bots) {
     bot.start();
@@ -157,17 +188,16 @@ function main() {
   healthLogTimer.unref();
 
   let metricsServer = null;
-  if (config.metricsUi.enabled) {
-    const metricsHistory = new MetricsHistory({
-      historyWindowMs: config.metricsUi.historyWindowMs,
-      sampleIntervalMs: config.metricsUi.sampleIntervalMs
-    });
+  if (metricsStore) {
     metricsServer = new MetricsServer({
       serviceHealth,
-      metricsHistory,
+      metricsStore,
+      botsConfig: config.bots,
       host: config.metricsUi.host,
       port: config.metricsUi.port,
       sampleIntervalMs: config.metricsUi.sampleIntervalMs,
+      maxChartBuckets: config.metricsUi.maxChartBuckets,
+      retentionDays: config.metricsUi.retentionDays,
       logger
     });
     metricsServer.start().catch((err) => {
@@ -197,6 +227,9 @@ function main() {
     }
     if (metricsServer) {
       await metricsServer.stop();
+    }
+    if (metricsStore) {
+      metricsStore.close();
     }
 
     const deviceInfo = radioManager.getDeviceInfo();

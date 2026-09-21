@@ -65,8 +65,17 @@ export class ChannelBot {
   #channelHash = null;
   #ready = false;
   #repliesSent = 0;
+  #recordBotCommand;
 
-  constructor({ radioManager, botConfig, logger, deduplicator = new PacketDeduplicator() }) {
+  /**
+   * `recordBotCommand` is an optional `(botName, trigger, occurredAt) => void`
+   * hook for persisting per-command usage (see src/metrics/store.js); it
+   * defaults to a no-op so this bot works standalone (e.g. in tests) without
+   * a metrics store. Injected rather than importing the store directly, to
+   * keep this module decoupled from the metrics feature per the existing
+   * constructor-injection pattern for its other collaborators.
+   */
+  constructor({ radioManager, botConfig, logger, deduplicator = new PacketDeduplicator(), recordBotCommand = () => {} }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
     this.#channelName = botConfig.channel;
@@ -76,6 +85,7 @@ export class ChannelBot {
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
     this.#logger = logger;
     this.#deduplicator = deduplicator;
+    this.#recordBotCommand = recordBotCommand;
   }
 
   get name() {
@@ -265,6 +275,18 @@ export class ChannelBot {
       await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
       this.#repliesSent += 1;
       this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
+      try {
+        this.#recordBotCommand(this.#name, trigger, Date.now());
+      } catch (err) {
+        // A metrics-persistence failure must never be mistaken for a failed
+        // reply (Section 21: bot failure must not stop observer operation)
+        // - the reply already sent successfully by this point.
+        this.#logger.warn('bots.channelBot', 'failed to record command metrics for a sent reply', {
+          bot: this.#name,
+          trigger,
+          error: err.message
+        });
+      }
     } catch (err) {
       this.#logger.warn('bots.channelBot', 'failed to send reply', { bot: this.#name, error: err.message });
     }

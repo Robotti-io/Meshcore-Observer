@@ -357,6 +357,89 @@ test('exposes the packet hash (lowercase) as a {hash} template placeholder, e.g.
   assert.match(expectedHash, /^[0-9a-f]{16}$/);
 });
 
+test('records a bot-command event via the injected hook on a successful reply', async () => {
+  const radioManager = fakeRadioManager();
+  const recorded = [];
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger: silentLogger(),
+    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].botName, 'echo');
+  assert.equal(recorded[0].trigger, '!echo');
+  assert.ok(Number.isInteger(recorded[0].occurredAt));
+});
+
+test('does not record a bot-command event when the reply send fails', async () => {
+  const radioManager = fakeRadioManager();
+  radioManager.connection.sendChannelTextMessage = async () => {
+    throw new Error('radio busy');
+  };
+  const recorded = [];
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger: silentLogger(),
+    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(recorded.length, 0);
+});
+
+test('does not record a bot-command event for a deduped redelivery, matching the single sent reply', async () => {
+  const radioManager = fakeRadioManager();
+  const recorded = [];
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger: silentLogger(),
+    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  const frame = buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' });
+  radioManager.emitPacket(frame);
+  radioManager.emitPacket(frame);
+  await flush();
+
+  assert.equal(recorded.length, 1);
+});
+
+test('a failure inside recordBotCommand is caught and logged, and does not affect getRepliesSent()', async () => {
+  const radioManager = fakeRadioManager();
+  const logger = silentLogger();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger,
+    recordBotCommand: () => {
+      throw new Error('store unavailable');
+    }
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(bot.getRepliesSent(), 1);
+  assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to record command metrics')));
+});
+
 test('two independent bots on different channels do not cross-respond', async () => {
   const radioManager = fakeRadioManager();
   const echoBot = new ChannelBot({

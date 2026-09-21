@@ -48,13 +48,24 @@ export const configSchema = {
     metricsUi: {
       type: 'object',
       additionalProperties: false,
-      required: ['enabled', 'host', 'port', 'sampleIntervalMs', 'historyWindowMs'],
+      required: [
+        'enabled',
+        'host',
+        'port',
+        'sampleIntervalMs',
+        'dbPath',
+        'retentionDays',
+        'maxChartBuckets'
+      ],
       properties: {
         enabled: { type: 'boolean' },
         host: { type: 'string', minLength: 1 },
         port: { type: 'integer', minimum: 1, maximum: 65535 },
         sampleIntervalMs: { type: 'integer', minimum: 1000 },
-        historyWindowMs: { type: 'integer', minimum: 1000 }
+        dbPath: { type: 'string', minLength: 1 },
+        // 0 = unlimited retention.
+        retentionDays: { type: 'integer', minimum: 0 },
+        maxChartBuckets: { type: 'integer', minimum: 10, maximum: 1000 }
       }
     },
     brokers: {

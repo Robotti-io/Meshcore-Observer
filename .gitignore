@@ -5,3 +5,5 @@ bots.config.json
 *.log
 coverage/
 .claude/
+data/
+/docs/Threat Model Review*.md
