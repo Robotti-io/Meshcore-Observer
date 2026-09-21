@@ -158,25 +158,47 @@ you understand the dashboard and its `/api/metrics*` endpoints will then be
 reachable by anyone who can reach that address - put your own
 reverse proxy and authentication in front of it if you need remote access.
 
-The packet-activity chart is rendered client-side with
-[Chart.js](https://www.chartjs.org/), loaded by the browser directly from
-the jsdelivr CDN (pinned to an exact version with Subresource Integrity, so
-the browser refuses it if the served bytes ever don't match) rather than
-vendored into this app - an explicit, scoped exception to the "no further
-dependencies" rule in [`AGENTS.md`](AGENTS.md), made because it's a
-browser-side visualization library, not a server dependency. Practically,
-this means **the chart specifically needs the viewing browser to have
-outbound internet access**; everything else on the dashboard (tiles,
-tables, live SSE updates) works with no internet access at all, and the
-chart degrades to a visible "unavailable" message rather than breaking the
-page if the CDN can't be reached.
+The packet-activity chart and packet-types pie chart are rendered
+client-side with [Chart.js](https://www.chartjs.org/), loaded by the
+browser directly from the jsdelivr CDN (pinned to an exact version with
+Subresource Integrity, so the browser refuses it if the served bytes ever
+don't match) rather than vendored into this app - an explicit, scoped
+exception to the "no further dependencies" rule in [`AGENTS.md`](AGENTS.md),
+made because it's a browser-side visualization library, not a server
+dependency. Practically, this means **the charts specifically need the
+viewing browser to have outbound internet access**; everything else on the
+dashboard (tiles, tables, live SSE updates) works with no internet access
+at all, and the charts degrade to a visible "unavailable" message rather
+than breaking the page if the CDN can't be reached.
+
+Packet activity (the line chart), the packet-types table, the packet-types
+pie chart, and a "Bot commands" section (one pie chart + table + total
+replies per configured channel bot, showing which of its commands are
+actually being used) are all driven by the same duration selector -
+presets from 1 hour up to "All", or a custom start/end date range -
+backed by packet/bot-command metrics persisted locally in a SQLite file
+via Node's built-in `node:sqlite` (requires Node >=22.13.0; see `engines`
+in `package.json`). Bucketing for the line chart happens on the server,
+capped at `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` points regardless
+of how much history exists, so a multi-year "All" query still returns a
+bounded response. A bot with more than 7 configured commands has the
+overflow folded into a single "Other" row/slice rather than adding more
+categorical colors, and every pie/doughnut chart reuses the same
+validated 8-color palette in a fixed order (see the dataviz method) - a
+command's color is tied to its position in that bot's own configuration,
+never to how often it's currently used, so colors stay stable across
+refreshes. The top-row tiles (packets received/published) and the
+existing bot status table (enabled/ready/all-time replies sent) remain
+live, all-time-since-start counters, unaffected by the duration selector.
 
 | Variable | Purpose |
 | --- | --- |
 | `PACKETCAPTURE_METRICS_UI_HOST` | Bind address; default `127.0.0.1` |
 | `PACKETCAPTURE_METRICS_UI_PORT` | Bind port; default `8090` |
-| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often the dashboard samples health state; default `10000` |
-| `PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS` | In-memory trend-chart retention window; default `3600000` (1h), not persisted across restarts |
+| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often the dashboard samples health state and persists a packet sample; default `10000` |
+| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for persisted packet/bot-command metrics; default `data/metrics.sqlite3` |
+| `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | Days of persisted metrics to keep; default `0` (unlimited - watch disk usage) |
+| `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` | Upper bound on buckets returned per history query; default `180` |
 
 ## Run
 
@@ -211,6 +233,7 @@ src/
   mqtt/       broker connections, topic templates, observer status, LetsMesh on-device JWT auth
   bots/       channel bots: channel discovery/creation, message decrypt, trigger matching, replies
   health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
+  metrics/    local SQLite-backed persistence for packet/bot-command metrics (node:sqlite)
   web/        optional live metrics dashboard (plain node:http + SSE), gated by PACKETCAPTURE_METRICS_UI_ENABLED
 ```
 

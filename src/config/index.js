@@ -88,7 +88,10 @@ function readMetricsUi(env) {
     host: readString(env, 'PACKETCAPTURE_METRICS_UI_HOST', '127.0.0.1'),
     port: readInteger(env, 'PACKETCAPTURE_METRICS_UI_PORT', 8090),
     sampleIntervalMs: readInteger(env, 'PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS', 10000),
-    historyWindowMs: readInteger(env, 'PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS', 3600000)
+    dbPath: readString(env, 'PACKETCAPTURE_METRICS_UI_DB_PATH', 'data/metrics.sqlite3'),
+    // 0 = keep persisted metrics samples/bot-command events forever.
+    retentionDays: readInteger(env, 'PACKETCAPTURE_METRICS_UI_RETENTION_DAYS', 0),
+    maxChartBuckets: readInteger(env, 'PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS', 180)
   };
 }
 
@@ -194,12 +197,6 @@ export function loadConfig(env = process.env) {
 
   if (!config.observer.iata) {
     throw new ConfigError('PACKETCAPTURE_IATA is required');
-  }
-
-  if (config.metricsUi.historyWindowMs < config.metricsUi.sampleIntervalMs) {
-    throw new ConfigError(
-      'PACKETCAPTURE_METRICS_UI_HISTORY_WINDOW_MS must be greater than or equal to PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS'
-    );
   }
 
   for (const broker of config.brokers) {

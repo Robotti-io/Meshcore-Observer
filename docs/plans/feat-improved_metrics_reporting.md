@@ -351,21 +351,44 @@ To be added as an addendum to
 Each phase is intended to be approved and merged independently per the
 AGENTS.md workflow rule ("one approved task/phase at a time").
 
-1. **Storage foundation.** `src/metrics/store.js`, schema/migrations,
-   config additions, engines-floor bump + startup Node-version guard,
-   threat-model addendum. No behavior change yet — store exists and is
-   wired up but not yet read by the UI.
-2. **Packet metrics persistence + range-aware history/pie/table.**
-   Wire the tick loop to `store.recordPacketSample`, remove
-   `MetricsHistory`, add `/api/metrics/history` (bucketed) and
-   `/api/metrics/packet-types` — including the shared `range` vs.
-   `start`/`end` query schema — add the dashboard duration selector
-   (presets + custom date-range inputs) and packet-types pie chart.
-3. **Bot command tracking.** `recordBotCommand` wiring into
-   `ChannelBot#reply()`, `/api/metrics/bots/commands` endpoint,
-   per-bot pie chart + table + total-replies in the dashboard.
-4. **Docs.** README architecture section, `.env.example`, threat model
-   addendum finalized against what actually shipped.
+1. ✅ **Storage foundation** (implemented 2026-09-21). `src/metrics/store.js`,
+   schema/migrations, config additions, engines-floor bump to
+   `>=22.13.0`. Deviated slightly from the original wording below: the
+   store is *not* wired into `src/index.js` until Phase 2 (kept as a
+   pure, fully-tested addition with zero runtime behavior change), and
+   the Node-version guard is a dynamic `import()` at the point of use in
+   Phase 2 rather than a Phase-1 startup check, so a too-old Node
+   disables just the metrics UI instead of crashing every startup.
+2. ✅ **Packet metrics persistence + range-aware history/pie/table**
+   (implemented 2026-09-21). Tick loop now persists per-interval deltas
+   via `computeSampleDelta`; `MetricsHistory` removed;
+   `/api/metrics/history` (bucketed) and `/api/metrics/packet-types`
+   shipped with the shared `range`/`start`+`end` query schema; dashboard
+   duration selector (presets + custom date range) and packet-types pie
+   chart shipped and browser-verified. Also removed `historyWindowMs`
+   config (became dead code once `MetricsHistory` was removed) — a
+   config-surface change beyond the plan's letter, called out at the
+   time rather than done silently.
+3. ✅ **Bot command tracking** (implemented 2026-09-21).
+   `recordBotCommand` wired into `ChannelBot#reply()`;
+   `/api/metrics/bots/commands` endpoint; per-bot pie chart + table +
+   total-replies shipped, browser-verified including the >7-commands
+   "Other" fold. Per the dataviz skill (consulted before writing this
+   chart code), command-to-color assignment follows each bot's stable
+   *configured* command order, never a live usage ranking — colors must
+   follow the entity, not its rank.
+4. ✅ **Docs** (2026-09-21). README architecture section and Metrics UI
+   section, `.env.example`, and a dated addendum to
+   `docs/Threat Model Review - 2026-09-19.md` (Section 15) documenting
+   the new local persistence and three new endpoints — descriptive only,
+   the original 43/100 score is left untouched pending a dedicated
+   re-review, which is still recommended before wider/production
+   rollout.
+
+All four phases are implemented, tested (`npm test`: 232/232), linted
+clean, and browser-verified. Nothing has been committed to git yet.
+Package version has deliberately **not** been bumped to v1.1.0 — that
+was agreed to happen once local hardware testing validates the release.
 
 ## Testing plan
 
