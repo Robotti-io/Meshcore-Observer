@@ -6,3 +6,4 @@ bots.config.json
 coverage/
 .claude/
 data/
+/docs/Threat Model Review*.md

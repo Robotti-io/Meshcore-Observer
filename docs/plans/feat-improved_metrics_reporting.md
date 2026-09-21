@@ -24,8 +24,8 @@
 ## Non-Goals (v1)
 
 - No authentication/authorization on the metrics UI — it remains
-  loopback-only, matching the existing threat model
-  (`docs/Threat Model Review - 2026-09-19.md`, T6/T7). Not addressed here.
+  loopback-only, matching the project's existing security posture for
+  that surface. Not addressed here.
 - No export/download of raw metrics data.
 - No multi-instance/shared/remote storage — single local SQLite file per
   observer instance.
@@ -328,10 +328,7 @@ command replies, so no new source is needed there beyond the
 values are introduced by this feature; nothing here changes the
 logger's redaction surface.
 
-## Threat model impact
-
-To be added as an addendum to
-`docs/Threat Model Review - 2026-09-19.md` in Phase 1:
+## Security considerations
 
 - New local attack surface: a SQLite file on disk. Path is
   operator-configured (env var), never derived from network input, so
@@ -339,8 +336,8 @@ To be added as an addendum to
 - New query parameters on loopback-only HTTP endpoints — validated
   strictly (enum ranges, bounded integers) and always used via
   parameterized statements, so no SQL-injection surface even though the
-  endpoints are unauthenticated today (per existing T6/T7 findings,
-  unchanged by this plan).
+  endpoints are unauthenticated today, consistent with the metrics UI's
+  existing loopback-only, no-auth posture (unchanged by this plan).
 - Unlimited-by-default retention is a disk-growth risk on
   long-running deployments; documented as an operator responsibility,
   with the `RETENTION_DAYS` knob as the mitigation.
@@ -378,17 +375,15 @@ AGENTS.md workflow rule ("one approved task/phase at a time").
    *configured* command order, never a live usage ranking — colors must
    follow the entity, not its rank.
 4. ✅ **Docs** (2026-09-21). README architecture section and Metrics UI
-   section, `.env.example`, and a dated addendum to
-   `docs/Threat Model Review - 2026-09-19.md` (Section 15) documenting
-   the new local persistence and three new endpoints — descriptive only,
-   the original 43/100 score is left untouched pending a dedicated
-   re-review, which is still recommended before wider/production
-   rollout.
+   section, `.env.example` updated to match what shipped. A security
+   review of the new local persistence and three new endpoints was done
+   separately (kept out of this repository by request) rather than as a
+   committed addendum; a fresh review/re-score is still recommended
+   before wider/production rollout.
 
 All four phases are implemented, tested (`npm test`: 232/232), linted
-clean, and browser-verified. Nothing has been committed to git yet.
-Package version has deliberately **not** been bumped to v1.1.0 — that
-was agreed to happen once local hardware testing validates the release.
+clean, and browser-verified. Package version bumped to v1.1.0 following
+local hardware validation.
 
 ## Testing plan
 
