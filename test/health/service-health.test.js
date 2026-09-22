@@ -208,3 +208,37 @@ test('reports multiple independent bots, including a disabled one', () => {
   assert.deepEqual(snapshot.bots[0], { name: 'echo', enabled: true, ready: true, repliesSent: 2 });
   assert.deepEqual(snapshot.bots[1], { name: 'weather', enabled: false, ready: false, repliesSent: 0 });
 });
+
+test('defaults replyQueue to all-zero stats when none is provided', () => {
+  const health = new ServiceHealth({
+    radioManager: fakeRadioManager(),
+    mqttManager: fakeMqttManager(),
+    packetPipeline: fakePacketPipeline(),
+    bots: []
+  });
+
+  assert.deepEqual(health.snapshot().replyQueue, {
+    size: 0,
+    totalEnqueued: 0,
+    totalSent: 0,
+    totalExpired: 0,
+    totalFailed: 0
+  });
+});
+
+test('reports the injected replyQueue\'s stats live, not a snapshot taken once', () => {
+  let stats = { size: 1, totalEnqueued: 1, totalSent: 0, totalExpired: 0, totalFailed: 0 };
+  const replyQueue = { getStats: () => stats };
+  const health = new ServiceHealth({
+    radioManager: fakeRadioManager(),
+    mqttManager: fakeMqttManager(),
+    packetPipeline: fakePacketPipeline(),
+    bots: [],
+    replyQueue
+  });
+
+  assert.deepEqual(health.snapshot().replyQueue, stats);
+
+  stats = { size: 0, totalEnqueued: 1, totalSent: 1, totalExpired: 0, totalFailed: 0 };
+  assert.deepEqual(health.snapshot().replyQueue, stats);
+});

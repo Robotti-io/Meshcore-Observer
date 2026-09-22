@@ -141,6 +141,80 @@ packet link shown above. Without an `overflowResponse`, a command falls
 back to the old behavior: the same `response` re-rendered with `{path}`
 emptied out, then hard truncation as a last resort if it's still too long.
 
+#### Reply queue (mesh congestion)
+
+Every bot reply goes through one shared, FIFO queue (one per process, not
+one per bot - "the local frequency" is a single physical radio, so
+ordering and congestion-avoidance only make sense as one shared
+resource) rather than being sent the instant a trigger matches. A queued
+reply is held until the shared RF channel has been quiet - no heard
+packets from anyone, on any channel - for a configured duration, and is
+dropped unsent if it waits longer than a configured TTL without ever
+seeing that quiet window:
+
+| Variable | Purpose |
+| --- | --- |
+| `PACKETCAPTURE_BOT_REPLY_QUIET_MS` | Required silence before a queued reply is sent; default `5000` |
+| `PACKETCAPTURE_BOT_REPLY_TTL_MS` | Drop a queued reply unsent after waiting this long; default `60000` |
+
+There's deliberately no size cap on the queue - sending a reply also
+counts as channel activity, so the next queued item always needs its own
+fresh quiet window afterward. That self-resetting makes the drain rate
+inherently bounded to roughly one reply per quiet period no matter how
+many are queued, so a burst of triggers can only make the queue back up
+(bounded by the TTL), never burst replies out.
+
+**Why quiet-window detection, and why not just retry if a reply doesn't
+land:** MeshCore's `GRP_TXT` (channel/group) messages carry **no
+protocol-level acknowledgement** - only direct 1:1 messages get a
+delivery-confirming `SendConfirmed` push tied back to a specific send
+(see [docs.meshcore.io/companion_protocol](https://docs.meshcore.io/companion_protocol/)).
+A broadcast to a whole channel has no single destination to ACK from, so
+there is nothing to retry against; `sendChannelTextMessage()`'s success
+response only means "the local radio accepted the command for
+transmission," never "someone received it." This is a MeshCore protocol
+property, not a gap in this app - and there's no channel-energy/CAD
+reading exposed to this companion app either, so "quiet" is inferred
+from application-level RF activity (heard `radio.packet` events), not a
+direct radio readout.
+
+What this queue *does* help with: a trigger message is itself just been
+flood-relayed, and nearby repeaters can still be actively
+re-transmitting/settling that same flood for several seconds afterward.
+Replying while that's still happening collides with it. A 5-second quiet
+requirement (found through field testing on a real deployment; a flat
+500ms-2.5s pre-reply delay - tried first - was measurably worse) gives
+that propagation room to settle before this bot's reply adds new traffic
+to the channel. This lines up with MeshCore's own documented behavior: a
+node that finds the channel busy gives up waiting and transmits anyway
+after about 4 seconds (`ERR_EVENT_CAD_TIMEOUT`), and the project's own
+maintainers have flagged repeater backoff defaults as too low for this
+kind of collision (see the repeater configuration note below).
+
+#### Recommended repeater configuration
+
+This app's reply queue only controls when *this observer's own bot* keys
+up - it doesn't change how repeaters on the mesh handle collisions in
+general. If you or people you coordinate with operate repeaters on the
+same mesh, MeshCore's own maintainers have flagged the stock repeater
+backoff defaults as too low, which independently contributes to the same
+congestion this queue works around
+([meshcore-dev/MeshCore#2123](https://github.com/meshcore-dev/MeshCore/issues/2123)).
+Via the repeater's CLI (see
+[docs.meshcore.io/cli_commands](https://docs.meshcore.io/cli_commands/)):
+
+| Setting | Command | Default | Recommended minimum |
+| --- | --- | --- | --- |
+| Flood retransmit backoff | `set txdelay <value>` | `0.5` (~2 backoff slots) | `1.6` (~8 backoff slots) |
+| Direct-message backoff | `set direct.txdelay <value>` | `0.2`-`0.3` | `1` (~5 backoff slots) |
+| Receive-window backoff (experimental) | `set rxdelay <value>` | `0` (off) | `3` |
+
+Use `get txdelay` / `get direct.txdelay` / `get rxdelay` to check a
+repeater's current values before changing them - defaults can vary by
+firmware version. This is a mesh-wide, repeater-operator change, not
+something this observer (a companion-mode client, not a repeater) can
+set on your behalf.
+
 ### 3. Metrics UI (optional)
 
 An optional live dashboard shows radio/MQTT/bot status and packet counters,

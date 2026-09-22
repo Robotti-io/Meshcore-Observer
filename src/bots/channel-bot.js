@@ -47,8 +47,12 @@ function formatPath(packet) {
  * matching the reference Python observer's own precedent (recent_rf_packets
  * vs test_replied_packets).
  *
- * Bot failure must never stop packet capture or MQTT (Section 21) - every
- * public method here catches and logs rather than throwing outward.
+ * Bot failure must never stop packet capture or MQTT (Section 21).
+ * start()/#handleRawPacket() catch and log locally, so nothing from
+ * matching/decrypting a trigger ever throws outward. sendQueuedReply()
+ * is the one deliberate exception - see its own doc comment - a send
+ * failure there propagates to the shared ReplyQueue's dispatcher, which
+ * provides the same catch-and-continue guarantee one level up.
  */
 export class ChannelBot {
   #radioManager;
@@ -66,6 +70,7 @@ export class ChannelBot {
   #ready = false;
   #repliesSent = 0;
   #recordBotCommand;
+  #replyQueue;
 
   /**
    * `recordBotCommand` is an optional `(botName, trigger, occurredAt) => void`
@@ -74,8 +79,25 @@ export class ChannelBot {
    * a metrics store. Injected rather than importing the store directly, to
    * keep this module decoupled from the metrics feature per the existing
    * constructor-injection pattern for its other collaborators.
+   *
+   * `replyQueue` (see reply-queue.js) is a single instance *shared across
+   * every configured bot* - "the local frequency" is one physical radio,
+   * so FIFO ordering and quiet-window detection only make sense as one
+   * shared resource, not per-bot state. It defaults to an immediate
+   * "queue" - dispatching straight back to this bot's own
+   * sendQueuedReply(), with its own catch - so a bot built without one
+   * (e.g. in tests that don't care about send timing) still replies
+   * right away and a send failure still can't escape as an unhandled
+   * rejection.
    */
-  constructor({ radioManager, botConfig, logger, deduplicator = new PacketDeduplicator(), recordBotCommand = () => {} }) {
+  constructor({
+    radioManager,
+    botConfig,
+    logger,
+    deduplicator = new PacketDeduplicator(),
+    recordBotCommand = () => {},
+    replyQueue
+  }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
     this.#channelName = botConfig.channel;
@@ -86,6 +108,20 @@ export class ChannelBot {
     this.#logger = logger;
     this.#deduplicator = deduplicator;
     this.#recordBotCommand = recordBotCommand;
+    // sendQueuedReply() intentionally lets a send failure propagate (see
+    // its own doc comment) for a real ReplyQueue to catch/count/log - this
+    // default stub is the one place standing in for that catch when no
+    // queue is injected, so a send failure here still can't become an
+    // unhandled rejection or a silently swallowed failure.
+    this.#replyQueue =
+      replyQueue ??
+      {
+        enqueue: (item) => {
+          this.sendQueuedReply(item).catch((err) => {
+            this.#logger.warn('bots.channelBot', 'failed to send reply', { bot: this.#name, error: err.message });
+          });
+        }
+      };
   }
 
   get name() {
@@ -246,7 +282,20 @@ export class ChannelBot {
       return;
     }
 
-    await this.#reply({
+    // Queued rather than sent immediately: the shared ReplyQueue holds
+    // this until a quiet window is observed on the physical RF channel,
+    // in FIFO order across every bot (see reply-queue.js). Enqueued after
+    // dedup, not before: isDuplicate() already marked this hash as seen
+    // synchronously above, so a redelivery arriving while this is still
+    // queued is still correctly caught as a duplicate by its own
+    // #handleRawPacket call, regardless of when this one actually sends.
+    // Plain data, not a closure - see reply-queue.js and reply-dispatcher.js
+    // for why: it's what makes the queue directly reportable (queued per
+    // bot/command/sender) and keeps the actual send in one shared,
+    // auditable path instead of one closure per enqueue() call.
+    this.#replyQueue.enqueue({
+      botName: this.#name,
+      channel: this.#channelName,
       trigger: decrypted.text,
       sender: decrypted.sender,
       hopCount,
@@ -262,8 +311,37 @@ export class ChannelBot {
     });
   }
 
-  async #reply({ trigger, sender, hopCount, path, hash }) {
+  /**
+   * Renders and sends the reply for one queued item, then records its
+   * own bookkeeping (counters, metrics, logging). Public because it's
+   * invoked from outside this instance - by the shared ReplyQueue's
+   * dispatcher (see reply-dispatcher.js) once a quiet window is
+   * observed, not by anything reachable from over-the-air data.
+   *
+   * A send failure here is deliberately left to propagate to that
+   * dispatcher rather than being caught locally: ReplyQueue's own
+   * dispatch step (see reply-queue.js #tick()) already catches it,
+   * counts it in totalFailed, and logs it with channel/sender context
+   * this method would otherwise have to duplicate - catching and
+   * swallowing it here too would either double-log the same failure or,
+   * worse, let the queue miscount a failed send as sent. Bot failure
+   * still can't stop packet capture/MQTT (Section 21): the queue's catch
+   * is what provides that guarantee for this path, one level up from
+   * where every other public method here still catches locally.
+   *
+   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string}} item
+   */
+  async sendQueuedReply({ trigger, sender, hopCount, path, hash }) {
     const command = this.#commands.get(trigger);
+    if (!command) {
+      // Not expected in the current architecture (bots.config.json is
+      // immutable for the life of the process, and only a matched
+      // trigger is ever enqueued) - thrown, not silently dropped, so it's
+      // still counted/logged as a failed dispatch rather than miscounted
+      // as sent.
+      throw new Error(`no configured command matches trigger "${trigger}"`);
+    }
+
     const { message, degraded } = renderResponse({
       template: command.response,
       overflowTemplate: command.overflowResponse,
@@ -271,24 +349,22 @@ export class ChannelBot {
       maxBytes: this.#maxMessageBytes
     });
 
+    await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
+    this.#repliesSent += 1;
+    this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
+
     try {
-      await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
-      this.#repliesSent += 1;
-      this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
-      try {
-        this.#recordBotCommand(this.#name, trigger, Date.now());
-      } catch (err) {
-        // A metrics-persistence failure must never be mistaken for a failed
-        // reply (Section 21: bot failure must not stop observer operation)
-        // - the reply already sent successfully by this point.
-        this.#logger.warn('bots.channelBot', 'failed to record command metrics for a sent reply', {
-          bot: this.#name,
-          trigger,
-          error: err.message
-        });
-      }
+      this.#recordBotCommand(this.#name, trigger, Date.now());
     } catch (err) {
-      this.#logger.warn('bots.channelBot', 'failed to send reply', { bot: this.#name, error: err.message });
+      // A metrics-persistence failure must never be mistaken for a failed
+      // reply (Section 21: bot failure must not stop observer operation)
+      // - the reply already sent successfully by this point, so this one
+      // is still caught and logged locally rather than propagated.
+      this.#logger.warn('bots.channelBot', 'failed to record command metrics for a sent reply', {
+        bot: this.#name,
+        trigger,
+        error: err.message
+      });
     }
   }
 }

@@ -9,6 +9,8 @@ import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
 import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
+import { ReplyQueue } from './bots/reply-queue.js';
+import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import packageInfo from '../package.json' with { type: 'json' };
@@ -53,6 +55,21 @@ async function main() {
       const deviceInfo = radioManager.getDeviceInfo();
       return deviceInfo ? { origin: deviceInfo.name, originId: deviceInfo.publicKey } : null;
     }
+  });
+
+  // One shared queue across every configured bot - "the local frequency"
+  // is one physical radio, so FIFO ordering and quiet-window detection
+  // only make sense as a single resource, not per-bot state. See
+  // reply-queue.js and README's "Channel bots" section. `botsByName` is
+  // populated below as each bot is constructed; createReplyDispatcher()
+  // only reads from it later (once a quiet window is actually observed),
+  // so the empty map here at construction time is fine.
+  const botsByName = new Map();
+  const replyQueue = new ReplyQueue({
+    quietMs: config.botReplyQueue.quietMs,
+    ttlMs: config.botReplyQueue.ttlMs,
+    logger,
+    dispatch: createReplyDispatcher(botsByName)
   });
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
@@ -136,6 +153,10 @@ async function main() {
     logger.warn('app.bootstrap', 'radio error', detail);
   });
   radioManager.on('radio.packet', (rawPush) => packetPipeline.handleRawPacket(rawPush));
+  // Any heard RF packet occupies the shared channel, regardless of which
+  // logical MeshCore channel it's on - feeds the reply queue's quiet-
+  // window detection (see reply-queue.js).
+  radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
   packetPipeline.on('packet', (packet) => {
     observerPublisher.publishPacket(packet).catch((err) => {
@@ -160,18 +181,19 @@ async function main() {
     }
   }
 
-  const bots = config.bots.map((botConfig) => ({
-    name: botConfig.name,
-    enabled: botConfig.enabled,
-    bot: new ChannelBot({
+  const bots = config.bots.map((botConfig) => {
+    const bot = new ChannelBot({
       radioManager,
       botConfig,
       logger,
       recordBotCommand: metricsStore
         ? (botName, trigger, occurredAt) => metricsStore.recordBotCommand({ botName, trigger, occurredAt })
-        : undefined
-    })
-  }));
+        : undefined,
+      replyQueue
+    });
+    botsByName.set(botConfig.name, bot);
+    return { name: botConfig.name, enabled: botConfig.enabled, bot };
+  });
   for (const { bot } of bots) {
     bot.start();
   }
@@ -180,7 +202,8 @@ async function main() {
     radioManager,
     mqttManager,
     packetPipeline,
-    bots
+    bots,
+    replyQueue
   });
   const healthLogTimer = setInterval(() => {
     logger.info('app.health', 'health snapshot', serviceHealth.snapshot());

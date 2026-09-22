@@ -82,6 +82,24 @@ function readLogging(env) {
   };
 }
 
+// Shared by every configured bot - congestion is a shared-airtime
+// concern, not a per-bot behavioral choice (see reply-queue.js). GRP_TXT
+// channel replies carry no protocol ACK to retry against (see
+// docs.meshcore.io/companion_protocol - only direct messages get a
+// SendConfirmed push), so quietMs isn't about guaranteeing delivery: it
+// lets a *triggering* message's own flood propagation settle on nearby
+// repeaters before this reply adds new channel traffic. Default (5s)
+// reflects field testing on a real MeshCore mesh. ttlMs bounds how long
+// a reply waits for a quiet window before being dropped unsent - see
+// README's "Channel bots" section for the full rationale and the
+// companion repeater-side tx_delay/rx_delay recommendation.
+function readBotReplyQueue(env) {
+  return {
+    quietMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_QUIET_MS', 5000),
+    ttlMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_TTL_MS', 60000)
+  };
+}
+
 function readMetricsUi(env) {
   return {
     enabled: readBoolean(env, 'PACKETCAPTURE_METRICS_UI_ENABLED', false),
@@ -180,7 +198,8 @@ export function loadConfig(env = process.env) {
     logging: readLogging(env),
     brokers: readBrokers(env),
     bots: readBots(env),
-    metricsUi: readMetricsUi(env)
+    metricsUi: readMetricsUi(env),
+    botReplyQueue: readBotReplyQueue(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {
@@ -206,6 +225,13 @@ export function loadConfig(env = process.env) {
     if (broker.enabled && !broker.port) {
       throw new ConfigError(`Broker "${broker.id}" is enabled but has no port configured`);
     }
+  }
+
+  if (config.botReplyQueue.ttlMs < config.botReplyQueue.quietMs) {
+    throw new ConfigError(
+      'PACKETCAPTURE_BOT_REPLY_TTL_MS must be greater than or equal to PACKETCAPTURE_BOT_REPLY_QUIET_MS ' +
+        '(otherwise a queued reply would always expire before a quiet window could ever be observed)'
+    );
   }
 
   if (!validate(config)) {

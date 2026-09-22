@@ -357,6 +357,81 @@ test('exposes the packet hash (lowercase) as a {hash} template placeholder, e.g.
   assert.match(expectedHash, /^[0-9a-f]{16}$/);
 });
 
+function fakeReplyQueue() {
+  const enqueued = [];
+  return {
+    enqueued,
+    enqueue: (item) => enqueued.push(item)
+  };
+}
+
+test('enqueues a plain-data reply (not a callback) into the shared replyQueue rather than sending it immediately', async () => {
+  const radioManager = fakeRadioManager();
+  const replyQueue = fakeReplyQueue();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger(), replyQueue });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa', 'bb', 'cc'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(replyQueue.enqueued.length, 1);
+  const item = replyQueue.enqueued[0];
+  assert.equal(typeof item.send, 'undefined', 'the item must be plain data, not a callback');
+  assert.equal(item.botName, 'echo');
+  assert.equal(item.channel, '#echo');
+  assert.equal(item.trigger, '!echo');
+  assert.equal(item.sender, 'Jeymz');
+  assert.equal(item.hopCount, 3);
+  assert.equal(item.path, 'AA➡️BB➡️CC');
+  assert.match(item.hash, /^[0-9a-f]{16}$/);
+  assert.equal(radioManager.commandCalls.length, 0, 'must not send until something actually dispatches the item');
+
+  // Simulate the queue's dispatcher later deciding it's a quiet window
+  // (see reply-dispatcher.js - this is what it calls under the hood).
+  await bot.sendQueuedReply(item);
+  assert.equal(radioManager.commandCalls.length, 1);
+  assert.equal(radioManager.commandCalls[0].message, '🔁 @[Jeymz]! 3 hops via AA➡️BB➡️CC');
+  assert.equal(bot.getRepliesSent(), 1);
+});
+
+test('replies immediately when no replyQueue is injected (the default, immediate-send queue)', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls.length, 1);
+});
+
+test('records the bot-command event only once the queue actually sends it, not at enqueue time', async () => {
+  const radioManager = fakeRadioManager();
+  const replyQueue = fakeReplyQueue();
+  const recorded = [];
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger: silentLogger(),
+    replyQueue,
+    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+  assert.equal(recorded.length, 0, 'must not record before the queue sends');
+
+  const beforeMs = Date.now();
+  await bot.sendQueuedReply(replyQueue.enqueued[0]);
+
+  assert.equal(recorded.length, 1);
+  assert.ok(recorded[0].occurredAt >= beforeMs);
+});
+
 test('records a bot-command event via the injected hook on a successful reply', async () => {
   const radioManager = fakeRadioManager();
   const recorded = [];

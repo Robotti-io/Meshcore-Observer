@@ -1,6 +1,6 @@
 /**
- * Aggregates internal health state from the radio, MQTT, packet, and
- * channel bot services into one queryable snapshot (see
+ * Aggregates internal health state from the radio, MQTT, packet, channel
+ * bot, and reply-queue services into one queryable snapshot (see
  * docs/project_plan.spec.md Section 23, evolved from a single echoBot
  * object to a `bots` array to match the multi-bot architecture). This
  * module only builds the data; it stays HTTP-agnostic. The optional,
@@ -13,12 +13,15 @@
  * read fresh from its source at snapshot() time, so it can never drift out
  * of sync with reality.
  */
+const DEFAULT_REPLY_QUEUE_STATS = { size: 0, totalEnqueued: 0, totalSent: 0, totalExpired: 0, totalFailed: 0 };
+
 export class ServiceHealth {
   #now;
   #startedAt;
   #radioManager;
   #mqttManager;
   #bots;
+  #replyQueue;
 
   #radioLastConnectedAt = null;
   #radioReconnectCount = 0;
@@ -33,17 +36,28 @@ export class ServiceHealth {
   #mqttLastConnectedAt = new Map();
 
   /**
-   * @param {{radioManager: object, mqttManager: object, packetPipeline: object, bots: {name: string, enabled: boolean, bot: object}[], now?: () => Date}} options
+   * @param {{radioManager: object, mqttManager: object, packetPipeline: object, bots: {name: string, enabled: boolean, bot: object}[], replyQueue?: {getStats: () => object}, now?: () => Date}} options
    * `bots` is a list of every configured channel bot (see channel-bot.js),
    * each paired with whether it's enabled - a bot instance still exists but
    * is never started when disabled, so `enabled` can't be read off it.
+   * `replyQueue` (see reply-queue.js) defaults to an all-zero stats stub
+   * so callers that don't care about queue metrics (e.g. most tests)
+   * don't need to construct a real one.
    */
-  constructor({ radioManager, mqttManager, packetPipeline, bots, now = () => new Date() }) {
+  constructor({
+    radioManager,
+    mqttManager,
+    packetPipeline,
+    bots,
+    replyQueue = { getStats: () => DEFAULT_REPLY_QUEUE_STATS },
+    now = () => new Date()
+  }) {
     this.#now = now;
     this.#startedAt = now();
     this.#radioManager = radioManager;
     this.#mqttManager = mqttManager;
     this.#bots = bots;
+    this.#replyQueue = replyQueue;
 
     radioManager.on('radio.connected', () => {
       this.#radioLastConnectedAt = this.#now();
@@ -87,7 +101,8 @@ export class ServiceHealth {
         enabled,
         ready: bot.isReady(),
         repliesSent: bot.getRepliesSent()
-      }))
+      })),
+      replyQueue: this.#replyQueue.getStats()
     };
   }
 }

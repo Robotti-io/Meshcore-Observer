@@ -109,7 +109,8 @@ export function renderDashboardHtml() {
   section { margin-bottom: 1.75rem; }
   section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 0 0 0.6rem; }
   .section-note { font-size: 0.8rem; opacity: 0.7; margin: -0.4rem 0 0.6rem; }
-  #tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+  #tiles, .tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+  .tile-grid { margin-bottom: 1.25rem; }
   .tile { border: 1px solid color-mix(in srgb, canvastext 20%, transparent); border-radius: 8px; padding: 0.85rem 1rem; }
   .tile h2 { margin: 0 0 0.35rem; font-size: 0.8rem; }
   .tile p { margin: 0; font-size: 1.4rem; font-weight: 600; }
@@ -138,9 +139,10 @@ export function renderDashboardHtml() {
     .pie-wrap { width: 160px; height: 160px; }
   }
   .bot-command-block { margin-bottom: 1.5rem; }
-  .bot-command-block h3 { font-size: 0.85rem; margin: 0 0 0.5rem; }
+  .bot-command-block h3 { font-size: 0.85rem; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
   .bot-command-block .total-replies { font-size: 0.8rem; opacity: 0.75; margin: 0.5rem 0 0; }
   .bot-command-block .empty-note { font-size: 0.8rem; opacity: 0.7; }
+  .status-badge { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
 </style>
 </head>
 <body>
@@ -195,15 +197,13 @@ export function renderDashboardHtml() {
 
 <section>
   <h2>Channel bots</h2>
-  <table id="bots-table">
-    <thead><tr><th>Name</th><th>Enabled</th><th>Ready</th><th>Replies sent</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</section>
-
-<section>
-  <h2>Bot commands</h2>
-  <p class="section-note">Reflects the packet-activity range selected above.</p>
+  <p class="section-note">Reply queue is live; per-bot command counts reflect the packet-activity range selected above.</p>
+  <div id="reply-queue-tiles" class="tile-grid">
+    <div class="tile"><h2>Queued now</h2><p id="queue-size">0</p></div>
+    <div class="tile"><h2>Sent</h2><p id="queue-sent">0</p></div>
+    <div class="tile"><h2>Expired</h2><p id="queue-expired">0</p></div>
+    <div class="tile"><h2>Failed</h2><p id="queue-failed">0</p></div>
+  </div>
   <div id="bot-commands-container"></div>
 </section>
 
@@ -223,6 +223,10 @@ export function renderDashboardHtml() {
   let currentRange = DEFAULT_RANGE; // a RANGE_PRESETS value, or 'custom'
   let customStartMs = null;
   let customEndMs = null;
+  // Per-bot operational status (enabled/ready) - live, not range-aware, so
+  // it's kept separately from the range-queried command data and folded
+  // into each bot's card by applyBotStatusBadges().
+  const latestBotStatusByName = new Map();
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -277,17 +281,19 @@ export function renderDashboardHtml() {
       row.insertCell().textContent = formatTimestamp(state.lastConnectedAt);
     }
 
-    const botsBody = document.querySelector('#bots-table tbody');
-    botsBody.innerHTML = '';
+    // Enabled/ready is per-bot operational status, not a range-aware
+    // metric - stashed here so renderBotCommands() can fold a status
+    // badge into each bot's card instead of a separate table.
     for (const bot of snapshot.bots) {
-      const row = botsBody.insertRow();
-      row.insertCell().textContent = bot.name;
-      row.insertCell().textContent = bot.enabled ? 'Yes' : 'No';
-      const readyCell = row.insertCell();
-      readyCell.textContent = bot.ready ? 'Yes' : 'No';
-      readyCell.className = bot.ready ? 'ok' : 'bad';
-      row.insertCell().textContent = bot.repliesSent;
+      latestBotStatusByName.set(bot.name, { enabled: bot.enabled, ready: bot.ready });
     }
+    applyBotStatusBadges();
+
+    const q = snapshot.replyQueue;
+    document.getElementById('queue-size').textContent = q.size;
+    document.getElementById('queue-sent').textContent = q.totalSent;
+    document.getElementById('queue-expired').textContent = q.totalExpired;
+    document.getElementById('queue-failed').textContent = q.totalFailed;
   }
 
   function chartColors() {
@@ -443,14 +449,14 @@ export function renderDashboardHtml() {
     const block = document.createElement('div');
     block.className = 'bot-command-block';
     block.innerHTML =
-      '<h3></h3>' +
+      '<h3><span class="bot-name"></span><span class="status-badge"></span></h3>' +
       '<p class="empty-note" hidden></p>' +
       '<div class="split-layout">' +
       '<table><thead><tr><th></th><th>Command</th><th>Count</th></tr></thead><tbody></tbody></table>' +
       '<div class="pie-wrap"><canvas></canvas></div>' +
       '</div>' +
       '<p class="total-replies"></p>';
-    block.querySelector('h3').textContent = botName;
+    block.querySelector('.bot-name').textContent = botName;
     container.appendChild(block);
 
     let chart = null;
@@ -467,9 +473,29 @@ export function renderDashboardHtml() {
       });
     }
 
-    const entry = { block, chart, tbody: block.querySelector('tbody'), emptyNote: block.querySelector('.empty-note'), totalEl: block.querySelector('.total-replies') };
+    const entry = {
+      block,
+      chart,
+      statusBadge: block.querySelector('.status-badge'),
+      tbody: block.querySelector('tbody'),
+      emptyNote: block.querySelector('.empty-note'),
+      totalEl: block.querySelector('.total-replies')
+    };
     botCommandBlocks.set(botName, entry);
     return entry;
+  }
+
+  // Re-applies latestBotStatusByName to every bot card currently in the
+  // DOM - called whenever that map changes (renderSnapshot) and whenever
+  // a new card is built, so status is never stale in either direction.
+  function applyBotStatusBadges() {
+    botCommandBlocks.forEach((entry, botName) => {
+      const status = latestBotStatusByName.get(botName);
+      if (!status) return;
+      const label = !status.enabled ? 'Disabled' : status.ready ? 'Ready' : 'Not ready';
+      entry.statusBadge.textContent = label;
+      entry.statusBadge.className = 'status-badge ' + (status.enabled && status.ready ? 'ok' : 'bad');
+    });
   }
 
   function renderBotCommands(botCommandsResponse) {
@@ -498,6 +524,7 @@ export function renderDashboardHtml() {
         entry.chart.update('none');
       }
     }
+    applyBotStatusBadges();
   }
 
   function setConnectionState(state) {
