@@ -7,4 +7,4 @@ brokers.config.json
 coverage/
 .claude/
 data/
-/docs/Threat Model Review*.md
+docs/working_docs
