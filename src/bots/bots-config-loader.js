@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
-import { botsConfigSchema } from './schemas.js';
+import { botsConfigSchema, LOOKUP_RESPONSE_FIELDS } from './schemas.js';
 
 const validate = compileSchema(botsConfigSchema);
 
@@ -8,6 +8,37 @@ export class BotsConfigError extends Error {
   constructor(message) {
     super(message);
     this.name = 'BotsConfigError';
+  }
+}
+
+/**
+ * A command can't mix the two response shapes AJV's schema alone can't
+ * cleanly enforce (see schemas.js): a 'lookup' command needs all four
+ * outcome-specific templates and must not carry `response`/
+ * `overflowResponse`; an 'exact' command (the default - `kind` omitted)
+ * needs `response` and must not carry any lookup-only field.
+ */
+function validateCommandFieldsForKind(command, botName, filePath) {
+  const isLookup = command.kind === 'lookup';
+  const context = `command "${command.trigger}" for bot "${botName}" in "${filePath}"`;
+
+  if (isLookup) {
+    const missing = LOOKUP_RESPONSE_FIELDS.filter((field) => !(field in command));
+    if (missing.length > 0) {
+      throw new BotsConfigError(`${context} is kind "lookup" but is missing ${missing.join(', ')}`);
+    }
+    if ('response' in command || 'overflowResponse' in command) {
+      throw new BotsConfigError(`${context} is kind "lookup" and must not have response/overflowResponse`);
+    }
+    return;
+  }
+
+  if (!('response' in command)) {
+    throw new BotsConfigError(`${context} is missing a response template`);
+  }
+  const extraLookupFields = LOOKUP_RESPONSE_FIELDS.filter((field) => field in command);
+  if (extraLookupFields.length > 0) {
+    throw new BotsConfigError(`${context} is not kind "lookup" but has ${extraLookupFields.join(', ')}`);
   }
 }
 
@@ -72,6 +103,8 @@ export function loadBotsConfig(filePath) {
         throw new BotsConfigError(`Duplicate trigger "${command.trigger}" for bot "${bot.name}" in "${filePath}"`);
       }
       triggers.add(command.trigger);
+
+      validateCommandFieldsForKind(command, bot.name, filePath);
     }
   }
 

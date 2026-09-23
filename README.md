@@ -126,9 +126,17 @@ response-template commands:
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link" },
+      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup" },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
-      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" }
+      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
+      {
+        "trigger": "!lookup",
+        "kind": "lookup",
+        "foundResponse": "📡 @[{sender}]! {query} = {name}",
+        "notFoundResponse": "❓ @[{sender}]! no repeater heard with prefix {query} yet",
+        "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
+        "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
+      }
     ]
   }
 ]
@@ -152,6 +160,39 @@ with the same placeholders available. This is the place to swap a long
 packet link shown above. Without an `overflowResponse`, a command falls
 back to the old behavior: the same `response` re-rendered with `{path}`
 emptied out, then hard truncation as a last resort if it's still too long.
+
+#### Repeater name lookup (`kind: "lookup"`)
+
+A command can opt into argument parsing instead of exact matching by
+setting `"kind": "lookup"`. This observer keeps an in-memory record of
+every REPEATER whose advertised name it has verified (its ADVERT's
+signature checks out against its own claimed public key - an unverified
+advert never contributes a name), keyed by full public key. A `!lookup`
+command resolves its argument as a hex prefix of that key:
+
+```text
+!lookup E85C   -> the repeater whose public key starts E85C, if exactly one does
+```
+
+A `"lookup"` command needs four response templates instead of one -
+`foundResponse`, `notFoundResponse`, `ambiguousResponse`, and
+`invalidResponse` - and must not set `response`/`overflowResponse` (see the
+`!lookup` example above). They're chosen by outcome:
+
+- **found** - exactly one repeater's key starts with the query. `{name}`
+  is available alongside `{query}`.
+- **not_found** - a valid query, but no matching repeater has been heard
+  from (yet - this only knows about repeaters, and only after a real
+  restart-surviving advert has been heard and verified).
+- **ambiguous** - more than one repeater's key starts with the query.
+  `{matchCount}` is the total, and `{name}` is the most recently heard of
+  the matches - a useful guess while asking for a longer, more specific
+  prefix.
+- **invalid** - the query is missing, shorter than 1 byte (2 hex
+  characters), or contains a non-hex character.
+
+A query longer than 1 byte doesn't need to stay byte-aligned - `!lookup
+E85` (2.5 bytes) works the same as `!lookup E85C`.
 
 #### Reply queue (mesh congestion)
 

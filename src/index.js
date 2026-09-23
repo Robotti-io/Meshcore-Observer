@@ -11,6 +11,7 @@ import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
 import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
+import { NodeRegistry } from './nodes/node-registry.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import packageInfo from '../package.json' with { type: 'json' };
@@ -81,6 +82,7 @@ async function main() {
   // only reads from it later (once a quiet window is actually observed),
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
+  const nodeRegistry = new NodeRegistry({ logger });
   const replyQueue = new ReplyQueue({
     quietMs: config.botReplyQueue.quietMs,
     ttlMs: config.botReplyQueue.ttlMs,
@@ -176,7 +178,7 @@ async function main() {
   radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
   const bots = config.bots.map((botConfig) => {
-    const bot = new ChannelBot({ radioManager, botConfig, logger, replyQueue });
+    const bot = new ChannelBot({ radioManager, botConfig, logger, replyQueue, nodeRegistry });
     botsByName.set(botConfig.name, bot);
     return { name: botConfig.name, enabled: botConfig.enabled, bot };
   });
@@ -203,6 +205,17 @@ async function main() {
       .catch((err) => {
         logger.warn('services.mqtt', 'failed to publish packet', { error: err.message });
       });
+  });
+  // Independent of the MQTT-publish listener above: an ADVERT with a
+  // verified signature and a name updates the node registry that
+  // ChannelBot's `!lookup`-kind commands read from (see
+  // docs/plans/feat-bot_command_to_lookup_repeater_name.md). Fire-and-
+  // forget with a caught/logged rejection, matching the publish listener's
+  // own pattern - a registry failure must never affect packet capture/MQTT.
+  packetPipeline.on('packet', (packet) => {
+    nodeRegistry.recordFromDecodedPacket(packet).catch((err) => {
+      logger.warn('services.nodeRegistry', 'failed to process a possible advert', { error: err.message });
+    });
   });
 
   const healthLogTimer = setInterval(() => {

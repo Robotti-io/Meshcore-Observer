@@ -17,9 +17,17 @@
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link" },
+      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup" },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
-      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" }
+      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
+      {
+        "trigger": "!lookup",
+        "kind": "lookup",
+        "foundResponse": "📡 @[{sender}]! {query} = {name}",
+        "notFoundResponse": "❓ @[{sender}]! no repeater heard with prefix {query} yet",
+        "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
+        "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
+      }
     ]
   }
 ]
