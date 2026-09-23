@@ -9,6 +9,24 @@ function openStore() {
   return new MetricsStore({ dbPath: ':memory:' });
 }
 
+function baseSample(overrides = {}) {
+  return {
+    sampleAt: 1_000,
+    intervalMs: 10_000,
+    packetsReceived: 1,
+    packetsDecoded: 1,
+    radioConnected: true,
+    brokersConnected: 1,
+    brokersTotal: 1,
+    botsReady: 0,
+    botsTotal: 0,
+    replyQueueSize: 0,
+    packetsByType: {},
+    brokerDeliveries: {},
+    ...overrides
+  };
+}
+
 test('resolveBucketWidthMs picks the sample interval when the range easily fits within maxBuckets', () => {
   const width = resolveBucketWidthMs({ rangeMs: 60_000, maxBuckets: 180, sampleIntervalMs: 10_000 });
   assert.equal(width, 10_000);
@@ -40,18 +58,7 @@ test('resolveBucketWidthMs never returns a width smaller than the sample interva
 
 test('records a packet sample and reads it back via queryPacketTypeTotals', () => {
   const store = openStore();
-  store.recordPacketSample({
-    sampleAt: 1_000,
-    intervalMs: 10_000,
-    packetsReceived: 5,
-    packetsPublished: 4,
-    radioConnected: true,
-    brokersConnected: 2,
-    brokersTotal: 2,
-    botsReady: 1,
-    botsTotal: 1,
-    packetsByType: { advert: 3, txtMsg: 1 }
-  });
+  store.recordPacketSample(baseSample({ packetsReceived: 5, packetsDecoded: 4, packetsByType: { advert: 3, txtMsg: 1 } }));
 
   const totals = store.queryPacketTypeTotals({ start: 0, end: 100_000 });
   assert.deepEqual(
@@ -66,30 +73,8 @@ test('records a packet sample and reads it back via queryPacketTypeTotals', () =
 
 test('queryPacketTypeTotals excludes samples outside the requested window', () => {
   const store = openStore();
-  store.recordPacketSample({
-    sampleAt: 1_000,
-    intervalMs: 10_000,
-    packetsReceived: 1,
-    packetsPublished: 1,
-    radioConnected: true,
-    brokersConnected: 1,
-    brokersTotal: 1,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: { advert: 1 }
-  });
-  store.recordPacketSample({
-    sampleAt: 500_000,
-    intervalMs: 10_000,
-    packetsReceived: 1,
-    packetsPublished: 1,
-    radioConnected: true,
-    brokersConnected: 1,
-    brokersTotal: 1,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: { advert: 9 }
-  });
+  store.recordPacketSample(baseSample({ sampleAt: 1_000, packetsByType: { advert: 1 } }));
+  store.recordPacketSample(baseSample({ sampleAt: 500_000, packetsByType: { advert: 9 } }));
 
   const totals = store.queryPacketTypeTotals({ start: 0, end: 100_000 });
   assert.deepEqual(totals, [{ packetTypeBucket: 'advert', total: 1 }]);
@@ -101,18 +86,9 @@ test('queryPacketHistory groups samples into backend-computed buckets bounded by
   const sampleIntervalMs = 10_000;
 
   for (let i = 0; i < 20; i += 1) {
-    store.recordPacketSample({
-      sampleAt: i * sampleIntervalMs,
-      intervalMs: sampleIntervalMs,
-      packetsReceived: 1,
-      packetsPublished: 1,
-      radioConnected: true,
-      brokersConnected: 1,
-      brokersTotal: 1,
-      botsReady: 0,
-      botsTotal: 0,
-      packetsByType: { advert: 1 }
-    });
+    store.recordPacketSample(
+      baseSample({ sampleAt: i * sampleIntervalMs, intervalMs: sampleIntervalMs, packetsByType: { advert: 1 } })
+    );
   }
 
   const buckets = store.queryPacketHistory({
@@ -131,24 +107,13 @@ test('queryPacketHistory groups samples into backend-computed buckets bounded by
   store.close();
 });
 
-test('queryPacketHistory buckets include received/published sums even for samples with no decoded packet types', () => {
+test('queryPacketHistory buckets include received/decoded sums even for samples with no decoded packet types', () => {
   const store = openStore();
   const sampleIntervalMs = 10_000;
 
   // Every raw packet received, but none successfully decoded/published -
   // this sample has no metrics_sample_packet_types rows at all.
-  store.recordPacketSample({
-    sampleAt: 0,
-    intervalMs: sampleIntervalMs,
-    packetsReceived: 7,
-    packetsPublished: 0,
-    radioConnected: true,
-    brokersConnected: 1,
-    brokersTotal: 1,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: {}
-  });
+  store.recordPacketSample(baseSample({ sampleAt: 0, intervalMs: sampleIntervalMs, packetsReceived: 7, packetsDecoded: 0 }));
 
   const [bucket] = store.queryPacketHistory({
     start: 0,
@@ -158,24 +123,88 @@ test('queryPacketHistory buckets include received/published sums even for sample
   });
 
   assert.equal(bucket.packetsReceived, 7);
-  assert.equal(bucket.packetsPublished, 0);
+  assert.equal(bucket.packetsDecoded, 0);
   assert.deepEqual(bucket.countsByType, {});
   store.close();
 });
 
-test('records and queries bot command events, scoped by bot name and time window', () => {
+test('records a broker-delivery breakdown and reads it back via queryBrokerDeliveryTotals', () => {
   const store = openStore();
-  store.recordBotCommand({ botName: 'echo', trigger: '!echo', occurredAt: 1_000 });
-  store.recordBotCommand({ botName: 'echo', trigger: '!echo', occurredAt: 2_000 });
-  store.recordBotCommand({ botName: 'echo', trigger: '!test', occurredAt: 3_000 });
-  store.recordBotCommand({ botName: 'weather', trigger: '!wx', occurredAt: 4_000 });
-  store.recordBotCommand({ botName: 'echo', trigger: '!echo', occurredAt: 999_999 });
+  store.recordPacketSample(
+    baseSample({ sampleAt: 1_000, brokerDeliveries: { okimesh: { sent: 3, skipped: 0, failed: 1 }, letsmesh: { sent: 2, skipped: 1, failed: 0 } } })
+  );
+
+  const totals = store.queryBrokerDeliveryTotals({ start: 0, end: 100_000 });
+  assert.deepEqual(totals, [
+    { brokerId: 'letsmesh', outcome: 'sent', total: 2 },
+    { brokerId: 'letsmesh', outcome: 'skipped', total: 1 },
+    { brokerId: 'okimesh', outcome: 'failed', total: 1 },
+    { brokerId: 'okimesh', outcome: 'sent', total: 3 }
+  ]);
+  store.close();
+});
+
+test('queryBrokerDeliveryTotals omits zero-count (broker, outcome) pairs rather than storing them', () => {
+  const store = openStore();
+  store.recordPacketSample(baseSample({ brokerDeliveries: { okimesh: { sent: 1, skipped: 0, failed: 0 } } }));
+
+  const totals = store.queryBrokerDeliveryTotals({ start: 0, end: 100_000 });
+  assert.deepEqual(totals, [{ brokerId: 'okimesh', outcome: 'sent', total: 1 }]);
+  store.close();
+});
+
+test('records and queries reply events, scoped by bot name/outcome and time window', () => {
+  const store = openStore();
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'aa', outcome: 'sent', occurredAt: 1_000, queuedMs: 10 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'bb', outcome: 'sent', occurredAt: 2_000, queuedMs: 12 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!test', sender: 'Jeymz', hash: 'cc', outcome: 'sent', occurredAt: 3_000, queuedMs: 8 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'dd', outcome: 'failed', occurredAt: 3_500, queuedMs: 20 });
+  store.recordBotReplyEvent({ botName: 'weather', trigger: '!wx', sender: 'Robotti', hash: 'ee', outcome: 'sent', occurredAt: 4_000, queuedMs: 5 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'ff', outcome: 'sent', occurredAt: 999_999, queuedMs: 9 });
 
   const counts = store.queryBotCommandCounts({ botName: 'echo', start: 0, end: 10_000 });
   assert.deepEqual(counts, [
     { trigger: '!echo', count: 2 },
     { trigger: '!test', count: 1 }
   ]);
+
+  const outcomeTotals = store.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 });
+  assert.deepEqual(outcomeTotals, [
+    { botName: 'echo', outcome: 'failed', total: 1 },
+    { botName: 'echo', outcome: 'sent', total: 3 },
+    { botName: 'weather', outcome: 'sent', total: 1 }
+  ]);
+  store.close();
+});
+
+test('recordBotReplyEvent stores a null sender/hash/queuedMs when omitted', () => {
+  const store = openStore();
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 1_000 });
+
+  const outcomeTotals = store.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 });
+  assert.deepEqual(outcomeTotals, [{ botName: 'echo', outcome: 'expired', total: 1 }]);
+  store.close();
+});
+
+test('queryReplyOutcomeTotals sums every outcome across every bot, within the requested window', () => {
+  const store = openStore();
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 1_000 });
+  store.recordBotReplyEvent({ botName: 'weather', trigger: '!wx', outcome: 'sent', occurredAt: 2_000 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'failed', occurredAt: 3_000 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 4_000 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 5_000 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'cancelled', occurredAt: 6_000 });
+  // Outside the queried window below - must not be counted.
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 999_999_999 });
+
+  assert.deepEqual(store.queryReplyOutcomeTotals({ start: 0, end: 10_000 }), { sent: 2, failed: 1, expired: 2, cancelled: 1 });
+  store.close();
+});
+
+test('queryReplyOutcomeTotals returns all-zero counts when nothing was recorded in the window', () => {
+  const store = openStore();
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 999_999_999 });
+  assert.deepEqual(store.queryReplyOutcomeTotals({ start: 0, end: 10_000 }), { sent: 0, failed: 0, expired: 0, cancelled: 0 });
   store.close();
 });
 
@@ -183,69 +212,28 @@ test('getEarliestSampleAt returns null with no data and the minimum sample_at on
   const store = openStore();
   assert.equal(store.getEarliestSampleAt(), null);
 
-  store.recordPacketSample({
-    sampleAt: 5_000,
-    intervalMs: 10_000,
-    packetsReceived: 0,
-    packetsPublished: 0,
-    radioConnected: true,
-    brokersConnected: 0,
-    brokersTotal: 0,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: {}
-  });
-  store.recordPacketSample({
-    sampleAt: 1_000,
-    intervalMs: 10_000,
-    packetsReceived: 0,
-    packetsPublished: 0,
-    radioConnected: true,
-    brokersConnected: 0,
-    brokersTotal: 0,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: {}
-  });
+  store.recordPacketSample(baseSample({ sampleAt: 5_000, packetsReceived: 0, packetsDecoded: 0, brokersConnected: 0, brokersTotal: 0 }));
+  store.recordPacketSample(baseSample({ sampleAt: 1_000, packetsReceived: 0, packetsDecoded: 0, brokersConnected: 0, brokersTotal: 0 }));
 
   assert.equal(store.getEarliestSampleAt(), 1_000);
   store.close();
 });
 
-test('pruneOlderThan removes samples, their packet-type rows, and bot command events at or before the cutoff', () => {
+test('pruneOlderThan removes samples, their child rows, and bot reply events at or before the cutoff', () => {
   const store = openStore();
-  store.recordPacketSample({
-    sampleAt: 1_000,
-    intervalMs: 10_000,
-    packetsReceived: 1,
-    packetsPublished: 1,
-    radioConnected: true,
-    brokersConnected: 1,
-    brokersTotal: 1,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: { advert: 1 }
-  });
-  store.recordPacketSample({
-    sampleAt: 50_000,
-    intervalMs: 10_000,
-    packetsReceived: 1,
-    packetsPublished: 1,
-    radioConnected: true,
-    brokersConnected: 1,
-    brokersTotal: 1,
-    botsReady: 0,
-    botsTotal: 0,
-    packetsByType: { advert: 1 }
-  });
-  store.recordBotCommand({ botName: 'echo', trigger: '!echo', occurredAt: 1_000 });
-  store.recordBotCommand({ botName: 'echo', trigger: '!echo', occurredAt: 50_000 });
+  store.recordPacketSample(baseSample({ sampleAt: 1_000, packetsByType: { advert: 1 }, brokerDeliveries: { okimesh: { sent: 1, skipped: 0, failed: 0 } } }));
+  store.recordPacketSample(baseSample({ sampleAt: 50_000, packetsByType: { advert: 1 }, brokerDeliveries: { okimesh: { sent: 1, skipped: 0, failed: 0 } } }));
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 1_000 });
+  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 50_000 });
 
   store.pruneOlderThan(10_000);
 
   assert.equal(store.getEarliestSampleAt(), 50_000);
   assert.deepEqual(store.queryPacketTypeTotals({ start: 0, end: 100_000 }), [
     { packetTypeBucket: 'advert', total: 1 }
+  ]);
+  assert.deepEqual(store.queryBrokerDeliveryTotals({ start: 0, end: 100_000 }), [
+    { brokerId: 'okimesh', outcome: 'sent', total: 1 }
   ]);
   assert.deepEqual(store.queryBotCommandCounts({ botName: 'echo', start: 0, end: 100_000 }), [
     { trigger: '!echo', count: 1 }
@@ -259,18 +247,7 @@ test('creates the db file\'s parent directory, and reopening it later re-runs mi
 
   try {
     const first = new MetricsStore({ dbPath });
-    first.recordPacketSample({
-      sampleAt: 1_000,
-      intervalMs: 10_000,
-      packetsReceived: 1,
-      packetsPublished: 1,
-      radioConnected: true,
-      brokersConnected: 1,
-      brokersTotal: 1,
-      botsReady: 0,
-      botsTotal: 0,
-      packetsByType: { advert: 1 }
-    });
+    first.recordPacketSample(baseSample({ packetsByType: { advert: 1 } }));
     first.close();
 
     const second = new MetricsStore({ dbPath });

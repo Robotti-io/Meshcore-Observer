@@ -1,8 +1,10 @@
+import { botConfigSchema } from '../bots/schemas.js';
+
 export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue'],
   properties: {
     radio: {
       type: 'object',
@@ -43,6 +45,15 @@ export const configSchema = {
       required: ['level'],
       properties: {
         level: { enum: ['debug', 'info', 'warn', 'error'] }
+      }
+    },
+    botReplyQueue: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['quietMs', 'ttlMs'],
+      properties: {
+        quietMs: { type: 'integer', minimum: 0 },
+        ttlMs: { type: 'integer', minimum: 0 }
       }
     },
     metricsUi: {
@@ -114,38 +125,15 @@ export const configSchema = {
         }
       }
     },
-    // Shape mirrors src/bots/schemas.js's botsConfigSchema (kept as a
-    // separate inline definition rather than an imported/shared schema
-    // object, since both get compiled on the same shared AJV instance and
-    // a shared object carrying the same $id twice would collide).
+    // The same object src/bots/schemas.js's botsConfigSchema.items uses -
+    // not a hand-copied mirror - so the two can never drift apart. Safe to
+    // share directly (rather than the whole botsConfigSchema) because this
+    // object carries no `$id` of its own to collide with; only the array
+    // wrapper around it does, and that wrapper is compiled standalone in
+    // bots-config-loader.js, never nested inside this schema.
     bots: {
       type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['name', 'channel', 'enabled', 'minHops', 'commands'],
-        properties: {
-          name: { type: 'string', minLength: 1 },
-          channel: { type: 'string', minLength: 1 },
-          enabled: { type: 'boolean' },
-          minHops: { type: 'integer', minimum: 0 },
-          maxMessageBytes: { type: 'integer', minimum: 1 },
-          commands: {
-            type: 'array',
-            minItems: 1,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              required: ['trigger', 'response'],
-              properties: {
-                trigger: { type: 'string', minLength: 1 },
-                response: { type: 'string', minLength: 1 },
-                overflowResponse: { type: 'string', minLength: 1 }
-              }
-            }
-          }
-        }
-      }
+      items: botConfigSchema
     }
   }
 };

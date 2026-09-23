@@ -1,4 +1,7 @@
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { renderDashboardHtml } from './dashboard-page.js';
 import { PACKET_TYPE_BUCKETS } from './packet-type-buckets.js';
 import { parseRangeQuery, validateMetricsHistoryQuery, validateRangeOnlyQuery } from './schemas.js';
@@ -8,6 +11,27 @@ import { bucketBotCommandCounts } from './bot-command-buckets.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+const WEB_DIR = dirname(fileURLToPath(import.meta.url));
+const TEXT_JS = 'text/javascript; charset=utf-8';
+
+/**
+ * The dashboard's browser-side files, served as-is (no bundling/transform)
+ * so a `<script type="module">` can import them by plain relative URL - see
+ * dashboard-page.js's doc comment. Read once at module load, not per
+ * request: these files never change while the process is running.
+ * packet-type-buckets.js is the actual server module (not a copy), so the
+ * browser's packet-type/color mapping can never drift from what the server
+ * buckets samples under.
+ */
+const STATIC_ASSETS = new Map(
+  [
+    { route: '/dashboard.css', file: join(WEB_DIR, 'client', 'dashboard.css'), contentType: 'text/css; charset=utf-8' },
+    { route: '/dashboard.js', file: join(WEB_DIR, 'client', 'dashboard.js'), contentType: TEXT_JS },
+    { route: '/dashboard-logic.js', file: join(WEB_DIR, 'client', 'dashboard-logic.js'), contentType: TEXT_JS },
+    { route: '/packet-type-buckets.js', file: join(WEB_DIR, 'packet-type-buckets.js'), contentType: TEXT_JS }
+  ].map(({ route, file, contentType }) => [route, { body: readFileSync(file, 'utf8'), contentType }])
+);
 
 /**
  * Serves the metrics dashboard and its data over plain node:http - no
@@ -51,7 +75,12 @@ export class MetricsServer {
     this.#logger = logger;
   }
 
-  /** @returns {Promise<void>} resolves once the server is listening. */
+  /**
+   * @returns {Promise<void>} resolves once the server is listening, or
+   * rejects (e.g. `EADDRINUSE`) if binding fails. On rejection, all state is
+   * cleared so the metrics UI is left fully stopped and `start()` can be
+   * retried; the sample timer is not started until listening succeeds.
+   */
   start() {
     if (this.#server) {
       return Promise.resolve();
@@ -63,14 +92,31 @@ export class MetricsServer {
       });
     }
 
-    this.#sampleTimer = setInterval(() => this.#tick(), this.#sampleIntervalMs);
-    this.#sampleTimer.unref();
+    const server = createServer((req, res) => this.#handleRequest(req, res));
+    this.#server = server;
 
-    this.#server = createServer((req, res) => this.#handleRequest(req, res));
+    return new Promise((resolve, reject) => {
+      const onStartupError = (err) => {
+        this.#server = null;
+        this.#logger.warn('services.metricsUi', 'metrics UI failed to start', {
+          host: this.#host,
+          port: this.#port,
+          error: err.message
+        });
+        reject(err);
+      };
 
-    return new Promise((resolve) => {
-      this.#server.listen(this.#port, this.#host, () => {
-        const address = this.#server.address();
+      server.once('error', onStartupError);
+      server.listen(this.#port, this.#host, () => {
+        server.removeListener('error', onStartupError);
+        server.on('error', (err) => {
+          this.#logger.warn('services.metricsUi', 'metrics UI server error', { error: err.message });
+        });
+
+        this.#sampleTimer = setInterval(() => this.#tick(), this.#sampleIntervalMs);
+        this.#sampleTimer.unref();
+
+        const address = server.address();
         this.#logger.info('services.metricsUi', 'metrics UI listening', { host: address.address, port: address.port });
         resolve();
       });
@@ -112,7 +158,16 @@ export class MetricsServer {
 
     const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
     for (const res of this.#sseClients) {
-      res.write(payload);
+      try {
+        res.write(payload);
+      } catch (err) {
+        // A client's connection can go bad between ticks before its own
+        // 'close' event fires (see #handleStream) - isolate that here so
+        // one broken SSE client can't stop the broadcast to every other
+        // one, or stop future ticks from persisting/pruning samples.
+        this.#logger.warn('services.metricsUi', 'failed to write to an SSE client, removing it', { error: err.message });
+        this.#sseClients.delete(res);
+      }
     }
   }
 
@@ -148,7 +203,47 @@ export class MetricsServer {
     }
   }
 
+  /**
+   * The dashboard is optional and unauthenticated by design (see the class
+   * doc comment) - it must never be capable of taking down packet capture
+   * or MQTT publication just because a request handler hit a bug or the
+   * metrics store misbehaved. Every route is dispatched through here so a
+   * synchronous throw anywhere below (a corrupt database, an unexpected
+   * ServiceHealth.snapshot() error, etc.) is caught, logged with enough
+   * detail to diagnose, and turned into a generic 500 - never leaked into
+   * the response body, and never left to crash the server's request
+   * callback. `#dispatchRequest` and everything it calls is synchronous
+   * (node:sqlite's DatabaseSync API included), so a plain try/catch here
+   * covers the whole request.
+   */
   #handleRequest(req, res) {
+    try {
+      this.#dispatchRequest(req, res);
+    } catch (err) {
+      this.#logger.warn('services.metricsUi', 'unexpected error handling a dashboard request', {
+        method: req.method,
+        url: req.url,
+        error: err.message
+      });
+      try {
+        // If headers already went out (the throw happened mid-response,
+        // e.g. inside #handleStream after writeHead), there's no clean
+        // response left to send - just end the connection rather than
+        // leaving the client hanging.
+        if (res.headersSent) {
+          res.end();
+        } else {
+          this.#sendJson(res, 500, { error: 'internal error' });
+        }
+      } catch {
+        // Reporting the failure failed too (e.g. the socket is already
+        // gone) - nothing more can be done for this response, and this
+        // must not escape to crash the request-handling callback itself.
+      }
+    }
+  }
+
+  #dispatchRequest(req, res) {
     if (req.method !== 'GET') {
       this.#sendJson(res, 405, { error: 'method not allowed' });
       return;
@@ -159,6 +254,13 @@ export class MetricsServer {
     if (pathname === '/') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderDashboardHtml());
+      return;
+    }
+
+    const asset = STATIC_ASSETS.get(pathname);
+    if (asset) {
+      res.writeHead(200, { 'Content-Type': asset.contentType });
+      res.end(asset.body);
       return;
     }
 
@@ -174,6 +276,11 @@ export class MetricsServer {
 
     if (pathname === '/api/metrics/packet-types') {
       this.#handlePacketTypes(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/reply-queue') {
+      this.#handleReplyQueue(res, searchParams);
       return;
     }
 
@@ -249,6 +356,23 @@ export class MetricsServer {
   }
 
   /**
+   * Reply-lifecycle outcome totals (sent/failed/expired/cancelled) summed
+   * across every bot, for the requested range - unlike queue depth (a live
+   * gauge, served via /api/metrics), these are historical counts and so
+   * follow the same duration-selector pattern as packet-types/history.
+   */
+  #handleReplyQueue(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateRangeOnlyQuery);
+    if (!resolved) {
+      return;
+    }
+    const { window } = resolved;
+
+    const totals = this.#metricsStore.queryReplyOutcomeTotals(window);
+    this.#sendJson(res, 200, { start: window.start, end: window.end, totals });
+  }
+
+  /**
    * Per configured bot, a stably-ordered (config order, not usage rank -
    * see bot-command-buckets.js) trigger breakdown for the requested range,
    * plus that bot's total replies sent in range. Every currently-configured
@@ -288,6 +412,15 @@ export class MetricsServer {
     res.write(`data: ${JSON.stringify(this.#serviceHealth.snapshot())}\n\n`);
     this.#sseClients.add(res);
     res.on('close', () => {
+      this.#sseClients.delete(res);
+    });
+    // A write failure on a broken connection typically surfaces as an
+    // 'error' event (asynchronously), not a thrown exception - the
+    // try/catch around #tick()'s broadcast loop covers the rarer
+    // synchronous-throw case; this covers the common one. Without this,
+    // an unremoved dead client would keep failing every future tick.
+    res.on('error', (err) => {
+      this.#logger.warn('services.metricsUi', 'SSE client connection error, removing it', { error: err.message });
       this.#sseClients.delete(res);
     });
   }

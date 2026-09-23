@@ -9,7 +9,8 @@ commands on public hashtag channels.
 
 ## Requirements
 
-- Node.js 22.12 or newer
+- Node.js 22.13.0 or newer (required for the optional metrics dashboard's
+  `node:sqlite` persistence; see `engines` in `package.json`)
 - A Heltec V3 (or compatible) radio running MeshCore Companion firmware,
   reachable over USB serial (Windows: a COM port) or a TCP bridge
 - Windows is the primary supported runtime today; the radio transport is
@@ -54,28 +55,39 @@ See `.env.example` for the full, commented list. The essentials:
 
 #### MQTT brokers
 
-Configure any number of brokers using numbered slots (`MQTT1`, `MQTT2`, ...).
-Each broker connects and reconnects independently - one being down never
-affects the others.
+Configure any number of brokers in a JSON file, `PACKETCAPTURE_BROKERS_CONFIG_FILE`
+(default `brokers.config.json`; see `brokers.config.example.json`). Each
+broker connects and reconnects independently - one being down never affects
+the others.
 
-```sh
-PACKETCAPTURE_MQTT1_ID=okimesh
-PACKETCAPTURE_MQTT1_ENABLED=true
-PACKETCAPTURE_MQTT1_HOST=mqtt1.okimesh.org
-PACKETCAPTURE_MQTT1_PORT=1883
-PACKETCAPTURE_MQTT1_TRANSPORT=tcp
-PACKETCAPTURE_MQTT1_TLS=false
-PACKETCAPTURE_MQTT1_AUTH_METHOD=none
+```json
+[
+  {
+    "id": "okimesh",
+    "enabled": true,
+    "host": "mqtt1.okimesh.org",
+    "port": 1883,
+    "transport": "tcp",
+    "tls": false,
+    "auth": { "method": "none" }
+  }
+]
 ```
 
-`PACKETCAPTURE_MQTTn_AUTH_METHOD` is one of:
+`auth.method` is one of:
 
 - **`none`** - anonymous (e.g. OKI Mesh)
-- **`password`** - static `..._USERNAME` / `..._PASSWORD`
+- **`password`** - a static `auth.username` (in the file) and password. The
+  password itself is never stored in the file - set it as
+  `PACKETCAPTURE_MQTT<n>_PASSWORD`, where `<n>` is that broker's **1-based
+  position in the array** (the first entry is `MQTT1`, the second `MQTT2`,
+  and so on - reordering the array changes which entry a given
+  `..._PASSWORD` variable belongs to).
 - **`token`** - a JWT signed **on the radio itself** (the private key never
   leaves the device) and refreshed automatically before it expires. Used
-  for LetsMesh. Set `..._TOKEN_AUDIENCE` and optionally `..._TOKEN_TTL`
-  (seconds, default 24h).
+  for LetsMesh. Set `auth.audience` (required) and optionally
+  `auth.tokenTtlSeconds` (default 24h) in the file - no environment
+  variable needed, since there's no static secret to keep out of it.
 
 Published topics (compatible with the existing MeshCore MQTT convention):
 
@@ -141,6 +153,93 @@ packet link shown above. Without an `overflowResponse`, a command falls
 back to the old behavior: the same `response` re-rendered with `{path}`
 emptied out, then hard truncation as a last resort if it's still too long.
 
+#### Reply queue (mesh congestion)
+
+Every bot reply goes through one shared, FIFO queue (one per process, not
+one per bot - "the local frequency" is a single physical radio, so
+ordering and congestion-avoidance only make sense as one shared
+resource) rather than being sent the instant a trigger matches. A queued
+reply is held until the shared RF channel has been quiet - no heard
+packets from anyone, on any channel - for a configured duration, and is
+dropped unsent if it waits longer than a configured TTL without ever
+seeing that quiet window:
+
+| Variable | Purpose |
+| --- | --- |
+| `PACKETCAPTURE_BOT_REPLY_QUIET_MS` | Required silence before a queued reply is sent; default `5000` |
+| `PACKETCAPTURE_BOT_REPLY_TTL_MS` | Drop a queued reply unsent after waiting this long; default `60000` |
+
+There's deliberately no size cap on the queue - sending a reply also
+counts as channel activity, so the next queued item always needs its own
+fresh quiet window afterward. That self-resetting makes the drain rate
+inherently bounded to roughly one reply per quiet period no matter how
+many are queued, so a burst of triggers can only make the queue back up
+(bounded by the TTL), never burst replies out.
+
+Every way a queued reply is resolved - sent, failed, expired (dropped
+after waiting past the TTL), or cancelled (dropped, unsent, on shutdown
+before it could be sent) - is persisted when the metrics UI is enabled,
+per bot and per trigger, not just successful sends. The dashboard's
+sent/expired/failed tiles read the sum of this across every bot for
+whichever duration is currently selected (same selector that drives the
+packet-activity chart), so - unlike queue depth ("Queued now"), which is
+genuinely live, in-process state and always shows right now regardless of
+the selected duration - these survive a restart and reflect real history,
+not just what happened since the process last started. The per-bot/
+per-trigger breakdown isn't surfaced on the dashboard yet; it's captured
+now so a future "queue health" view doesn't need a schema change to add it.
+
+**Why quiet-window detection, and why not just retry if a reply doesn't
+land:** MeshCore's `GRP_TXT` (channel/group) messages carry **no
+protocol-level acknowledgement** - only direct 1:1 messages get a
+delivery-confirming `SendConfirmed` push tied back to a specific send
+(see [docs.meshcore.io/companion_protocol](https://docs.meshcore.io/companion_protocol/)).
+A broadcast to a whole channel has no single destination to ACK from, so
+there is nothing to retry against; `sendChannelTextMessage()`'s success
+response only means "the local radio accepted the command for
+transmission," never "someone received it." This is a MeshCore protocol
+property, not a gap in this app - and there's no channel-energy/CAD
+reading exposed to this companion app either, so "quiet" is inferred
+from application-level RF activity (heard `radio.packet` events), not a
+direct radio readout.
+
+What this queue *does* help with: a trigger message is itself just been
+flood-relayed, and nearby repeaters can still be actively
+re-transmitting/settling that same flood for several seconds afterward.
+Replying while that's still happening collides with it. A 5-second quiet
+requirement (found through field testing on a real deployment; a flat
+500ms-2.5s pre-reply delay - tried first - was measurably worse) gives
+that propagation room to settle before this bot's reply adds new traffic
+to the channel. This lines up with MeshCore's own documented behavior: a
+node that finds the channel busy gives up waiting and transmits anyway
+after about 4 seconds (`ERR_EVENT_CAD_TIMEOUT`), and the project's own
+maintainers have flagged repeater backoff defaults as too low for this
+kind of collision (see the repeater configuration note below).
+
+#### Recommended repeater configuration
+
+This app's reply queue only controls when *this observer's own bot* keys
+up - it doesn't change how repeaters on the mesh handle collisions in
+general. If you or people you coordinate with operate repeaters on the
+same mesh, MeshCore's own maintainers have flagged the stock repeater
+backoff defaults as too low, which independently contributes to the same
+congestion this queue works around
+([meshcore-dev/MeshCore#2123](https://github.com/meshcore-dev/MeshCore/issues/2123)).
+Via the repeater's CLI (see
+[docs.meshcore.io/cli_commands](https://docs.meshcore.io/cli_commands/)):
+
+| Setting | Command | Default | Recommended minimum |
+| --- | --- | --- | --- |
+| Flood retransmit backoff | `set txdelay <value>` | `0.5` (~2 backoff slots) | `1.6` (~8 backoff slots) |
+| Direct-message backoff | `set direct.txdelay <value>` | `0.2`-`0.3` | `1` (~5 backoff slots) |
+| Receive-window backoff (experimental) | `set rxdelay <value>` | `0` (off) | `3` |
+
+Use `get txdelay` / `get direct.txdelay` / `get rxdelay` to check a
+repeater's current values before changing them - defaults can vary by
+firmware version. This is a mesh-wide, repeater-operator change, not
+something this observer (a companion-mode client, not a repeater) can
+set on your behalf.
+
 ### 3. Metrics UI (optional)
 
 An optional live dashboard shows radio/MQTT/bot status and packet counters,
@@ -171,6 +270,17 @@ dashboard (tiles, tables, live SSE updates) works with no internet access
 at all, and the charts degrade to a visible "unavailable" message rather
 than breaking the page if the CDN can't be reached.
 
+The dashboard's own CSS/JS live as ordinary files under `src/web/client/`
+(not inlined into the HTML, not bundled - `dashboard.js` is loaded as a
+real `<script type="module">` and imports its sibling `dashboard-logic.js`
+by plain relative URL, resolved by the browser itself), served as static
+assets by `MetricsServer`. `dashboard-logic.js` holds every pure,
+DOM-free piece of client logic (range handling, response-to-chart-data
+shaping, formatting) and is unit-tested directly under Node - see
+`test/web/client/dashboard-logic.test.js`. Since nothing here drives an
+actual browser, `docs/dashboard-manual-check.md` is a short checklist to
+run through by hand after changes to the dashboard.
+
 Packet activity (the line chart), the packet-types table, the packet-types
 pie chart, and a "Bot commands" section (one pie chart + table + total
 replies per configured channel bot, showing which of its commands are
@@ -187,16 +297,25 @@ categorical colors, and every pie/doughnut chart reuses the same
 validated 8-color palette in a fixed order (see the dataviz method) - a
 command's color is tied to its position in that bot's own configuration,
 never to how often it's currently used, so colors stay stable across
-refreshes. The top-row tiles (packets received/published) and the
+refreshes. The top-row tiles (packets received/decoded) and the
 existing bot status table (enabled/ready/all-time replies sent) remain
 live, all-time-since-start counters, unaffected by the duration selector.
+
+"Decoded" means a packet reached the publish pipeline, not that a broker
+actually received it - the store separately persists a per-broker
+sent/skipped/failed delivery breakdown, and a full reply-lifecycle history
+(sent/failed/expired/cancelled, per bot and per trigger, not just
+successful sends) for the shared reply queue. Neither is on the dashboard
+yet, but both are captured now specifically so a future view can query
+them without a schema change (see `MetricsStore#queryBrokerDeliveryTotals`
+and `#queryBotReplyOutcomeTotals`).
 
 | Variable | Purpose |
 | --- | --- |
 | `PACKETCAPTURE_METRICS_UI_HOST` | Bind address; default `127.0.0.1` |
 | `PACKETCAPTURE_METRICS_UI_PORT` | Bind port; default `8090` |
 | `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often the dashboard samples health state and persists a packet sample; default `10000` |
-| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for persisted packet/bot-command metrics; default `data/metrics.sqlite3` |
+| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for persisted packet, broker-delivery, and reply-lifecycle metrics; default `data/metrics.sqlite3` |
 | `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | Days of persisted metrics to keep; default `0` (unlimited - watch disk usage) |
 | `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` | Upper bound on buckets returned per history query; default `180` |
 
@@ -230,11 +349,12 @@ src/
   logging/    structured JSON logging with automatic secret redaction
   radio/      Companion connection lifecycle: transport (serial/tcp), reconnect/backoff, command queue, clock sync
   packets/    raw radio event -> normalize -> validate -> decode -> deduplicate pipeline
-  mqtt/       broker connections, topic templates, observer status, LetsMesh on-device JWT auth
-  bots/       channel bots: channel discovery/creation, message decrypt, trigger matching, replies
+  mqtt/       broker connections (config-file loader + schema), topic templates, observer status, LetsMesh on-device JWT auth
+  bots/       channel bots: channel discovery/creation, message decrypt, trigger matching; the shared reply queue owns send timing and reply-lifecycle metrics
   health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
-  metrics/    local SQLite-backed persistence for packet/bot-command metrics (node:sqlite)
+  metrics/    local SQLite-backed persistence for packet/broker-delivery/reply-lifecycle metrics (node:sqlite)
   web/        optional live metrics dashboard (plain node:http + SSE), gated by PACKETCAPTURE_METRICS_UI_ENABLED
+  web/client/ the dashboard's own CSS/JS, served as static files (see below) - not inlined, not bundled
 ```
 
 Engineering conventions (validation, logging, protected boundaries, dependency policy) are in [`AGENTS.md`](AGENTS.md).

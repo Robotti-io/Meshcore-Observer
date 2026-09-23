@@ -52,29 +52,36 @@ export const rangeOnlyQuerySchema = {
 export const validateMetricsHistoryQuery = compileSchema(metricsHistoryQuerySchema);
 export const validateRangeOnlyQuery = compileSchema(rangeOnlyQuerySchema);
 
+// The only fields either schema above ever expects as a number - every
+// other key (including one AJV's additionalProperties: false is about to
+// reject) is carried through as a plain string.
+const NUMERIC_FIELDS = new Set(['start', 'end', 'maxBuckets']);
+
 /**
  * Parses a URLSearchParams into the plain candidate object the schemas
- * above validate - query params always arrive as strings, so numeric
- * fields are converted first. An unparseable numeric value becomes NaN,
- * which the schemas' `integer` type keyword rejects on its own (no special
- * casing needed here).
+ * above validate. Every parameter present is carried into the candidate
+ * object - not just the ones these schemas happen to recognize - so an
+ * unrecognized one (e.g. a typo'd `?range=24h&typo=1`) reaches AJV and is
+ * rejected by `additionalProperties: false`, rather than being silently
+ * dropped before validation ever sees it. Query params always arrive as
+ * strings, so the known numeric fields are converted first; an
+ * unparseable numeric value becomes NaN, which the schemas' `integer`
+ * type keyword rejects on its own (no special casing needed here).
+ *
+ * A repeated key (`?range=24h&range=1h`) keeps only its first value,
+ * matching `URLSearchParams#get()`'s own first-value-wins convention -
+ * later occurrences of an already-seen key are ignored.
  *
  * @param {URLSearchParams} searchParams
- * @returns {{range?: string, start?: number, end?: number, maxBuckets?: number}}
+ * @returns {{range?: string, start?: number, end?: number, maxBuckets?: number, [key: string]: unknown}}
  */
 export function parseRangeQuery(searchParams) {
   const query = {};
-  if (searchParams.has('range')) {
-    query.range = searchParams.get('range');
-  }
-  if (searchParams.has('start')) {
-    query.start = Number(searchParams.get('start'));
-  }
-  if (searchParams.has('end')) {
-    query.end = Number(searchParams.get('end'));
-  }
-  if (searchParams.has('maxBuckets')) {
-    query.maxBuckets = Number(searchParams.get('maxBuckets'));
+  for (const [key, value] of searchParams.entries()) {
+    if (key in query) {
+      continue;
+    }
+    query[key] = NUMERIC_FIELDS.has(key) ? Number(value) : value;
   }
   return query;
 }

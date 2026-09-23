@@ -18,15 +18,37 @@ function withTempBotsFile(content, fn) {
   }
 }
 
-// baseEnv() always points PACKETCAPTURE_BOTS_CONFIG_FILE at a real, empty
-// bots file explicitly, rather than relying on the default path being
-// absent from the current working directory - a real bots.config.json can
-// legitimately exist there for local use (see .gitignore), and this must
-// stay deterministic regardless.
+function withTempBrokersFile(content, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-config-'));
+  const filePath = join(dir, 'brokers.config.json');
+  if (content !== null) {
+    writeFileSync(filePath, content, 'utf8');
+  }
+  try {
+    return fn(filePath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// baseEnv() always points PACKETCAPTURE_BOTS_CONFIG_FILE/PACKETCAPTURE_
+// BROKERS_CONFIG_FILE at real, empty files explicitly, rather than relying
+// on the default paths being absent from the current working directory - a
+// real bots.config.json/brokers.config.json can legitimately exist there
+// for local use (see .gitignore), and this must stay deterministic
+// regardless.
 const emptyBotsDir = mkdtempSync(join(tmpdir(), 'meshcore-config-empty-bots-'));
 const emptyBotsFile = join(emptyBotsDir, 'bots.config.json');
 writeFileSync(emptyBotsFile, '[]', 'utf8');
-after(() => rmSync(emptyBotsDir, { recursive: true, force: true }));
+
+const emptyBrokersDir = mkdtempSync(join(tmpdir(), 'meshcore-config-empty-brokers-'));
+const emptyBrokersFile = join(emptyBrokersDir, 'brokers.config.json');
+writeFileSync(emptyBrokersFile, '[]', 'utf8');
+
+after(() => {
+  rmSync(emptyBotsDir, { recursive: true, force: true });
+  rmSync(emptyBrokersDir, { recursive: true, force: true });
+});
 
 function baseEnv(overrides = {}) {
   return {
@@ -34,6 +56,7 @@ function baseEnv(overrides = {}) {
     PACKETCAPTURE_SERIAL_PORTS: 'COM3',
     PACKETCAPTURE_IATA: 'CVG',
     PACKETCAPTURE_BOTS_CONFIG_FILE: emptyBotsFile,
+    PACKETCAPTURE_BROKERS_CONFIG_FILE: emptyBrokersFile,
     ...overrides
   };
 }
@@ -99,6 +122,25 @@ test('rejects a non-integer retry delay', () => {
   );
 });
 
+test('rejects an integer with a non-numeric suffix rather than truncating it', () => {
+  assert.throws(
+    () => loadConfig(baseEnv({ PACKETCAPTURE_CONNECTION_RETRY_DELAY: '3000ms' })),
+    ConfigError
+  );
+});
+
+test('rejects a boolean value that is not exactly "true" or "false"', () => {
+  assert.throws(
+    () => loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_ENABLED: 'tru' })),
+    ConfigError
+  );
+});
+
+test('accepts "false" (not just an absent/empty value) as an explicit boolean', () => {
+  const config = loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_ENABLED: 'false' }));
+  assert.equal(config.metricsUi.enabled, false);
+});
+
 test('rejects an unknown radio connection type via schema validation', () => {
   assert.throws(
     () => loadConfig(baseEnv({ PACKETCAPTURE_CONNECTION_TYPE: 'bluetooth' })),
@@ -106,66 +148,106 @@ test('rejects an unknown radio connection type via schema validation', () => {
   );
 });
 
-test('reads a single broker slot with defaults', () => {
-  const config = loadConfig(
-    baseEnv({
-      PACKETCAPTURE_MQTT1_ENABLED: 'true',
-      PACKETCAPTURE_MQTT1_HOST: 'mqtt1.okimesh.org',
-      PACKETCAPTURE_MQTT1_PORT: '1883'
-    })
-  );
+test('reads a single broker from the config file with defaults', () => {
+  withTempBrokersFile(
+    JSON.stringify([{ id: 'okimesh', enabled: true, host: 'mqtt1.okimesh.org', port: 1883, auth: { method: 'none' } }]),
+    (filePath) => {
+      const config = loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath }));
 
-  assert.equal(config.brokers.length, 1);
-  const [broker] = config.brokers;
-  assert.equal(broker.id, 'mqtt1');
-  assert.equal(broker.enabled, true);
-  assert.equal(broker.host, 'mqtt1.okimesh.org');
-  assert.equal(broker.port, 1883);
-  assert.equal(broker.transport, 'tcp');
-  assert.equal(broker.tls, false);
-  assert.equal(broker.auth.method, 'none');
+      assert.equal(config.brokers.length, 1);
+      const [broker] = config.brokers;
+      assert.equal(broker.id, 'okimesh');
+      assert.equal(broker.enabled, true);
+      assert.equal(broker.host, 'mqtt1.okimesh.org');
+      assert.equal(broker.port, 1883);
+      assert.equal(broker.transport, 'tcp');
+      assert.equal(broker.tls, false);
+      assert.equal(broker.auth.method, 'none');
+    }
+  );
 });
 
-test('reads multiple broker slots independently, including a token-authenticated broker', () => {
-  const config = loadConfig(
-    baseEnv({
-      PACKETCAPTURE_MQTT1_ID: 'letsmesh',
-      PACKETCAPTURE_MQTT1_ENABLED: 'true',
-      PACKETCAPTURE_MQTT1_HOST: 'mqtt-us-v1.letsmesh.net',
-      PACKETCAPTURE_MQTT1_PORT: '443',
-      PACKETCAPTURE_MQTT1_TRANSPORT: 'wss',
-      PACKETCAPTURE_MQTT1_TLS: 'true',
-      PACKETCAPTURE_MQTT1_AUTH_METHOD: 'token',
-      PACKETCAPTURE_MQTT1_TOKEN_AUDIENCE: 'letsmesh',
-      PACKETCAPTURE_MQTT2_ID: 'okimesh',
-      PACKETCAPTURE_MQTT2_ENABLED: 'true',
-      PACKETCAPTURE_MQTT2_HOST: 'mqtt1.okimesh.org',
-      PACKETCAPTURE_MQTT2_PORT: '1883'
-    })
-  );
+test('reads multiple brokers independently, including a token-authenticated broker', () => {
+  const brokers = [
+    {
+      id: 'letsmesh',
+      enabled: true,
+      host: 'mqtt-us-v1.letsmesh.net',
+      port: 443,
+      transport: 'wss',
+      tls: true,
+      auth: { method: 'token', audience: 'letsmesh' }
+    },
+    { id: 'okimesh', enabled: true, host: 'mqtt1.okimesh.org', port: 1883, auth: { method: 'none' } }
+  ];
 
-  assert.equal(config.brokers.length, 2);
-  const letsmesh = config.brokers.find((b) => b.id === 'letsmesh');
-  const okimesh = config.brokers.find((b) => b.id === 'okimesh');
-  assert.equal(letsmesh.transport, 'wss');
-  assert.equal(letsmesh.tls, true);
-  assert.equal(letsmesh.auth.method, 'token');
-  assert.equal(letsmesh.auth.audience, 'letsmesh');
-  assert.equal(okimesh.transport, 'tcp');
-  assert.equal(okimesh.auth.method, 'none');
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    const config = loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath }));
+
+    assert.equal(config.brokers.length, 2);
+    const letsmesh = config.brokers.find((b) => b.id === 'letsmesh');
+    const okimesh = config.brokers.find((b) => b.id === 'okimesh');
+    assert.equal(letsmesh.transport, 'wss');
+    assert.equal(letsmesh.tls, true);
+    assert.equal(letsmesh.auth.method, 'token');
+    assert.equal(letsmesh.auth.audience, 'letsmesh');
+    assert.equal(okimesh.transport, 'tcp');
+    assert.equal(okimesh.auth.method, 'none');
+  });
 });
 
-test('rejects an enabled broker with no host', () => {
-  assert.throws(
-    () =>
-      loadConfig(
-        baseEnv({
-          PACKETCAPTURE_MQTT1_ENABLED: 'true',
-          PACKETCAPTURE_MQTT1_PORT: '1883'
-        })
-      ),
-    ConfigError
-  );
+test('rejects a broker with no host (schema requires one, enabled or not)', () => {
+  withTempBrokersFile(JSON.stringify([{ id: 'okimesh', enabled: true, port: 1883, auth: { method: 'none' } }]), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), ConfigError);
+  });
+});
+
+test('rejects a brokers config file with duplicate broker ids', () => {
+  const brokers = [
+    { id: 'okimesh', enabled: true, host: 'mqtt1.okimesh.org', port: 1883, auth: { method: 'none' } },
+    { id: 'okimesh', enabled: false, host: 'mqtt2.okimesh.org', port: 1883, auth: { method: 'none' } }
+  ];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), ConfigError);
+  });
+});
+
+test('rejects a password-auth broker with no username in the config file', () => {
+  const brokers = [{ id: 'private', enabled: true, host: 'mqtt.example.com', port: 1883, auth: { method: 'password' } }];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), ConfigError);
+  });
+});
+
+test('rejects a token-auth broker with no audience in the config file', () => {
+  const brokers = [{ id: 'letsmesh', enabled: true, host: 'mqtt.example.com', port: 443, auth: { method: 'token' } }];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), ConfigError);
+  });
+});
+
+test('rejects a password-auth broker whose position-numbered PASSWORD env var is unset', () => {
+  const brokers = [
+    { id: 'private', enabled: true, host: 'mqtt.example.com', port: 1883, auth: { method: 'password', username: 'bot' } }
+  ];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), ConfigError);
+  });
+});
+
+test('reads a password-auth broker password from PACKETCAPTURE_MQTT<n>_PASSWORD by array position', () => {
+  const brokers = [
+    { id: 'first', enabled: true, host: 'mqtt.example.com', port: 1883, auth: { method: 'none' } },
+    { id: 'second', enabled: true, host: 'mqtt2.example.com', port: 1883, auth: { method: 'password', username: 'bot' } }
+  ];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    const config = loadConfig(
+      baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath, PACKETCAPTURE_MQTT2_PASSWORD: 'super-secret' })
+    );
+    const second = config.brokers.find((b) => b.id === 'second');
+    assert.equal(second.auth.username, 'bot');
+    assert.equal(second.auth.password, 'super-secret');
+  });
 });
 
 test('loads bots from an explicitly configured bots config file', () => {
@@ -188,12 +270,12 @@ test('loads bots from an explicitly configured bots config file', () => {
 });
 
 test('loads a bot command with an overflowResponse through the full loadConfig pipeline', () => {
-  // Regression coverage: config/schema.js's `bots` block is a hand-
-  // maintained mirror of bots/schemas.js's botsConfigSchema (see the
-  // comment above it) - loadBotsConfig() validates against the latter,
-  // but loadConfig() then re-validates the whole assembled config,
-  // including bots, against the former. A field added to only one of the
-  // two copies passes loadBotsConfig() in isolation but throws here.
+  // Regression coverage: loadBotsConfig() validates against
+  // bots/schemas.js's botsConfigSchema, and loadConfig() then re-validates
+  // the whole assembled config, including bots, against config/schema.js's
+  // `bots` property - which is the same shared botConfigSchema object
+  // (see the comment above it), not a hand-maintained mirror, so a field
+  // like overflowResponse can't pass one and fail the other.
   const bots = [
     {
       name: 'echo',
@@ -275,6 +357,41 @@ test('rejects a negative metricsUi retention window', () => {
 test('rejects a metricsUi max chart bucket count below the schema minimum', () => {
   assert.throws(
     () => loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS: '1' })),
+    ConfigError
+  );
+});
+
+test('defaults botReplyQueue to a 5s quiet window and 60s TTL', () => {
+  const config = loadConfig(baseEnv());
+  assert.deepEqual(config.botReplyQueue, { quietMs: 5000, ttlMs: 60000 });
+});
+
+test('reads botReplyQueue overrides from the environment, including disabling the quiet requirement with 0', () => {
+  const config = loadConfig(
+    baseEnv({
+      PACKETCAPTURE_BOT_REPLY_QUIET_MS: '0',
+      PACKETCAPTURE_BOT_REPLY_TTL_MS: '10000'
+    })
+  );
+  assert.deepEqual(config.botReplyQueue, { quietMs: 0, ttlMs: 10000 });
+});
+
+test('rejects a botReplyQueue TTL shorter than its quiet window', () => {
+  assert.throws(
+    () =>
+      loadConfig(
+        baseEnv({
+          PACKETCAPTURE_BOT_REPLY_QUIET_MS: '5000',
+          PACKETCAPTURE_BOT_REPLY_TTL_MS: '1000'
+        })
+      ),
+    ConfigError
+  );
+});
+
+test('rejects a negative botReplyQueue bound', () => {
+  assert.throws(
+    () => loadConfig(baseEnv({ PACKETCAPTURE_BOT_REPLY_QUIET_MS: '-1' })),
     ConfigError
   );
 });

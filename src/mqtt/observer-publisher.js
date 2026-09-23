@@ -17,11 +17,13 @@ export class ObserverPublisher {
     this.#clientVersion = clientVersion;
   }
 
+  /** @returns {Promise<{brokerId: string, outcome: 'sent'|'skipped'|'failed', error?: string}[]>} see MqttManager#publish */
   async publishPacket(packet) {
     const topic = resolveTopic(PACKETS_TOPIC_TEMPLATE, { IATA: this.#iata, PUBLIC_KEY: packet.origin_id });
-    await this.#mqttManager.publish(topic, JSON.stringify(packet), { retain: false });
+    return this.#mqttManager.publish(topic, JSON.stringify(packet), { retain: false });
   }
 
+  /** @returns {Promise<{brokerId: string, outcome: 'sent'|'skipped'|'failed', error?: string}[]>} see MqttManager#publish */
   async publishStatus(deviceInfo, status) {
     const payload = buildObserverStatusPayload({ deviceInfo, clientVersion: this.#clientVersion, status });
     // Uppercased to match the packets topic, which is always keyed by the
@@ -32,6 +34,6 @@ export class ObserverPublisher {
       IATA: this.#iata,
       PUBLIC_KEY: deviceInfo.publicKey.toUpperCase()
     });
-    await this.#mqttManager.publish(topic, JSON.stringify(payload), { retain: true });
+    return this.#mqttManager.publish(topic, JSON.stringify(payload), { retain: true });
   }
 }
