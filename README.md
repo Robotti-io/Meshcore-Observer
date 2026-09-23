@@ -348,7 +348,7 @@ src/
   config/     centralized, schema-validated configuration (the only place process.env is read)
   logging/    structured JSON logging with automatic secret redaction
   radio/      Companion connection lifecycle: transport (serial/tcp), reconnect/backoff, command queue, clock sync
-  packets/    raw radio event -> normalize -> validate -> decode -> deduplicate pipeline
+  packets/    raw radio event -> normalize -> validate -> decode pipeline (every reception is published, no dedup gate - see below)
   mqtt/       broker connections (config-file loader + schema), topic templates, observer status, LetsMesh on-device JWT auth
   bots/       channel bots: channel discovery/creation, message decrypt, trigger matching; the shared reply queue owns send timing and reply-lifecycle metrics
   health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
@@ -362,8 +362,7 @@ Engineering conventions (validation, logging, protected boundaries, dependency p
 ## Troubleshooting
 
 - Run with `PACKETCAPTURE_LOG_LEVEL=debug`. The channel bots log exactly why a message didn't get a reply - wrong channel, decrypt/MAC failure, no matching trigger, or too few hops - rather than staying silent.
-- A `"dropped duplicate packet"` debug log from `services.packetCapture` is about the general MQTT capture pipeline, not the bots; it doesn't by itself mean a bot failed to reply.
-- The mesh can (and does) deliver the same physical message more than once over different relay paths with different hop counts. Only one reply is ever sent per logical message, from whichever delivery first satisfies the bot's configured `minHops`.
+- The mesh can (and does) deliver the same physical message more than once over different relay paths with different hop counts. The MQTT capture pipeline publishes every one of these deliveries (same `hash`, different `route`/RSSI/SNR) rather than dropping repeats - OkiMesh needs every path an observer heard, not just the first. Bot replies are a separate concern: only one reply is ever sent per logical message, from whichever delivery first satisfies the bot's configured `minHops`, tracked by that bot's own independent deduplicator (never shared with the MQTT pipeline or other bots).
 - A message heard with zero hops (sender directly adjacent, no relay needed) is rejected under the default `minHops: 1` - this is intentional, not a bug.
 
 ## License

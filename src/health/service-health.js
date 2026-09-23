@@ -104,7 +104,13 @@ export class ServiceHealth {
       mqtt[brokerId] = {
         connected: state === 'connected',
         lastConnectedAt: this.#mqttLastConnectedAt.get(brokerId) ?? null,
-        deliveries: this.#brokerDeliveries.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 }
+        // Copied, not the #brokerDeliveries Map's own object: that object is
+        // mutated in place by future recordPublishResults() calls, so a
+        // caller holding onto an earlier snapshot (e.g. metrics-sample.js's
+        // computeSampleDelta, which diffs this tick's snapshot against the
+        // previous tick's) must see this point in time, not whatever the
+        // counts have grown to by the time it reads them.
+        deliveries: { ...(this.#brokerDeliveries.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 }) }
       };
     }
 

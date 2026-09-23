@@ -216,6 +216,18 @@ function renderPacketTypes(packetTypesResponse) {
   }
 }
 
+function renderBrokerDeliveries(brokerDeliveriesResponse) {
+  const body = document.querySelector('#broker-deliveries-table tbody');
+  body.innerHTML = '';
+  for (const broker of brokerDeliveriesResponse.brokers) {
+    const row = body.insertRow();
+    row.insertCell().textContent = broker.brokerId;
+    row.insertCell().textContent = broker.sent;
+    row.insertCell().textContent = broker.skipped;
+    row.insertCell().textContent = broker.failed;
+  }
+}
+
 // Per-bot DOM/chart state, keyed by bot name. The configured bot set is
 // fixed for the life of a running server, so each bot's block/chart is
 // built once on first sight and only its data is updated on later
@@ -326,22 +338,25 @@ async function refreshRangeData() {
 
   try {
     const qs = buildQueryString(params);
-    const [historyRes, packetTypesRes, replyQueueRes, botCommandsRes] = await Promise.all([
+    const [historyRes, packetTypesRes, replyQueueRes, botCommandsRes, brokersRes] = await Promise.all([
       fetch('/api/metrics/history?' + qs),
       fetch('/api/metrics/packet-types?' + qs),
       fetch('/api/metrics/reply-queue?' + qs),
-      fetch('/api/metrics/bots/commands?' + qs)
+      fetch('/api/metrics/bots/commands?' + qs),
+      fetch('/api/metrics/brokers?' + qs)
     ]);
-    if (!historyRes.ok || !packetTypesRes.ok || !replyQueueRes.ok || !botCommandsRes.ok) {
+    if (!historyRes.ok || !packetTypesRes.ok || !replyQueueRes.ok || !botCommandsRes.ok || !brokersRes.ok) {
       throw new Error(
         'range query failed (history ' + historyRes.status + ', packet-types ' + packetTypesRes.status +
-          ', reply-queue ' + replyQueueRes.status + ', bots/commands ' + botCommandsRes.status + ')'
+          ', reply-queue ' + replyQueueRes.status + ', bots/commands ' + botCommandsRes.status +
+          ', brokers ' + brokersRes.status + ')'
       );
     }
     renderChart(await historyRes.json());
     renderPacketTypes(await packetTypesRes.json());
     renderReplyQueueTotals(await replyQueueRes.json());
     renderBotCommands(await botCommandsRes.json());
+    renderBrokerDeliveries(await brokersRes.json());
   } catch (err) {
     console.error('failed to refresh range-aware metrics', err);
   }

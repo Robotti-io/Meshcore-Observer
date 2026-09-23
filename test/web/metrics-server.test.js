@@ -307,6 +307,53 @@ test('GET /api/metrics/bots/commands rejects an invalid range query the same way
   });
 });
 
+test('GET /api/metrics/brokers returns every currently-configured broker, zero-filled, with sent/skipped/failed totals', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.recordPacketSample({
+    sampleAt: 5000,
+    intervalMs: 1000,
+    packetsReceived: 3,
+    packetsDecoded: 3,
+    radioConnected: true,
+    brokersConnected: 2,
+    brokersTotal: 2,
+    botsReady: 1,
+    botsTotal: 1,
+    replyQueueSize: 0,
+    brokerDeliveries: {
+      okimesh: { sent: 2, skipped: 1, failed: 0 },
+      letsmesh: { sent: 0, skipped: 0, failed: 1 }
+    }
+  });
+
+  const serviceHealth = fakeServiceHealth({
+    mqtt: {
+      okimesh: { connected: true, lastConnectedAt: null, deliveries: { sent: 2, skipped: 1, failed: 0 } },
+      letsmesh: { connected: false, lastConnectedAt: null, deliveries: { sent: 0, skipped: 0, failed: 1 } },
+      // Configured but never delivered anything in range - must still be zero-filled.
+      unused: { connected: false, lastConnectedAt: null, deliveries: { sent: 0, skipped: 0, failed: 0 } }
+    }
+  });
+
+  await withServer({ metricsStore, serviceHealth }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/brokers?start=0&end=10000`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.brokers, [
+      { brokerId: 'okimesh', sent: 2, skipped: 1, failed: 0 },
+      { brokerId: 'letsmesh', sent: 0, skipped: 0, failed: 1 },
+      { brokerId: 'unused', sent: 0, skipped: 0, failed: 0 }
+    ]);
+  });
+});
+
+test('GET /api/metrics/brokers rejects an invalid range query the same way as the other range endpoints', async () => {
+  await withServer({}, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/brokers`);
+    assert.equal(res.status, 400);
+  });
+});
+
 test('GET / returns the dashboard HTML page, referencing its stylesheet and browser script as separate assets', async () => {
   await withServer({}, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/`);

@@ -84,6 +84,11 @@ export function renderDashboardHtml() {
     <thead><tr><th>Broker</th><th>Connected</th><th>Last connected</th></tr></thead>
     <tbody></tbody>
   </table>
+  <p class="section-note">Connected/last connected are live; deliveries below reflect the range selected above.</p>
+  <table id="broker-deliveries-table">
+    <thead><tr><th>Broker</th><th>Sent</th><th>Skipped</th><th>Failed</th></tr></thead>
+    <tbody></tbody>
+  </table>
 </section>
 
 <section>

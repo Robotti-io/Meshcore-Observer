@@ -12,7 +12,7 @@
 
 ---
 
-# 1. Purpose
+## 1. Purpose
 
 Build a maintainable JavaScript MeshCore observer that replaces the current customized Python installation while preserving the behavior that is currently useful:
 
@@ -31,7 +31,7 @@ The new implementation is a clean JavaScript application. It is **not** a line-b
 
 ---
 
-# 2. Governing Engineering Rules
+## 2. Governing Engineering Rules
 
 `AGENTS.md` is authoritative.
 
@@ -53,11 +53,11 @@ The coding agent must implement one approved task at a time and report drift or 
 
 ---
 
-# 3. Human Approval Gates
+## 3. Human Approval Gates
 
 Before implementation, distinguish already approved architectural direction from decisions that still require approval.
 
-## Already approved
+### Already approved
 
 * Replace the customized Python application with Node.js.
 * Use JavaScript, not TypeScript.
@@ -66,7 +66,7 @@ Before implementation, distinguish already approved architectural direction from
 * Support the current Windows + USB Heltec V3 installation.
 * Design for later containerized operation.
 
-## Approval required before adding
+### Approval required before adding
 
 Proposed runtime dependencies:
 
@@ -91,7 +91,7 @@ In particular:
 
 ---
 
-# 4. Current Behavioral Baseline
+## 4. Current Behavioral Baseline
 
 The current Python implementation is the compatibility reference, not the architectural reference.
 
@@ -147,7 +147,7 @@ The replacement should preserve this externally visible behavior unless explicit
 
 ---
 
-# 5. Non-Goals for Version 1
+## 5. Non-Goals for Version 1
 
 Do not add the following during the initial replacement:
 
@@ -168,7 +168,7 @@ The goal is first to replace the existing observer reliably.
 
 ---
 
-# 6. Proposed Repository Layout
+## 6. Proposed Repository Layout
 
 ```text
 meshcore-observer/
@@ -229,9 +229,9 @@ Do not create modules merely to satisfy this diagram. If a proposed module has n
 
 ---
 
-# 7. Architectural Seams
+## 7. Architectural Seams
 
-## 7.1 Entrypoint
+### 7.1 Entrypoint
 
 `src/index.js` owns only process-level orchestration.
 
@@ -250,7 +250,7 @@ It must not contain packet parsing, MQTT implementation details, or bot business
 
 ---
 
-## 7.2 Configuration
+### 7.2 Configuration
 
 All configuration must be read in `src/config/index.js`.
 
@@ -332,7 +332,7 @@ Configuration errors must terminate startup with a useful error before hardware 
 
 ---
 
-# 8. Logging Contract
+## 8. Logging Contract
 
 Use structured logs with stable logical `source` values.
 
@@ -377,7 +377,7 @@ but never the JWT itself.
 
 ---
 
-# 9. Radio Transport
+## 9. Radio Transport
 
 Create a transport seam even though serial is the first implementation.
 
@@ -395,7 +395,7 @@ The application must not let higher-level features know whether the Companion ra
 
 The official MeshCore JavaScript library already exposes Node serial and TCP connection mechanisms, so these adapters should remain thin.
 
-## Serial requirements
+### Serial requirements
 
 Initial Windows target:
 
@@ -432,7 +432,7 @@ A radio unavailable during Windows startup must not require manually starting th
 
 ---
 
-# 10. Radio Manager
+## 10. Radio Manager
 
 `RadioManager` owns the lifecycle of the MeshCore connection.
 
@@ -463,7 +463,7 @@ Higher-level modules should not depend directly on MeshCore library event intern
 
 ---
 
-# 11. Device Command Serialization
+## 11. Device Command Serialization
 
 The existing Python implementation uses a command lock because Companion commands may involve a request followed by a matching asynchronous response, and some operations consist of multiple commands that must remain atomic.
 
@@ -493,7 +493,7 @@ when command response correlation could otherwise become ambiguous.
 
 ---
 
-# 12. Clock Synchronization
+## 12. Clock Synchronization
 
 After connecting:
 
@@ -507,7 +507,7 @@ Run the operation through the device command queue.
 
 ---
 
-# 13. Packet Pipeline
+## 13. Packet Pipeline
 
 Raw radio data must pass through a single pipeline:
 
@@ -524,18 +524,24 @@ AJV validation
 decode metadata
        |
        v
-deduplicate
-       |
-       +--------> MQTT publisher
-       |
-       +--------> EchoBot
+emit "packet" -> MQTT publisher
 ```
+
+Every decoded reception is emitted, including re-hearings of the same
+logical packet delivered via a different relay path. The mesh can (and
+does) deliver one physical message more than once with a different
+route/RSSI/SNR each time, and downstream consumers on the OkiMesh network
+need to see every path a packet took, not just the first one heard - so
+the pipeline does not deduplicate before publish (see Section 15).
+
+The channel bots (EchoBot's successor) are an independent consumer of the
+same raw MeshCore event, not of this pipeline's output - see Section 15.
 
 Business logic must not consume unvalidated externally sourced structured events.
 
 ---
 
-# 14. Packet Compatibility
+## 14. Packet Compatibility
 
 Before implementing packet parsing, capture representative output from the working Python application and store sanitized examples as test fixtures.
 
@@ -577,26 +583,37 @@ Do not assume the current Python output is correct merely because it exists. Tes
 
 ---
 
-# 15. Packet Deduplication
+## 15. Packet Deduplication
 
-Deduplication must be centralized.
+The MQTT capture pipeline (Section 13) does not deduplicate: every distinct
+RF reception is published, even repeat deliveries of the same logical
+packet heard via a different relay path. The mesh can and does deliver one
+physical message multiple times with a different route/RSSI/SNR/timestamp
+each time, and OkiMesh needs every path an observer heard, not just the
+first. (The reference `agessaman/meshcore-packet-capture` observer takes
+the same approach - it has no logical dedup either, only a narrow
+same-exact-bytes guard against its own dual BLE event sources, which this
+codebase's single `LogRxData` subscription doesn't need.)
 
-Do not maintain unrelated duplicate caches separately inside packet capture and bot modules.
+Suppressing a repeat *reply* is a separate, bot-local concern: each channel
+bot must never respond twice because one MeshCore message arrived through
+both a raw RF event and a higher-level channel-message event. Each bot
+keeps its own deduplicator instance for this - do not share one deduplicator
+between the MQTT pipeline and the bots, and do not share one deduplicator
+across bots either.
 
 Prefer a stable identifier derived from the raw packet or existing MeshCore packet hash.
 
-The deduplicator should:
+A bot's deduplicator should:
 
 * use a bounded cache;
 * expire entries;
 * avoid unbounded memory growth;
-* allow different consumers to know whether a packet is newly observed.
-
-The echo bot must never respond twice because one MeshCore message arrived through both a raw RF event and a higher-level channel-message event.
+* allow the bot to know whether a packet is newly observed.
 
 ---
 
-# 16. MQTT Manager
+## 16. MQTT Manager
 
 MQTT must support an arbitrary configured list of brokers.
 
@@ -621,7 +638,7 @@ The manager must publish independently to every currently connected broker.
 
 ---
 
-# 17. MQTT Topics
+## 17. MQTT Topics
 
 Preserve topic template behavior:
 
@@ -638,7 +655,7 @@ Do not concatenate topic strings independently throughout broker code.
 
 ---
 
-# 18. Observer Status
+## 18. Observer Status
 
 Publish retained observer status.
 
@@ -665,7 +682,7 @@ Use broker Last Will where practical so abrupt process termination can also refl
 
 ---
 
-# 19. OKI Mesh Broker
+## 19. OKI Mesh Broker
 
 Initial configuration:
 
@@ -683,7 +700,7 @@ Acceptance requires the observer to become visible in the OKI environment and ca
 
 ---
 
-# 20. LetsMesh Authentication
+## 20. LetsMesh Authentication
 
 LetsMesh requires a dedicated authentication seam.
 
@@ -718,7 +735,7 @@ JWTs must:
 
 ---
 
-# 21. Echo Bot
+## 21. Echo Bot
 
 Implement the bot as an independent consumer of normalized radio events.
 
@@ -736,7 +753,7 @@ triggers:
 minimum hops: 1
 ```
 
-## Channel initialization
+### Channel initialization
 
 At startup/reconnect:
 
@@ -752,7 +769,7 @@ If no channel slot is available, disable replies and continue observer operation
 
 Bot failure must not stop packet capture or MQTT.
 
-## Trigger matching
+### Trigger matching
 
 Triggers are exact matches.
 
@@ -767,7 +784,7 @@ hello !echo -> do not respond
 !echo now   -> do not respond
 ```
 
-## Hop requirement
+### Hop requirement
 
 Do not reply unless:
 
@@ -775,7 +792,7 @@ Do not reply unless:
 hopCount >= configured minimum
 ```
 
-## Reply
+### Reply
 
 Preserve:
 
@@ -791,7 +808,7 @@ Example:
 🔁 @[Jeymz]! 3 hops via A1➡️B2➡️C3
 ```
 
-## Duplicate prevention
+### Duplicate prevention
 
 The bot must produce at most one reply for one physical RF packet.
 
@@ -807,7 +824,7 @@ This intentionally improves on the current implementation, where separate event 
 
 ---
 
-# 22. Graceful Shutdown
+## 22. Graceful Shutdown
 
 Handle at minimum:
 
@@ -831,7 +848,7 @@ Shutdown should have a bounded maximum duration.
 
 ---
 
-# 23. Health Model
+## 23. Health Model
 
 Version 1 should implement internal health state without introducing HTTP.
 
@@ -863,7 +880,7 @@ Adding HTTP is a separate change and should receive approval because it introduc
 
 ---
 
-# 24. Local Runtime
+## 24. Local Runtime
 
 `package.json` scripts are the supported interface.
 
@@ -888,7 +905,7 @@ Production/container configuration must come from process environment.
 
 ---
 
-# 25. Windows Operation
+## 25. Windows Operation
 
 Initial supported runtime:
 
@@ -925,7 +942,7 @@ The application's own radio retry logic remains required even with a delayed tas
 
 ---
 
-# 26. Container / Kubernetes Compatibility
+## 26. Container / Kubernetes Compatibility
 
 Do not attempt to make the first version access a Windows COM port from Kubernetes.
 
@@ -959,13 +976,13 @@ Do not create GitLab CI/CD or Kubernetes resources until explicitly approved.
 
 ---
 
-# 27. Testing Strategy
+## 27. Testing Strategy
 
 Use tests as part of implementation, not after implementation.
 
 Prefer Node's built-in test runner initially unless repository conventions require another framework.
 
-## Unit tests
+### Unit tests
 
 Required areas:
 
@@ -985,7 +1002,7 @@ JWT metadata/redaction behavior
 connection backoff calculation
 ```
 
-## Fixture tests
+### Fixture tests
 
 Store sanitized MeshCore raw-frame samples from the known-working Python observer.
 
@@ -1002,7 +1019,7 @@ packet hash
 payload boundaries
 ```
 
-## Service tests
+### Service tests
 
 Use fake/injected transports.
 
@@ -1020,15 +1037,15 @@ duplicate event paths produce one echo
 shutdown closes resources
 ```
 
-## Hardware acceptance
+### Hardware acceptance
 
 A manual hardware test is still required before declaring migration complete.
 
 ---
 
-# 28. Implementation Phases
+## 28. Implementation Phases
 
-## Phase 0 — Preserve the reference behavior
+### Phase 0 — Preserve the reference behavior
 
 Before writing replacement logic:
 
@@ -1051,7 +1068,7 @@ No Node functionality is implemented yet.
 
 ---
 
-## Phase 1 — Repository bootstrap
+### Phase 1 — Repository bootstrap
 
 Create:
 
@@ -1087,7 +1104,7 @@ A process that starts, validates configuration, logs startup, and shuts down cle
 
 ---
 
-## Phase 2 — Radio connection
+### Phase 2 — Radio connection
 
 Implement:
 
@@ -1111,7 +1128,7 @@ Acceptance:
 
 ---
 
-## Phase 3 — Packet capture
+### Phase 3 — Packet capture
 
 Implement raw packet event handling.
 
@@ -1131,7 +1148,7 @@ Acceptance:
 
 ---
 
-## Phase 4 — OKI MQTT
+### Phase 4 — OKI MQTT
 
 Add generic MQTT broker infrastructure and OKI as the first broker.
 
@@ -1146,7 +1163,7 @@ Acceptance:
 
 ---
 
-## Phase 5 — LetsMesh
+### Phase 5 — LetsMesh
 
 Implement LetsMesh-specific authentication.
 
@@ -1165,7 +1182,7 @@ If required on-device signing cannot be achieved with approved APIs, stop here a
 
 ---
 
-## Phase 6 — Echo bot
+### Phase 6 — Echo bot
 
 Implement channel initialization and bot event consumer.
 
@@ -1181,7 +1198,7 @@ Acceptance:
 
 ---
 
-## Phase 7 — Runtime hardening
+### Phase 7 — Runtime hardening
 
 Implement:
 
@@ -1210,7 +1227,7 @@ no duplicate echo subscriptions
 
 ---
 
-## Phase 8 — Windows managed startup
+### Phase 8 — Windows managed startup
 
 Only after foreground operation is stable:
 
@@ -1233,7 +1250,7 @@ LetsMesh connects
 
 ---
 
-## Phase 9 — Container readiness
+### Phase 9 — Container readiness
 
 Do not deploy yet.
 
@@ -1250,7 +1267,7 @@ Container/GitLab/Kubernetes implementation is a separate approved task.
 
 ---
 
-# 29. Migration Strategy
+## 29. Migration Strategy
 
 Do not modify the working Python observer in-place into the Node project.
 
@@ -1281,7 +1298,7 @@ After the Node implementation meets all acceptance criteria, disable the Python 
 
 ---
 
-# 30. Git Strategy
+## 30. Git Strategy
 
 Initialize the Node project as its own Git repository from the beginning.
 
@@ -1313,7 +1330,7 @@ fix(radio): retry initial Windows serial handshake
 
 ---
 
-# 31. Coding-Agent Operating Instructions
+## 31. Coding-Agent Operating Instructions
 
 For every phase, the coding agent must:
 
@@ -1338,7 +1355,7 @@ Do not silently broaden a task.
 
 ---
 
-# 32. Definition of Done
+## 32. Definition of Done
 
 Version 1 is complete when all of the following are true:
 
@@ -1378,7 +1395,7 @@ Version 1 is complete when all of the following are true:
 
 ---
 
-# 33. First Task for the Coding Agent
+## 33. First Task for the Coding Agent
 
 Do **not** start by implementing MeshCore serial communication.
 
@@ -1390,7 +1407,7 @@ Once that task is reviewed and approved, proceed to the radio-connection phase.
 
 ---
 
-# 34. Guiding Principle
+## 34. Guiding Principle
 
 The replacement should be simpler than the system it replaces.
 

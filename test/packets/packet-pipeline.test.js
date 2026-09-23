@@ -41,7 +41,7 @@ test('emits a decoded packet for a valid raw push', () => {
   assert.equal(logger.calls.warn.length, 0);
 });
 
-test('drops a second delivery of the same physical packet as a duplicate', () => {
+test('emits every delivery of the same physical packet, including re-hearings via a different path', () => {
   const pipeline = new PacketPipeline({
     logger: silentLogger(),
     getObserverIdentity: () => ({ origin: 'Test Observer', originId: 'abc123' })
@@ -59,7 +59,8 @@ test('drops a second delivery of the same physical packet as a duplicate', () =>
   pipeline.handleRawPacket(rawPushFor(frame));
   pipeline.handleRawPacket(rawPushFor(frame));
 
-  assert.equal(emitted.length, 1);
+  assert.equal(emitted.length, 2);
+  assert.equal(emitted[0].hash, emitted[1].hash);
 });
 
 test('drops the packet and logs a warning when device identity is not yet known', () => {
