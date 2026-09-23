@@ -91,8 +91,160 @@ const MIGRATIONS = [
        SELECT occurred_at, bot_name, trigger, NULL, NULL, 'sent', NULL FROM bot_command_events`,
       'DROP TABLE bot_command_events'
     ]
+  },
+  {
+    // Backs the dashboard's node ("!lookup" repeater registry) totals and
+    // search/browse table - see
+    // docs/plans/feat-bot_command_to_lookup_repeater_name.md and
+    // NodeRegistry's `recordNode` hook. One row per public key (a current-
+    // state snapshot, not an append-only log - see the class doc comment
+    // on why it's excluded from pruneOlderThan), upserted every time a
+    // verified named advert is heard: first_heard_at is set once, on
+    // insert, and never touched again; last_heard_at is refreshed on every
+    // upsert. "Added in range" and "updated in range" (queryNodeTotals)
+    // are both derived from these two columns rather than a separate
+    // event-log table, since only the latest state of each node - not a
+    // full history of every re-hear - is needed for that count.
+    version: 3,
+    statements: [
+      `CREATE TABLE nodes (
+        public_key_hex   TEXT PRIMARY KEY,
+        name             TEXT NOT NULL,
+        type             TEXT,
+        first_heard_at   INTEGER NOT NULL,
+        last_heard_at    INTEGER NOT NULL
+      )`,
+      'CREATE INDEX idx_nodes_first_heard_at ON nodes(first_heard_at)',
+      'CREATE INDEX idx_nodes_last_heard_at ON nodes(last_heard_at)'
+    ]
+  },
+  {
+    // Backs ReplyQueue's *pending* (not-yet-resolved) items - see
+    // reply-queue.js. Previously an in-memory array, which meant a reply
+    // still waiting for a quiet RF window was silently dropped on any
+    // restart; persisting it lets a fresh ReplyQueue resume exactly where
+    // the last one left off (see ReplyQueue#start()). A row's `expires_at`
+    // is a fixed point in time set at the original enqueue - a resumed
+    // item that's already past it is simply expired on the first tick
+    // after restart by the same logic that expires any other stale item,
+    // so downtime longer than ttlMs naturally self-heals with no special
+    // shutdown-time handling required. One row per queued reply (deleted
+    // the moment it's dequeued for dispatch, expired, or - going forward -
+    // any other terminal resolution), so this table's own row count *is*
+    // "how many are queued right now" (see ReplyQueue#getStats()) with no
+    // separate counter to keep in sync.
+    version: 4,
+    statements: [
+      `CREATE TABLE reply_queue_items (
+        id              INTEGER PRIMARY KEY,
+        bot_name        TEXT NOT NULL,
+        channel         TEXT NOT NULL,
+        trigger         TEXT NOT NULL,
+        sender          TEXT NOT NULL,
+        hop_count       INTEGER NOT NULL,
+        path            TEXT NOT NULL,
+        hash            TEXT NOT NULL,
+        query           TEXT,
+        lookup_outcome  TEXT,
+        name            TEXT,
+        match_count     INTEGER,
+        enqueued_at     INTEGER NOT NULL,
+        expires_at      INTEGER NOT NULL
+      )`,
+      'CREATE INDEX idx_reply_queue_items_enqueued_at ON reply_queue_items(enqueued_at)',
+      'CREATE INDEX idx_reply_queue_items_expires_at ON reply_queue_items(expires_at)'
+    ]
+  },
+  {
+    // Consolidates the pending-item table (reply_queue_items, v4) and the
+    // historical reply-lifecycle log (bot_reply_events, v2) into one table:
+    // a reply's entire lifecycle, from enqueue through resolution, is now
+    // one row that starts `status = 'pending'` and is later UPDATEd in
+    // place to 'sent'/'failed'/'expired' (see reply-queue.js's #tick()),
+    // rather than an insert into one table followed by a delete-and-insert
+    // into another. 'cancelled' stays a valid status only so any
+    // pre-existing historical rows with that outcome (from when stop()
+    // used to drop queued items - an earlier design, since replaced by
+    // restart-resumption) keep validating; nothing writes it going forward.
+    //
+    // The hot pending-item queries ReplyQueue runs on every poll tick
+    // (peekOldestPendingReplyItem/takeExpiredReplyItems/
+    // countPendingReplyItems) all filter on `status = 'pending'` first,
+    // matching idx_bot_replies_status_enqueued, so they stay index lookups
+    // against a small slice of the table no matter how much resolved
+    // history accumulates - and pruneOlderThan (see below) only ever
+    // deletes `status != 'pending'` rows, so a long-pending item can never
+    // be pruned out from under the queue.
+    version: 5,
+    statements: [
+      `CREATE TABLE bot_replies (
+        id              INTEGER PRIMARY KEY,
+        bot_name        TEXT NOT NULL,
+        channel         TEXT,
+        trigger         TEXT NOT NULL,
+        sender          TEXT,
+        hop_count       INTEGER,
+        path            TEXT,
+        hash            TEXT,
+        query           TEXT,
+        lookup_outcome  TEXT,
+        name            TEXT,
+        match_count     INTEGER,
+        enqueued_at     INTEGER,
+        expires_at      INTEGER,
+        status          TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'expired', 'cancelled')),
+        resolved_at     INTEGER,
+        queued_ms       INTEGER
+      )`,
+      'CREATE INDEX idx_bot_replies_status_enqueued ON bot_replies(status, enqueued_at)',
+      'CREATE INDEX idx_bot_replies_status_resolved ON bot_replies(status, resolved_at)',
+      'CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at)',
+      `INSERT INTO bot_replies (
+         bot_name, channel, trigger, sender, hop_count, path, hash,
+         query, lookup_outcome, name, match_count, enqueued_at, expires_at, status
+       )
+       SELECT bot_name, channel, trigger, sender, hop_count, path, hash,
+              query, lookup_outcome, name, match_count, enqueued_at, expires_at, 'pending'
+       FROM reply_queue_items`,
+      `INSERT INTO bot_replies (bot_name, trigger, sender, hash, status, resolved_at, queued_ms)
+       SELECT bot_name, trigger, sender, hash, outcome, occurred_at, queued_ms
+       FROM bot_reply_events`,
+      'DROP TABLE reply_queue_items',
+      'DROP TABLE bot_reply_events'
+    ]
   }
 ];
+
+// Shared by every bot_replies SELECT below so the camelCase shape handed
+// back always matches exactly what ChannelBot#sendQueuedReply and
+// ReplyQueue's own logging destructure - see reply-queue.js. Most fields
+// are nullable at the SQL level: a still-pending row has no
+// resolved_at/queued_ms yet, and a row migrated from the old
+// bot_reply_events table (see the v5 migration) never had
+// channel/hop_count/path/enqueued_at/expires_at to begin with.
+const BOT_REPLY_COLUMNS = `
+  id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
+  query, lookup_outcome AS lookupOutcome, name, match_count AS matchCount,
+  enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
+  resolved_at AS resolvedAt, queued_ms AS queuedMs
+`;
+
+function toNumberOrNull(value) {
+  return value === null ? null : Number(value);
+}
+
+function mapBotReplyRow(row) {
+  return {
+    ...row,
+    id: Number(row.id),
+    hopCount: toNumberOrNull(row.hopCount),
+    matchCount: toNumberOrNull(row.matchCount),
+    enqueuedAt: toNumberOrNull(row.enqueuedAt),
+    expiresAt: toNumberOrNull(row.expiresAt),
+    resolvedAt: toNumberOrNull(row.resolvedAt),
+    queuedMs: toNumberOrNull(row.queuedMs)
+  };
+}
 
 /**
  * Picks the smallest bucket width (from the sample interval and the fixed
@@ -137,7 +289,13 @@ export class MetricsStore {
   #insertSampleStmt;
   #insertPacketTypeStmt;
   #insertBrokerDeliveryStmt;
-  #insertBotReplyEventStmt;
+  #upsertNodeStmt;
+  #insertBotReplyStmt;
+  #countPendingBotRepliesStmt;
+  #selectExpiredBotRepliesStmt;
+  #expireBotRepliesStmt;
+  #peekOldestPendingBotReplyStmt;
+  #resolveBotReplyStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -164,10 +322,31 @@ export class MetricsStore {
       INSERT INTO metrics_sample_broker_deliveries (sample_id, broker_id, outcome, count)
       VALUES (?, ?, ?, ?)
     `);
-    this.#insertBotReplyEventStmt = this.#db.prepare(`
-      INSERT INTO bot_reply_events (occurred_at, bot_name, trigger, sender, hash, outcome, queued_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+    this.#upsertNodeStmt = this.#db.prepare(`
+      INSERT INTO nodes (public_key_hex, name, type, first_heard_at, last_heard_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(public_key_hex) DO UPDATE SET
+        name = excluded.name,
+        type = excluded.type,
+        last_heard_at = excluded.last_heard_at
     `);
+    this.#insertBotReplyStmt = this.#db.prepare(`
+      INSERT INTO bot_replies (
+        bot_name, channel, trigger, sender, hop_count, path, hash,
+        query, lookup_outcome, name, match_count, enqueued_at, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `);
+    this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
+    this.#selectExpiredBotRepliesStmt = this.#db.prepare(
+      `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' AND expires_at <= ? ORDER BY enqueued_at ASC`
+    );
+    this.#expireBotRepliesStmt = this.#db.prepare(
+      "UPDATE bot_replies SET status = 'expired', resolved_at = ?, queued_ms = ? - enqueued_at WHERE status = 'pending' AND expires_at <= ?"
+    );
+    this.#peekOldestPendingBotReplyStmt = this.#db.prepare(
+      `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' ORDER BY enqueued_at ASC LIMIT 1`
+    );
+    this.#resolveBotReplyStmt = this.#db.prepare('UPDATE bot_replies SET status = ?, resolved_at = ?, queued_ms = ? WHERE id = ?');
   }
 
   #runMigrations() {
@@ -237,19 +416,6 @@ export class MetricsStore {
       this.#db.exec('ROLLBACK');
       throw err;
     }
-  }
-
-  /**
-   * Records one reply-lifecycle outcome for the shared ReplyQueue - not
-   * just a successful send, but every way a queued reply can be resolved
-   * (see reply-queue.js's #tick()/stop()). `sender`/`hash` let a future
-   * view link back to the triggering packet (e.g. an OKI Mesh CoreScope
-   * packet link) the same way a bot's own {hash} response placeholder does.
-   *
-   * @param {{botName: string, trigger: string, sender: string, hash: string, outcome: 'sent'|'failed'|'expired'|'cancelled', occurredAt: number, queuedMs: number}} event
-   */
-  recordBotReplyEvent({ botName, trigger, sender, hash, outcome, occurredAt, queuedMs }) {
-    this.#insertBotReplyEventStmt.run(occurredAt, botName, trigger, sender ?? null, hash ?? null, outcome, queuedMs ?? null);
   }
 
   /** @returns {number|null} epoch ms of the earliest recorded sample, or null if none exist yet. */
@@ -351,8 +517,12 @@ export class MetricsStore {
   /**
    * Per-trigger *sent* reply counts for one bot over [start, end) - for
    * that bot's command pie chart and table. A thin filtered view over
-   * bot_reply_events (outcome = 'sent'); see queryBotReplyOutcomeTotals()
-   * for the full sent/failed/expired/cancelled breakdown.
+   * bot_replies (status = 'sent'); see queryBotReplyOutcomeTotals() for the
+   * full sent/failed/expired/cancelled breakdown. `resolved_at`, not
+   * `enqueued_at`, is the range-scoping column - excluding
+   * `status = 'pending'` first (idx_bot_replies_bot_status_resolved leads
+   * with bot_name/status) means this never has to look at a still-pending
+   * row's meaningless-for-this-purpose `enqueued_at` anyway.
    *
    * @param {{botName: string, start: number, end: number}} options
    * @returns {{trigger: string, count: number}[]}
@@ -362,8 +532,8 @@ export class MetricsStore {
       .prepare(
         `
         SELECT trigger, COUNT(*) AS total
-        FROM bot_reply_events
-        WHERE bot_name = ? AND outcome = 'sent' AND occurred_at >= ? AND occurred_at < ?
+        FROM bot_replies
+        WHERE bot_name = ? AND status = 'sent' AND resolved_at >= ? AND resolved_at < ?
         GROUP BY trigger
         ORDER BY total DESC
       `
@@ -378,7 +548,9 @@ export class MetricsStore {
    * bot - backs the dashboard's reply-queue tiles (see metrics-server.js),
    * which - like every other historical chart on the dashboard - are
    * scoped to whatever duration is currently selected, and survive a
-   * restart the way an in-memory counter can't.
+   * restart the way an in-memory counter can't. `status != 'pending'`
+   * excludes anything still waiting for a quiet window - those aren't a
+   * resolved outcome yet.
    *
    * @param {{start: number, end: number}} options
    * @returns {{sent: number, failed: number, expired: number, cancelled: number}}
@@ -386,7 +558,7 @@ export class MetricsStore {
   queryReplyOutcomeTotals({ start, end }) {
     const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0 };
     const rows = this.#db
-      .prepare('SELECT outcome, COUNT(*) AS total FROM bot_reply_events WHERE occurred_at >= ? AND occurred_at < ? GROUP BY outcome')
+      .prepare("SELECT status AS outcome, COUNT(*) AS total FROM bot_replies WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? GROUP BY status")
       .all(start, end);
     for (const row of rows) {
       totals[row.outcome] = Number(row.total);
@@ -407,11 +579,11 @@ export class MetricsStore {
     const rows = this.#db
       .prepare(
         `
-        SELECT bot_name AS botName, outcome, COUNT(*) AS total
-        FROM bot_reply_events
-        WHERE occurred_at >= ? AND occurred_at < ?
-        GROUP BY bot_name, outcome
-        ORDER BY bot_name, outcome
+        SELECT bot_name AS botName, status AS outcome, COUNT(*) AS total
+        FROM bot_replies
+        WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ?
+        GROUP BY bot_name, status
+        ORDER BY bot_name, status
       `
       )
       .all(start, end);
@@ -444,14 +616,220 @@ export class MetricsStore {
     return rows.map((row) => ({ brokerId: row.brokerId, outcome: row.outcome, total: Number(row.total) }));
   }
 
-  /** Deletes packet samples, their child rows, and bot reply events at or before `cutoffMs`. */
+  /**
+   * Upserts one node's current state - called from NodeRegistry's
+   * `recordNode` hook every time a verified named advert is heard, for
+   * both a brand-new public key and a re-heard one. `heardAt` becomes
+   * `first_heard_at` only on the first call for a given `publicKeyHex`
+   * (a later call never moves it); `last_heard_at` is refreshed every time.
+   *
+   * @param {{publicKeyHex: string, name: string, type: string|null, heardAt: number}} node
+   */
+  upsertNode({ publicKeyHex, name, type, heardAt }) {
+    this.#upsertNodeStmt.run(publicKeyHex, name, type ?? null, heardAt, heardAt);
+  }
+
+  /**
+   * Distinct-node counts over [start, end) for the dashboard's node tiles:
+   * `added` is nodes first heard in range; `updated` is nodes re-heard
+   * (last_heard_at in range) *after* their initial add - a node heard only
+   * once (first_heard_at === last_heard_at) counts toward `added` only,
+   * never both, even if that single hearing falls in range. `type`,
+   * optional, narrows to one advert type (e.g. the dashboard's "Repeaters"
+   * tiles always pass `'REPEATER'`) - matched via `(? = '' OR ...)` rather
+   * than building the WHERE clause conditionally, same as queryNodes()
+   * below.
+   *
+   * @param {{start: number, end: number, type?: string}} options
+   * @returns {{added: number, updated: number}}
+   */
+  queryNodeTotals({ start, end, type = '' }) {
+    const row = this.#db
+      .prepare(
+        `
+        SELECT
+          SUM(CASE WHEN first_heard_at >= ? AND first_heard_at < ? AND (? = '' OR type = ?) THEN 1 ELSE 0 END) AS added,
+          SUM(CASE WHEN last_heard_at >= ? AND last_heard_at < ? AND last_heard_at != first_heard_at AND (? = '' OR type = ?) THEN 1 ELSE 0 END) AS updated
+        FROM nodes
+      `
+      )
+      .get(start, end, type, type, start, end, type, type);
+
+    return { added: Number(row.added ?? 0), updated: Number(row.updated ?? 0) };
+  }
+
+  /**
+   * A page of the current node "contact list" - not range-scoped (it's
+   * live current state, not history) - optionally filtered by a search
+   * term (case-insensitive name substring, or a public-key hex prefix -
+   * whichever matches) and/or an exact `type`, sorted most-recently-heard
+   * first. `q`/`type` are matched via `(? = '' OR ...)` rather than
+   * building the WHERE clause conditionally in JS, so this stays one
+   * static, always-parameterized prepared statement - see the class doc
+   * comment's "never a generic query passthrough" rule.
+   *
+   * @param {{q?: string, type?: string, limit: number, offset: number}} options
+   * @returns {{total: number, nodes: {publicKeyHex: string, name: string, type: string|null, firstHeardAt: number, lastHeardAt: number}[]}}
+   */
+  queryNodes({ q = '', type = '', limit, offset }) {
+    const normalizedQ = q.toUpperCase();
+    const whereClause = `
+      WHERE (? = '' OR name LIKE '%' || ? || '%' COLLATE NOCASE OR public_key_hex LIKE ? || '%')
+        AND (? = '' OR type = ?)
+    `;
+
+    const { total } = this.#db
+      .prepare(`SELECT COUNT(*) AS total FROM nodes ${whereClause}`)
+      .get(q, q, normalizedQ, type, type);
+
+    const rows = this.#db
+      .prepare(
+        `
+        SELECT public_key_hex AS publicKeyHex, name, type, first_heard_at AS firstHeardAt, last_heard_at AS lastHeardAt
+        FROM nodes
+        ${whereClause}
+        ORDER BY last_heard_at DESC
+        LIMIT ? OFFSET ?
+      `
+      )
+      .all(q, q, normalizedQ, type, type, limit, offset);
+
+    return {
+      total: Number(total),
+      nodes: rows.map((row) => ({ ...row, firstHeardAt: Number(row.firstHeardAt), lastHeardAt: Number(row.lastHeardAt) }))
+    };
+  }
+
+  /**
+   * Every node whose public key starts with `prefixHex` (already normalized/
+   * validated by the caller - see NodeRegistry#findByPrefix), optionally
+   * narrowed to one `type`, most-recently-heard first. This is the
+   * `!lookup` bot command's actual read path now - deliberately separate
+   * from queryNodes() above, which also matches a name substring and is
+   * paginated for the dashboard's browse/search table; a bare public-key
+   * prefix match with the *full* match set (not a page of it) is what
+   * NodeRegistry needs to decide found/not_found/ambiguous.
+   *
+   * @param {string} prefixHex
+   * @param {{type?: string}} [options]
+   * @returns {{publicKeyHex: string, name: string, type: string|null, firstHeardAt: number, lastHeardAt: number}[]}
+   */
+  findNodesByPublicKeyPrefix(prefixHex, { type = '' } = {}) {
+    const rows = this.#db
+      .prepare(
+        `
+        SELECT public_key_hex AS publicKeyHex, name, type, first_heard_at AS firstHeardAt, last_heard_at AS lastHeardAt
+        FROM nodes
+        WHERE public_key_hex LIKE ? || '%'
+          AND (? = '' OR type = ?)
+        ORDER BY last_heard_at DESC
+      `
+      )
+      .all(prefixHex, type, type);
+
+    return rows.map((row) => ({ ...row, firstHeardAt: Number(row.firstHeardAt), lastHeardAt: Number(row.lastHeardAt) }));
+  }
+
+  /**
+   * Inserts one reply as `status = 'pending'` (see reply-queue.js's
+   * enqueue()). Every field ChannelBot#sendQueuedReply and ReplyQueue's own
+   * logging need travels with the row, so a fresh process can fully resume
+   * it later with no extra lookups - see the v5 migration's doc comment for
+   * why this and every resolved reply live in the same table now.
+   *
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, enqueuedAt: number, expiresAt: number}} item
+   */
+  enqueueReplyItem(item) {
+    this.#insertBotReplyStmt.run(
+      item.botName,
+      item.channel,
+      item.trigger,
+      item.sender,
+      item.hopCount,
+      item.path,
+      item.hash,
+      item.query ?? null,
+      item.lookupOutcome ?? null,
+      item.name ?? null,
+      item.matchCount ?? null,
+      item.enqueuedAt,
+      item.expiresAt
+    );
+  }
+
+  /** How many replies are currently queued (`status = 'pending'`) - see ReplyQueue#getStats(). */
+  countPendingReplyItems() {
+    const { total } = this.#countPendingBotRepliesStmt.get();
+    return Number(total);
+  }
+
+  /**
+   * Marks every pending item whose `expiresAt` is at or before `now` as
+   * `status = 'expired'` (`resolved_at`/`queued_ms` set to match) and
+   * returns what they were, oldest first - ReplyQueue calls this at the
+   * start of every tick (see its own #tick()) to expire stale items,
+   * whether they went stale during normal operation or across a restart (a
+   * resumed item's `expiresAt` is a fixed point in time from its original
+   * enqueue, so downtime longer than its remaining TTL expires it here
+   * exactly as if the process had never stopped).
+   *
+   * @param {number} now
+   * @returns {object[]} the now-expired items, as they were *before* this call (still carrying the old `status: 'pending'`).
+   */
+  takeExpiredReplyItems(now) {
+    const rows = this.#selectExpiredBotRepliesStmt.all(now);
+    if (rows.length > 0) {
+      this.#expireBotRepliesStmt.run(now, now, now);
+    }
+    return rows.map(mapBotReplyRow);
+  }
+
+  /**
+   * The single oldest pending item, or `null` if none are queued -
+   * ReplyQueue calls this once a quiet window is observed (see its own
+   * #tick()), then calls resolveReplyItem() once dispatch settles. Unlike
+   * the in-memory array this replaced (`Array#shift()`), this does *not*
+   * remove the row - it stays `status = 'pending'` until resolveReplyItem()
+   * is called, so a failure between the two (an unexpected process death,
+   * or - far more likely - resolveReplyItem() itself failing) leaves the
+   * item queued to be picked up again rather than silently lost. The
+   * tradeoff is the opposite risk: if the item's *dispatch* already
+   * succeeded but resolveReplyItem() then fails, a future tick could
+   * re-dispatch (and thus double-send) it - see ReplyQueue's own handling.
+   *
+   * @returns {object|null}
+   */
+  peekOldestPendingReplyItem() {
+    const row = this.#peekOldestPendingBotReplyStmt.get();
+    return row ? mapBotReplyRow(row) : null;
+  }
+
+  /**
+   * Resolves one reply by id - the counterpart to peekOldestPendingReplyItem()
+   * and takeExpiredReplyItems() above; this is the only way a row moves out
+   * of `status = 'pending'` for a reply that was actually dispatched.
+   *
+   * @param {number} id
+   * @param {{status: 'sent'|'failed', resolvedAt: number, queuedMs: number}} resolution
+   */
+  resolveReplyItem(id, { status, resolvedAt, queuedMs }) {
+    this.#resolveBotReplyStmt.run(status, resolvedAt, queuedMs, id);
+  }
+
+  /** One reply by id, in the same shape as the pending-item queries above - for diagnostics/tests. */
+  getReplyById(id) {
+    const row = this.#db.prepare(`SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE id = ?`).get(id);
+    return row ? mapBotReplyRow(row) : null;
+  }
+
+  /** Deletes packet samples/their child rows, and resolved (never pending) replies, at or before `cutoffMs`. */
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {
       this.#db.prepare('DELETE FROM metrics_sample_packet_types WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_sample_broker_deliveries WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);
-      this.#db.prepare('DELETE FROM bot_reply_events WHERE occurred_at < ?').run(cutoffMs);
+      this.#db.prepare("DELETE FROM bot_replies WHERE status != 'pending' AND resolved_at < ?").run(cutoffMs);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

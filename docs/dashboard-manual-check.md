@@ -25,6 +25,18 @@ the dashboard (default `http://127.0.0.1:8090/`).
 - [ ] Each configured bot has its own card with an enabled/ready status
       badge, a command table, and a matching pie chart.
 - [ ] MQTT brokers table shows each configured broker's live connect state.
+- [ ] Repeaters section: Added/Updated tiles change when the range selector
+      changes (they're range-scoped, like Sent/Expired/Failed).
+- [ ] Repeaters table lists known repeaters, most-recently-heard first, and
+      does *not* change when the range selector changes (it's live current
+      state) or reset on every live SSE tick (it should hold still while
+      you're reading/searching it).
+- [ ] Typing in the repeaters search box (a name substring or a public-key
+      hex prefix) filters the table after a brief pause, and resets to page
+      1; clearing it shows every repeater again.
+- [ ] Repeaters table pagination: Next/Prev step through pages correctly,
+      Prev is disabled on page 1, Next is disabled on the last page, and the
+      "X-Y of Z" note matches what's shown.
 - [ ] Connection indicator (top right) reads "connecting…" briefly, then
       "live"; disconnecting the observer process flips it to
       "disconnected".

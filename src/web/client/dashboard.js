@@ -18,8 +18,18 @@ import {
   parseCustomRangeInputs,
   buildHistoryChartData,
   chartNoteForBuckets,
-  buildPacketTypeTotals
+  buildPacketTypeTotals,
+  formatNodePageRange
 } from './dashboard-logic.js';
+
+// The dashboard's "Repeaters" section is deliberately scoped to REPEATER
+// only (both the added/updated tiles and the search/browse table below) -
+// the node registry itself tracks every advertised type as a general
+// contact list (see docs/plans/feat-bot_command_to_lookup_repeater_name.md),
+// but this section mirrors the !lookup bot command's own REPEATER-only
+// scope rather than exposing every type here too.
+const NODE_TYPE = 'REPEATER';
+const NODES_PAGE_SIZE = 25;
 
 const RANGE_PRESETS = [
   { value: '1h', label: '1h' },
@@ -42,6 +52,12 @@ let customEndMs = null;
 // it's kept separately from the range-queried command data and folded
 // into each bot's card by applyBotStatusBadges().
 const latestBotStatusByName = new Map();
+// Search/pagination state for the node table - independent of the page's
+// range selector (the table is live current state, not history), so it
+// isn't part of refreshRangeData()'s Promise.all batch.
+let nodesSearchQuery = '';
+let nodesOffset = 0;
+let nodesSearchDebounce = null;
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -228,6 +244,77 @@ function renderBrokerDeliveries(brokerDeliveriesResponse) {
   }
 }
 
+function renderNodeTotals(nodeTotalsResponse) {
+  document.getElementById('nodes-added').textContent = nodeTotalsResponse.totals.added;
+  document.getElementById('nodes-updated').textContent = nodeTotalsResponse.totals.updated;
+}
+
+// Truncated to a readable prefix for the table cell; the full key is still
+// available via the cell's title attribute (hover/long-press) and is what
+// the search box itself matches against in full - see queryNodes() in
+// src/metrics/store.js.
+function formatPublicKeyCell(publicKeyHex) {
+  return publicKeyHex.slice(0, 12) + '…';
+}
+
+function renderNodesList(nodesResponse) {
+  const body = document.querySelector('#nodes-table tbody');
+  body.innerHTML = '';
+  for (const node of nodesResponse.nodes) {
+    const row = body.insertRow();
+    row.insertCell().textContent = node.name;
+    const keyCell = row.insertCell();
+    keyCell.textContent = formatPublicKeyCell(node.publicKeyHex);
+    keyCell.title = node.publicKeyHex;
+    row.insertCell().textContent = formatTimestamp(node.firstHeardAt);
+    row.insertCell().textContent = formatTimestamp(node.lastHeardAt);
+  }
+
+  document.getElementById('nodes-page-note').textContent = formatNodePageRange(nodesOffset, NODES_PAGE_SIZE, nodesResponse.total);
+  document.getElementById('nodes-prev').disabled = nodesOffset === 0;
+  document.getElementById('nodes-next').disabled = nodesOffset + NODES_PAGE_SIZE >= nodesResponse.total;
+}
+
+// Fetches the current node-table page (search/type-filtered, paginated) -
+// deliberately separate from refreshRangeData()'s Promise.all batch, since
+// this reflects live current state (see MetricsStore#queryNodes), not a
+// history window, and isn't re-fetched on every SSE tick either (that
+// would reset pagination/clobber an in-progress search every few seconds).
+async function refreshNodesList() {
+  try {
+    const params = { type: NODE_TYPE, limit: NODES_PAGE_SIZE, offset: nodesOffset };
+    if (nodesSearchQuery) {
+      params.q = nodesSearchQuery;
+    }
+    const res = await fetch('/api/nodes?' + buildQueryString(params));
+    if (!res.ok) {
+      throw new Error('nodes query failed (' + res.status + ')');
+    }
+    renderNodesList(await res.json());
+  } catch (err) {
+    console.error('failed to refresh the repeaters table', err);
+  }
+}
+
+function initNodesSearch() {
+  document.getElementById('nodes-search').addEventListener('input', (event) => {
+    clearTimeout(nodesSearchDebounce);
+    nodesSearchDebounce = setTimeout(() => {
+      nodesSearchQuery = event.target.value.trim();
+      nodesOffset = 0;
+      refreshNodesList();
+    }, 300);
+  });
+  document.getElementById('nodes-prev').addEventListener('click', () => {
+    nodesOffset = Math.max(0, nodesOffset - NODES_PAGE_SIZE);
+    refreshNodesList();
+  });
+  document.getElementById('nodes-next').addEventListener('click', () => {
+    nodesOffset += NODES_PAGE_SIZE;
+    refreshNodesList();
+  });
+}
+
 // Per-bot DOM/chart state, keyed by bot name. The configured bot set is
 // fixed for the life of a running server, so each bot's block/chart is
 // built once on first sight and only its data is updated on later
@@ -338,18 +425,20 @@ async function refreshRangeData() {
 
   try {
     const qs = buildQueryString(params);
-    const [historyRes, packetTypesRes, replyQueueRes, botCommandsRes, brokersRes] = await Promise.all([
+    const nodesTotalsQs = buildQueryString({ ...params, type: NODE_TYPE });
+    const [historyRes, packetTypesRes, replyQueueRes, botCommandsRes, brokersRes, nodeTotalsRes] = await Promise.all([
       fetch('/api/metrics/history?' + qs),
       fetch('/api/metrics/packet-types?' + qs),
       fetch('/api/metrics/reply-queue?' + qs),
       fetch('/api/metrics/bots/commands?' + qs),
-      fetch('/api/metrics/brokers?' + qs)
+      fetch('/api/metrics/brokers?' + qs),
+      fetch('/api/metrics/nodes?' + nodesTotalsQs)
     ]);
-    if (!historyRes.ok || !packetTypesRes.ok || !replyQueueRes.ok || !botCommandsRes.ok || !brokersRes.ok) {
+    if (!historyRes.ok || !packetTypesRes.ok || !replyQueueRes.ok || !botCommandsRes.ok || !brokersRes.ok || !nodeTotalsRes.ok) {
       throw new Error(
         'range query failed (history ' + historyRes.status + ', packet-types ' + packetTypesRes.status +
           ', reply-queue ' + replyQueueRes.status + ', bots/commands ' + botCommandsRes.status +
-          ', brokers ' + brokersRes.status + ')'
+          ', brokers ' + brokersRes.status + ', nodes ' + nodeTotalsRes.status + ')'
       );
     }
     renderChart(await historyRes.json());
@@ -357,6 +446,7 @@ async function refreshRangeData() {
     renderReplyQueueTotals(await replyQueueRes.json());
     renderBotCommands(await botCommandsRes.json());
     renderBrokerDeliveries(await brokersRes.json());
+    renderNodeTotals(await nodeTotalsRes.json());
   } catch (err) {
     console.error('failed to refresh range-aware metrics', err);
   }
@@ -417,6 +507,7 @@ function initRangeSelector() {
 async function bootstrap() {
   initChart();
   initRangeSelector();
+  initNodesSearch();
 
   try {
     const metricsRes = await fetch('/api/metrics');
@@ -425,6 +516,12 @@ async function bootstrap() {
     console.error('failed to load initial metrics', err);
   }
   await refreshRangeData();
+  // Not part of refreshRangeData()'s range-aware batch (the table is live
+  // current state, not history - see refreshNodesList()'s own doc
+  // comment) and not re-fetched on every SSE tick either, so typing in the
+  // search box or paging through results doesn't get clobbered by the
+  // next live update a few seconds later.
+  await refreshNodesList();
 
   const source = new EventSource('/api/metrics/stream');
   source.onopen = () => setConnectionState('live');

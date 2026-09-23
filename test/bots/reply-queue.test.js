@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
+import { MetricsStore } from '../../src/metrics/store.js';
 
 function silentLogger() {
   const calls = { warn: [] };
@@ -42,6 +43,29 @@ const QUIET_MS = 30;
 const TTL_MS = 200;
 const POLL_MS = 5;
 
+// A real MetricsStore (:memory:), not a hand-rolled fake - ReplyQueue now
+// reads/writes its pending AND resolved replies through MetricsStore's
+// enqueueReplyItem/countPendingReplyItems/takeExpiredReplyItems/
+// peekOldestPendingReplyItem/resolveReplyItem rather than an in-memory
+// array plus a separate injected recordOutcome hook (persisted state is a
+// core observer capability now, independent of the dashboard, and a
+// reply's whole lifecycle lives in one table - see AGENTS.md's
+// "Persistence" section and the store's v5 migration doc comment), so
+// exercising it against the real SQL contract is both simpler and more
+// representative than a second, parallel in-memory implementation that
+// could drift from it.
+function newQueue(overrides = {}) {
+  const store = overrides.store ?? new MetricsStore({ dbPath: ':memory:' });
+  return new ReplyQueue({
+    quietMs: QUIET_MS,
+    ttlMs: TTL_MS,
+    pollIntervalMs: POLL_MS,
+    logger: silentLogger(),
+    store,
+    ...overrides
+  });
+}
+
 function waitFor(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
   return new Promise((resolve, reject) => {
     const start = Date.now();
@@ -62,7 +86,7 @@ function waitFor(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
 
 test('does not send immediately - a queued reply waits for a quiet window', async () => {
   const { dispatch, calls } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem());
   assert.equal(calls.length, 0, 'must not dispatch before any quiet window has elapsed');
@@ -73,7 +97,7 @@ test('does not send immediately - a queued reply waits for a quiet window', asyn
 
 test('a queued item carries channel, sender, hopCount, path, and hash - not just botName/trigger', async () => {
   const { dispatch, calls } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem({ botName: 'echo_bot', channel: '#echo', trigger: '!echo', sender: 'Jeymz', hopCount: 3, path: 'AA➡️BB', hash: 'abc123' }));
   await waitFor(() => calls.length === 1);
@@ -86,7 +110,7 @@ test('a queued item carries channel, sender, hopCount, path, and hash - not just
 
 test('repeated activity keeps resetting the quiet clock, delaying the send', async () => {
   const { dispatch, calls } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
   queue.enqueue(baseItem());
 
   // Keep the channel "busy" for longer than quietMs by repeatedly
@@ -103,7 +127,7 @@ test('repeated activity keeps resetting the quiet clock, delaying the send', asy
 
 test('sends queued replies in FIFO order, one quiet window at a time', async () => {
   const { dispatch, calls } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem({ trigger: '!first' }));
   queue.enqueue(baseItem({ trigger: '!second' }));
@@ -122,7 +146,7 @@ test('sending an item resets the quiet clock, so the next item still needs its o
     '!first': () => sendTimestamps.push(Date.now()),
     '!second': () => sendTimestamps.push(Date.now())
   });
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem({ trigger: '!first' }));
   queue.enqueue(baseItem({ trigger: '!second' }));
@@ -136,7 +160,7 @@ test('drops an item that expires before a quiet window is observed, and logs a w
   const { dispatch, calls } = testDispatcher();
   const logger = silentLogger();
   // ttlMs shorter than quietMs guarantees expiry fires before eligibility.
-  const queue = new ReplyQueue({ quietMs: 500, ttlMs: 20, pollIntervalMs: POLL_MS, logger, dispatch });
+  const queue = newQueue({ quietMs: 500, ttlMs: 20, logger, dispatch });
 
   queue.enqueue(baseItem({ channel: '#echo', sender: 'Jeymz' }));
 
@@ -159,7 +183,7 @@ test('a slow-resolving dispatch does not cause a concurrent send from the next p
     },
     '!second': () => events.push('end:!second')
   });
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem({ trigger: '!slow' }));
   queue.enqueue(baseItem({ trigger: '!second' }));
@@ -175,7 +199,7 @@ test('logs a warning with channel/sender and continues when dispatching a queued
       throw new Error('radio busy');
     }
   });
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger, dispatch });
+  const queue = newQueue({ logger, dispatch });
 
   queue.enqueue(baseItem({ trigger: '!broken', channel: '#echo', sender: 'Jeymz' }));
   queue.enqueue(baseItem({ trigger: '!ok' }));
@@ -187,10 +211,9 @@ test('logs a warning with channel/sender and continues when dispatching a queued
   assert.equal(failureLog.meta.sender, 'Jeymz');
 });
 
-test('getStats() reports only the live queue depth - lifetime counters are persisted via recordOutcome instead', async () => {
-  const logger = silentLogger();
+test('getStats() reports only the live queue depth - lifetime counters are queried back from the store instead', async () => {
   const { dispatch } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger, dispatch });
+  const queue = newQueue({ dispatch });
 
   assert.deepEqual(queue.getStats(), { size: 0 });
 
@@ -201,32 +224,25 @@ test('getStats() reports only the live queue depth - lifetime counters are persi
   assert.deepEqual(queue.getStats(), { size: 0 });
 });
 
-test('stop() drops every queued reply without sending it, and logs a warning per dropped item', async () => {
+test('stop() leaves pending items in the store untouched, rather than dropping them', async () => {
   const { dispatch, calls } = testDispatcher();
-  const logger = silentLogger();
   // quietMs long enough that neither item would have sent on its own before
   // stop() runs.
-  const queue = new ReplyQueue({ quietMs: 10000, ttlMs: 60000, pollIntervalMs: POLL_MS, logger, dispatch });
+  const queue = newQueue({ quietMs: 10000, ttlMs: 60000, dispatch });
 
-  queue.enqueue(baseItem({ trigger: '!first', channel: '#echo', sender: 'Jeymz' }));
-  queue.enqueue(baseItem({ trigger: '!second', channel: '#echo', sender: 'Robotti' }));
+  queue.enqueue(baseItem({ trigger: '!first' }));
+  queue.enqueue(baseItem({ trigger: '!second' }));
   assert.equal(queue.size, 2);
 
   await queue.stop();
 
-  assert.equal(queue.size, 0);
-  assert.equal(calls.length, 0, 'a cancelled item must never reach dispatch');
-  const dropped = logger.calls.warn.filter((c) => c.message.includes('dropped a queued reply on shutdown'));
-  assert.equal(dropped.length, 2);
-  assert.deepEqual(
-    dropped.map((c) => c.meta.trigger).sort(),
-    ['!first', '!second']
-  );
+  assert.equal(queue.size, 2, 'a clean shutdown must not drop pending items - see the class doc comment');
+  assert.equal(calls.length, 0, 'nothing should have been dispatched before stop()');
 });
 
 test('stop() prevents further enqueue() calls from being accepted', async () => {
   const { dispatch, calls } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   await queue.stop();
   queue.enqueue(baseItem());
@@ -238,7 +254,7 @@ test('stop() prevents further enqueue() calls from being accepted', async () => 
 
 test('stop() is idempotent', async () => {
   const { dispatch } = testDispatcher();
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem());
   await queue.stop();
@@ -254,7 +270,7 @@ test('stop() waits for an in-flight send to finish before resolving', async () =
       events.push('end');
     }
   });
-  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+  const queue = newQueue({ dispatch });
 
   queue.enqueue(baseItem({ trigger: '!slow' }));
   await waitFor(() => events.includes('start'));
@@ -263,107 +279,152 @@ test('stop() waits for an in-flight send to finish before resolving', async () =
   assert.deepEqual(events, ['start', 'end']);
 });
 
-test('recordOutcome is called with "sent", including sender/hash/queuedMs, once a reply actually sends', async () => {
-  const { dispatch } = testDispatcher();
-  const recorded = [];
-  const queue = new ReplyQueue({
-    quietMs: QUIET_MS,
-    ttlMs: TTL_MS,
-    pollIntervalMs: POLL_MS,
-    logger: silentLogger(),
-    dispatch,
-    recordOutcome: (event) => recorded.push(event)
-  });
+test('a reply is resolved to "sent", including sender/hash/queuedMs, once it actually sends', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
 
   queue.enqueue(baseItem({ trigger: '!echo', sender: 'Jeymz', hash: 'deadbeef' }));
-  await waitFor(() => recorded.length === 1);
+  await waitFor(() => calls.length === 1);
+  const resolved = store.getReplyById(calls[0].id);
 
-  assert.equal(recorded[0].botName, 'echo');
-  assert.equal(recorded[0].trigger, '!echo');
-  assert.equal(recorded[0].sender, 'Jeymz');
-  assert.equal(recorded[0].hash, 'deadbeef');
-  assert.equal(recorded[0].outcome, 'sent');
-  assert.ok(Number.isInteger(recorded[0].occurredAt));
-  assert.ok(recorded[0].queuedMs >= 0);
+  assert.equal(resolved.botName, 'echo');
+  assert.equal(resolved.trigger, '!echo');
+  assert.equal(resolved.sender, 'Jeymz');
+  assert.equal(resolved.hash, 'deadbeef');
+  assert.equal(resolved.status, 'sent');
+  assert.ok(Number.isInteger(resolved.resolvedAt));
+  assert.ok(resolved.queuedMs >= 0);
+  store.close();
 });
 
-test('recordOutcome is called with "failed" when dispatching a queued item throws', async () => {
-  const { dispatch } = testDispatcher({
+test('a reply is resolved to "failed" when dispatching it throws', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const { dispatch, calls } = testDispatcher({
     '!broken': () => {
       throw new Error('radio busy');
     }
   });
-  const recorded = [];
-  const queue = new ReplyQueue({
-    quietMs: QUIET_MS,
-    ttlMs: TTL_MS,
-    pollIntervalMs: POLL_MS,
-    logger: silentLogger(),
-    dispatch,
-    recordOutcome: (event) => recorded.push(event)
-  });
+  const queue = newQueue({ store, dispatch });
 
   queue.enqueue(baseItem({ trigger: '!broken' }));
-  await waitFor(() => recorded.length === 1);
+  await waitFor(() => calls.length === 1);
+  const resolved = store.getReplyById(calls[0].id);
 
-  assert.equal(recorded[0].outcome, 'failed');
-  assert.equal(recorded[0].trigger, '!broken');
+  assert.equal(resolved.status, 'failed');
+  assert.equal(resolved.trigger, '!broken');
+  store.close();
 });
 
-test('recordOutcome is called with "expired" when a reply is dropped before a quiet window is observed', async () => {
+test('a reply is resolved to "expired" when dropped before a quiet window is observed', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
   const { dispatch } = testDispatcher();
-  const recorded = [];
-  const queue = new ReplyQueue({
-    quietMs: 500,
-    ttlMs: 20,
-    pollIntervalMs: POLL_MS,
-    logger: silentLogger(),
-    dispatch,
-    recordOutcome: (event) => recorded.push(event)
-  });
+  const queue = newQueue({ quietMs: 500, ttlMs: 20, store, dispatch });
 
   queue.enqueue(baseItem({ trigger: '!echo' }));
-  await waitFor(() => recorded.length === 1, { timeoutMs: 2000 });
+  // Captured synchronously, right after enqueue() writes it - before the
+  // poll timer's first tick has any chance to run.
+  const { id } = store.peekOldestPendingReplyItem();
 
-  assert.equal(recorded[0].outcome, 'expired');
-  assert.ok(recorded[0].queuedMs >= 20);
+  await waitFor(() => store.getReplyById(id).status !== 'pending', { timeoutMs: 2000 });
+  const resolved = store.getReplyById(id);
+
+  assert.equal(resolved.status, 'expired');
+  assert.ok(resolved.queuedMs >= 20);
+  store.close();
 });
 
-test('recordOutcome is called with "cancelled" for every reply dropped by stop()', async () => {
-  const { dispatch } = testDispatcher();
-  const recorded = [];
-  const queue = new ReplyQueue({
-    quietMs: 10000,
-    ttlMs: 60000,
-    pollIntervalMs: POLL_MS,
-    logger: silentLogger(),
-    dispatch,
-    recordOutcome: (event) => recorded.push(event)
-  });
-
-  queue.enqueue(baseItem({ trigger: '!echo' }));
-  await queue.stop();
-
-  assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].outcome, 'cancelled');
-});
-
-test('a failure inside recordOutcome is caught and logged, and does not prevent the reply from sending', async () => {
+test('a resolveReplyItem failure is caught and logged (as a possible-duplicate risk), and does not crash the tick', async () => {
   const { dispatch, calls } = testDispatcher();
   const logger = silentLogger();
-  const queue = new ReplyQueue({
-    quietMs: QUIET_MS,
-    ttlMs: TTL_MS,
-    pollIntervalMs: POLL_MS,
-    logger,
-    dispatch,
-    recordOutcome: () => {
+  const brokenStore = {
+    enqueueReplyItem: () => {},
+    countPendingReplyItems: () => 1,
+    takeExpiredReplyItems: () => [],
+    peekOldestPendingReplyItem: () => ({ id: 1, botName: 'echo', trigger: '!echo', channel: '#echo', sender: 'Jeymz', enqueuedAt: Date.now() }),
+    resolveReplyItem: () => {
       throw new Error('store unavailable');
     }
-  });
+  };
+  const queue = newQueue({ logger, dispatch, store: brokenStore });
 
   queue.enqueue(baseItem({ trigger: '!echo' }));
   await waitFor(() => calls.length === 1);
+  // The broken store's resolveReplyItem() never actually resolves the
+  // item, so it would otherwise be re-dispatched forever (the documented
+  // duplicate-send risk) - stop() as soon as the warning is observed,
+  // rather than leaving the timer running past this test.
+  await waitFor(() => logger.calls.warn.some((c) => c.message.includes('failed to mark a reply resolved')));
+  await queue.stop();
 
-  assert.ok(logger.calls.warn.some((c) => c.message.includes('failed to record a reply outcome')));
+  assert.ok(logger.calls.warn.some((c) => c.message.includes('failed to mark a reply resolved')));
+});
+
+// --- Resume-after-restart (persisted pending items) --------------------
+
+test('start() resumes a reply that was still pending in the store from a previous process', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const now = Date.now();
+  // Simulates a row left behind by a previous, now-gone ReplyQueue
+  // instance - written directly to the store, never through this
+  // process's own enqueue().
+  store.enqueueReplyItem({ ...baseItem({ trigger: '!resumed' }), enqueuedAt: now, expiresAt: now + TTL_MS });
+
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
+
+  assert.equal(calls.length, 0, 'must not dispatch before start() even notices the resumed item');
+  queue.start();
+
+  await waitFor(() => calls.length === 1, { timeoutMs: 2000 });
+  assert.equal(calls[0].trigger, '!resumed');
+  store.close();
+});
+
+test('start() does nothing when nothing was left pending', () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
+
+  assert.doesNotThrow(() => queue.start());
+  assert.equal(calls.length, 0);
+  store.close();
+});
+
+test('a resumed item that is already past its TTL is expired on the first tick, not dispatched', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const now = Date.now();
+  // expiresAt already in the past - as if this process started long after
+  // the item was originally queued (a crash, or extended downtime).
+  store.enqueueReplyItem({ ...baseItem({ trigger: '!stale' }), enqueuedAt: now - 5000, expiresAt: now - 1000 });
+  const { id } = store.peekOldestPendingReplyItem();
+
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
+
+  queue.start();
+  await waitFor(() => store.getReplyById(id).status !== 'pending', { timeoutMs: 2000 });
+
+  assert.equal(calls.length, 0, 'a resumed-but-stale item must never dispatch');
+  assert.equal(store.getReplyById(id).status, 'expired');
+  store.close();
+});
+
+test('start() called twice does not start a second timer (idempotent alongside enqueue())', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const now = Date.now();
+  store.enqueueReplyItem({ ...baseItem({ trigger: '!resumed' }), enqueuedAt: now, expiresAt: now + TTL_MS });
+
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
+
+  queue.start();
+  queue.start();
+  await waitFor(() => calls.length === 1, { timeoutMs: 2000 });
+
+  // A doubled timer would tend to double-dispatch or race; give it a
+  // moment past the first send to confirm nothing further happens.
+  await new Promise((resolve) => setTimeout(resolve, QUIET_MS * 2));
+  assert.equal(calls.length, 1);
+  store.close();
 });

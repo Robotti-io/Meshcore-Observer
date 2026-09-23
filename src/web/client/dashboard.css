@@ -81,3 +81,9 @@ td.count { text-align: right; font-variant-numeric: tabular-nums; }
 .bot-command-block .total-replies { font-size: 0.8rem; opacity: 0.75; margin: 0.5rem 0 0; }
 .bot-command-block .empty-note { font-size: 0.8rem; opacity: 0.7; }
 .status-badge { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
+.search-bar { margin-bottom: 0.6rem; }
+.search-bar input[type="search"] { font: inherit; font-size: 0.9rem; padding: 0.35rem 0.6rem; border-radius: 6px; border: 1px solid var(--control-border); background: canvas; color: canvastext; width: 100%; max-width: 320px; box-sizing: border-box; }
+.pagination { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; font-size: 0.85rem; }
+.pagination button { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.7rem; border-radius: 6px; border: 1px solid var(--control-border); background: transparent; color: canvastext; cursor: pointer; }
+.pagination button:disabled { opacity: 0.4; cursor: default; }
+.pagination span { opacity: 0.75; }

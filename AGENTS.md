@@ -37,7 +37,32 @@
 - Approved dev dependency: `eslint` (+ `@eslint/js`).
 - Do not add further dependencies (runtime or dev) without explicit human
   approval. In particular, no second MeshCore decoding library, no HTTP
-  framework, no logging framework, no persistence/database library in v1.
+  framework, no logging framework, no third-party persistence/database
+  library — `node:sqlite` (a Node built-in, not an npm package) is the one
+  approved storage engine; see "Persistence" below.
+
+## Persistence
+
+- `node:sqlite` (`src/metrics/store.js`'s `MetricsStore`) is this
+  observer's core, always-on data store. It opens unconditionally at
+  startup, independent of whether the optional HTTP dashboard
+  (`PACKETCAPTURE_METRICS_UI_ENABLED`) is on — that flag only gates the
+  dashboard's HTTP server, never whether data gets persisted.
+- Node >=22.13.0 (required for `node:sqlite`) is therefore a hard runtime
+  requirement, not just a `package.json` aspiration: startup fails if the
+  store can't be opened (same as an invalid configuration value — see
+  "Configuration" above).
+- A feature's state belongs in this store, not an in-memory structure,
+  whenever it's queryable data the dashboard or a bot command reads back
+  (e.g. the node/repeater registry `!lookup` uses, bot reply-lifecycle
+  counts). Purely transient, operational state that has no value once
+  handled — an anti-duplicate cache's recent-hash window, a reply queue's
+  not-yet-sent items — stays in memory; it's runtime bookkeeping, not a
+  dataset.
+- Raw packet data is the deliberate exception: this observer ships it to
+  the configured MQTT broker(s) per the observer capability
+  specification, which is its persistence — it is not additionally stored
+  locally.
 
 ## Protected boundaries requiring human approval
 

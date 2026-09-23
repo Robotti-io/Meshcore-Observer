@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRangeQuery, validateRangeOnlyQuery, validateMetricsHistoryQuery } from '../../src/web/schemas.js';
+import {
+  parseRangeQuery,
+  validateRangeOnlyQuery,
+  validateMetricsHistoryQuery,
+  validateNodeTotalsQuery,
+  parseNodesListQuery,
+  validateNodesListQuery
+} from '../../src/web/schemas.js';
 
 test('parseRangeQuery converts known numeric fields, and carries an unrecognized key through as a string', () => {
   const query = parseRangeQuery(new URLSearchParams('range=24h&typo=1'));
@@ -38,4 +45,43 @@ test('an unparseable numeric value becomes NaN, which the integer type keyword r
   const query = parseRangeQuery(new URLSearchParams('start=oops&end=2000'));
   assert.ok(Number.isNaN(query.start));
   assert.equal(validateRangeOnlyQuery(query), false);
+});
+
+test('validateNodeTotalsQuery accepts a range plus an optional type filter', () => {
+  const query = parseRangeQuery(new URLSearchParams('range=24h&type=REPEATER'));
+  assert.equal(validateNodeTotalsQuery(query), true);
+});
+
+test('validateNodeTotalsQuery rejects a type outside the known advert-type enum', () => {
+  const query = parseRangeQuery(new URLSearchParams('range=24h&type=BOGUS'));
+  assert.equal(validateNodeTotalsQuery(query), false);
+});
+
+test('validateNodeTotalsQuery still requires exactly one of range or start/end', () => {
+  assert.equal(validateNodeTotalsQuery({ type: 'REPEATER' }), false);
+});
+
+test('parseNodesListQuery converts limit/offset to numbers, leaves q/type as strings', () => {
+  const query = parseNodesListQuery(new URLSearchParams('q=summit&type=REPEATER&limit=10&offset=20'));
+  assert.deepEqual(query, { q: 'summit', type: 'REPEATER', limit: 10, offset: 20 });
+});
+
+test('validateNodesListQuery accepts an empty query (every field optional)', () => {
+  assert.equal(validateNodesListQuery({}), true);
+});
+
+test('validateNodesListQuery rejects an unrecognized parameter', () => {
+  const query = parseNodesListQuery(new URLSearchParams('q=summit&typo=1'));
+  assert.equal(validateNodesListQuery(query), false);
+});
+
+test('validateNodesListQuery rejects a type outside the known advert-type enum', () => {
+  const query = parseNodesListQuery(new URLSearchParams('type=BOGUS'));
+  assert.equal(validateNodesListQuery(query), false);
+});
+
+test('validateNodesListQuery rejects a limit outside [1, 200]', () => {
+  assert.equal(validateNodesListQuery({ limit: 0 }), false);
+  assert.equal(validateNodesListQuery({ limit: 201 }), false);
+  assert.equal(validateNodesListQuery({ limit: 200 }), true);
 });

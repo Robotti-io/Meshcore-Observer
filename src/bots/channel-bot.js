@@ -62,6 +62,8 @@ export class ChannelBot {
   #minHops;
   #maxMessageBytes;
   #commands;
+  #lookupCommands;
+  #nodeRegistry;
   #logger;
   #deduplicator;
   #channelIdx = null;
@@ -92,7 +94,8 @@ export class ChannelBot {
     botConfig,
     logger,
     deduplicator = new PacketDeduplicator(),
-    replyQueue
+    replyQueue,
+    nodeRegistry
   }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
@@ -101,8 +104,14 @@ export class ChannelBot {
     this.#minHops = botConfig.minHops;
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
+    this.#lookupCommands = botConfig.commands.filter((command) => command.kind === 'lookup');
+    this.#nodeRegistry = nodeRegistry;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
+
+    if (this.#lookupCommands.length > 0 && !nodeRegistry) {
+      throw new Error(`bot "${this.#name}" has a lookup command but no nodeRegistry was provided`);
+    }
     // sendQueuedReply() intentionally lets a send failure propagate (see
     // its own doc comment) for a real ReplyQueue to catch/count/log - this
     // default stub is the one place standing in for that catch when no
@@ -259,7 +268,25 @@ export class ChannelBot {
       return;
     }
 
-    const command = this.#commands.get(decrypted.text);
+    let command = this.#commands.get(decrypted.text);
+    // Distinct name from ReplyQueue's own `outcome` ('sent'/'failed'/...
+    // written onto a spread copy of the queued item once dispatch settles,
+    // see reply-queue.js#safeRecordOutcome) - this is a different axis
+    // entirely (which of a 'lookup' command's four response templates
+    // applies), and reusing the same name would read as if one shadowed
+    // the other.
+    let lookupOutcome;
+    let query;
+    let name;
+    let matchCount;
+
+    if (!command) {
+      const lookupMatch = this.#matchLookupCommand(decrypted.text);
+      if (lookupMatch) {
+        ({ command, outcome: lookupOutcome, query, name, matchCount } = lookupMatch);
+      }
+    }
+
     if (!command) {
       this.#logger.debug('bots.channelBot', 'decrypted message did not match any configured trigger', {
         bot: this.#name,
@@ -314,7 +341,12 @@ export class ChannelBot {
     this.#replyQueue.enqueue({
       botName: this.#name,
       channel: this.#channelName,
-      trigger: decrypted.text,
+      // command.trigger, not decrypted.text: for a 'lookup' command
+      // decrypted.text also carries the query argument (e.g.
+      // "!lookup E85C"), but sendQueuedReply looks the command config back
+      // up by its bare trigger. For an 'exact' command the two are always
+      // identical, since that's what made this.#commands.get() match.
+      trigger: command.trigger,
       sender: decrypted.sender,
       hopCount,
       path: formatPath(packet),
@@ -325,8 +357,55 @@ export class ChannelBot {
       // This is the SAME hash published in the MQTT "packets" topic
       // payload's "hash" field (there uppercase, matching the existing
       // compatibility format), just lowercased for this purpose.
-      hash: hash.toLowerCase()
+      hash: hash.toLowerCase(),
+      // Only populated for a 'lookup' command match (see
+      // #matchLookupCommand) - undefined for 'exact' commands, which
+      // sendQueuedReply ignores in favor of the single `response` template.
+      query,
+      lookupOutcome,
+      name,
+      matchCount
     });
+  }
+
+  /**
+   * Checks `text` against every configured 'lookup' command's trigger,
+   * resolving the argument (if any) against the node registry. Returns
+   * `null` if `text` doesn't match any lookup trigger at all - as opposed
+   * to matching one with a missing/invalid argument, which resolves to
+   * `outcome: 'invalid'` rather than falling through to "no trigger
+   * matched" (the operator gets a helpful reply either way).
+   *
+   * Only the first configured lookup command whose trigger matches is
+   * used - two lookup commands sharing a trigger isn't a supported
+   * configuration.
+   */
+  #matchLookupCommand(text) {
+    for (const command of this.#lookupCommands) {
+      const { trigger } = command;
+      let query;
+      if (text === trigger) {
+        query = '';
+      } else if (text.startsWith(`${trigger} `)) {
+        query = text.slice(trigger.length + 1).trim();
+      } else {
+        continue;
+      }
+
+      if (query.length === 0) {
+        return { command, outcome: 'invalid', query };
+      }
+
+      const result = this.#nodeRegistry.findByPrefix(query, { type: 'REPEATER' });
+      return {
+        command,
+        outcome: result.status,
+        query: result.query ?? query,
+        name: result.node?.name,
+        matchCount: result.matchCount
+      };
+    }
+    return null;
   }
 
   /**
@@ -349,9 +428,9 @@ export class ChannelBot {
    * is what provides that guarantee for this path, one level up from
    * where every other public method here still catches locally.
    *
-   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string}} item
+   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number}} item
    */
-  async sendQueuedReply({ trigger, sender, hopCount, path, hash }) {
+  async sendQueuedReply({ trigger, sender, hopCount, path, hash, query, lookupOutcome, name, matchCount }) {
     const command = this.#commands.get(trigger);
     if (!command) {
       // Not expected in the current architecture (bots.config.json is
@@ -362,15 +441,40 @@ export class ChannelBot {
       throw new Error(`no configured command matches trigger "${trigger}"`);
     }
 
+    // A 'lookup' command has no single `response` template - which of its
+    // four outcome-specific templates applies was already decided at match
+    // time (see #matchLookupCommand) and travels with the queued item as
+    // `lookupOutcome` (named apart from ReplyQueue's own `outcome` - see
+    // #handleRawPacket - so the two never get confused for each other).
+    // Only that one outcome's template is ever rendered, so an 'exact'
+    // command's overflow-degradation behavior (see response-template.js)
+    // is the only kind that ever gets an `overflowTemplate`.
+    const template =
+      command.kind === 'lookup' ? this.#lookupResponseTemplate(command, lookupOutcome) : command.response;
+    const overflowTemplate = command.kind === 'lookup' ? undefined : command.overflowResponse;
+
     const { message, degraded } = renderResponse({
-      template: command.response,
-      overflowTemplate: command.overflowResponse,
-      values: { sender, hopCount, path, trigger, hash },
+      template,
+      overflowTemplate,
+      values: { sender, hopCount, path, trigger, hash, query, name, matchCount },
       maxBytes: this.#maxMessageBytes
     });
 
     await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
+  }
+
+  #lookupResponseTemplate(command, lookupOutcome) {
+    switch (lookupOutcome) {
+      case 'found':
+        return command.foundResponse;
+      case 'not_found':
+        return command.notFoundResponse;
+      case 'ambiguous':
+        return command.ambiguousResponse;
+      default:
+        return command.invalidResponse;
+    }
   }
 }

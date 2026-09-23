@@ -49,8 +49,65 @@ export const rangeOnlyQuerySchema = {
   oneOf: RANGE_ONE_OF
 };
 
+// GET /api/metrics/nodes: same range/oneOf shape as rangeOnlyQuerySchema,
+// plus an optional `type` filter (see nodesListQuerySchema below for why
+// its enum is what it is) - the dashboard's "Repeaters" tiles always send
+// `type=REPEATER`, but the endpoint itself stays as reusable as every
+// other range-only one rather than hardcoding that server-side.
+export const nodeTotalsQuerySchema = {
+  $id: 'meshcore-observer/web/node-totals-query',
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    ...rangeProperties(),
+    type: { enum: ['NONE', 'CHAT', 'REPEATER', 'ROOM', 'SENSOR'] }
+  },
+  oneOf: RANGE_ONE_OF
+};
+
 export const validateMetricsHistoryQuery = compileSchema(metricsHistoryQuerySchema);
 export const validateRangeOnlyQuery = compileSchema(rangeOnlyQuerySchema);
+export const validateNodeTotalsQuery = compileSchema(nodeTotalsQuerySchema);
+
+// GET /api/nodes: the node ("!lookup" repeater registry) search/browse
+// table - not range-aware (it's current state, not history - see
+// MetricsStore#queryNodes), so it has none of the range/oneOf machinery
+// above. `type` is optional and, when given, must be one of the values
+// meshcore.js's Advert class can actually produce (see advert.js's
+// ADV_TYPE_* constants and getTypeString()).
+export const nodesListQuerySchema = {
+  $id: 'meshcore-observer/web/nodes-list-query',
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    q: { type: 'string', maxLength: 128 },
+    type: { enum: ['NONE', 'CHAT', 'REPEATER', 'ROOM', 'SENSOR'] },
+    limit: { type: 'integer', minimum: 1, maximum: 200 },
+    offset: { type: 'integer', minimum: 0 }
+  }
+};
+export const validateNodesListQuery = compileSchema(nodesListQuerySchema);
+
+const NODES_LIST_NUMERIC_FIELDS = new Set(['limit', 'offset']);
+
+/**
+ * Parses a URLSearchParams into GET /api/nodes' candidate query object -
+ * same shape/first-value-wins/unrecognized-key-passthrough conventions as
+ * parseRangeQuery() above, just against this endpoint's own field set.
+ *
+ * @param {URLSearchParams} searchParams
+ * @returns {{q?: string, type?: string, limit?: number, offset?: number, [key: string]: unknown}}
+ */
+export function parseNodesListQuery(searchParams) {
+  const query = {};
+  for (const [key, value] of searchParams.entries()) {
+    if (key in query) {
+      continue;
+    }
+    query[key] = NODES_LIST_NUMERIC_FIELDS.has(key) ? Number(value) : value;
+  }
+  return query;
+}
 
 // The only fields either schema above ever expects as a number - every
 // other key (including one AJV's additionalProperties: false is about to

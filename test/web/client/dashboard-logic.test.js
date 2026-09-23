@@ -10,7 +10,8 @@ import {
   parseCustomRangeInputs,
   buildHistoryChartData,
   chartNoteForBuckets,
-  buildPacketTypeTotals
+  buildPacketTypeTotals,
+  formatNodePageRange
 } from '../../../src/web/client/dashboard-logic.js';
 
 test('formatDuration renders only as many leading units as needed', () => {
@@ -123,4 +124,17 @@ test('buildPacketTypeTotals orders totals to match packetTypeBuckets, defaulting
 
 test('buildPacketTypeTotals returns all zeros when totals is empty', () => {
   assert.deepEqual(buildPacketTypeTotals([], PACKET_TYPE_BUCKETS_FIXTURE), [0, 0]);
+});
+
+test('formatNodePageRange reports "No repeaters found." for an empty result set', () => {
+  assert.equal(formatNodePageRange(0, 25, 0), 'No repeaters found.');
+});
+
+test('formatNodePageRange reports a 1-based inclusive range for a full page', () => {
+  assert.equal(formatNodePageRange(0, 25, 137), '1-25 of 137');
+  assert.equal(formatNodePageRange(25, 25, 137), '26-50 of 137');
+});
+
+test('formatNodePageRange clamps the "to" bound on a partial final page', () => {
+  assert.equal(formatNodePageRange(125, 25, 137), '126-137 of 137');
 });

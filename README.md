@@ -9,8 +9,11 @@ commands on public hashtag channels.
 
 ## Requirements
 
-- Node.js 22.13.0 or newer (required for the optional metrics dashboard's
-  `node:sqlite` persistence; see `engines` in `package.json`)
+- **Node.js 22.13.0 or newer - a hard requirement.** This observer's
+  persisted data store (`node:sqlite`, a Node built-in) is a core
+  component, not something specific to the optional metrics dashboard
+  (see "Metrics UI" below) - the process refuses to start on an older
+  Node. See `engines` in `package.json`.
 - A Heltec V3 (or compatible) radio running MeshCore Companion firmware,
   reachable over USB serial (Windows: a COM port) or a TCP bridge
 - Windows is the primary supported runtime today; the radio transport is
@@ -126,9 +129,17 @@ response-template commands:
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link" },
+      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup" },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
-      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" }
+      { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
+      {
+        "trigger": "!lookup",
+        "kind": "lookup",
+        "foundResponse": "📡 @[{sender}]! {query} = {name}",
+        "notFoundResponse": "❓ @[{sender}]! no repeater heard with prefix {query} yet",
+        "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
+        "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
+      }
     ]
   }
 ]
@@ -152,6 +163,39 @@ with the same placeholders available. This is the place to swap a long
 packet link shown above. Without an `overflowResponse`, a command falls
 back to the old behavior: the same `response` re-rendered with `{path}`
 emptied out, then hard truncation as a last resort if it's still too long.
+
+#### Repeater name lookup (`kind: "lookup"`)
+
+A command can opt into argument parsing instead of exact matching by
+setting `"kind": "lookup"`. This observer keeps an in-memory record of
+every REPEATER whose advertised name it has verified (its ADVERT's
+signature checks out against its own claimed public key - an unverified
+advert never contributes a name), keyed by full public key. A `!lookup`
+command resolves its argument as a hex prefix of that key:
+
+```text
+!lookup E85C   -> the repeater whose public key starts E85C, if exactly one does
+```
+
+A `"lookup"` command needs four response templates instead of one -
+`foundResponse`, `notFoundResponse`, `ambiguousResponse`, and
+`invalidResponse` - and must not set `response`/`overflowResponse` (see the
+`!lookup` example above). They're chosen by outcome:
+
+- **found** - exactly one repeater's key starts with the query. `{name}`
+  is available alongside `{query}`.
+- **not_found** - a valid query, but no matching repeater has been heard
+  from (yet - this only knows about repeaters, and only after a real
+  restart-surviving advert has been heard and verified).
+- **ambiguous** - more than one repeater's key starts with the query.
+  `{matchCount}` is the total, and `{name}` is the most recently heard of
+  the matches - a useful guess while asking for a longer, more specific
+  prefix.
+- **invalid** - the query is missing, shorter than 1 byte (2 hex
+  characters), or contains a non-hex character.
+
+A query longer than 1 byte doesn't need to stay byte-aligned - `!lookup
+E85` (2.5 bytes) works the same as `!lookup E85C`.
 
 #### Reply queue (mesh congestion)
 
@@ -242,8 +286,14 @@ set on your behalf.
 
 ### 3. Metrics UI (optional)
 
-An optional live dashboard shows radio/MQTT/bot status and packet counters,
-served over plain HTTP with no server-side dependency. It's off by default.
+This observer always persists its metrics/state (packet activity, bot
+reply outcomes, the `!lookup` repeater registry) to a local SQLite
+database (`node:sqlite`, a Node built-in - see PACKETCAPTURE_METRICS_UI_DB_PATH
+below) - that's a core capability, not something you need the dashboard
+enabled for. What's actually optional is the HTTP dashboard itself: a live
+view of radio/MQTT/bot status, packet counters, and a searchable table of
+known repeaters, served over plain HTTP with no server-side dependency.
+It's off by default.
 
 ```sh
 PACKETCAPTURE_METRICS_UI_ENABLED=true
@@ -310,14 +360,19 @@ yet, but both are captured now specifically so a future view can query
 them without a schema change (see `MetricsStore#queryBrokerDeliveryTotals`
 and `#queryBotReplyOutcomeTotals`).
 
+The `HOST`/`PORT`/`MAX_CHART_BUCKETS` variables below only matter when the
+HTTP dashboard itself is enabled; `DB_PATH`/`SAMPLE_INTERVAL_MS`/
+`RETENTION_DAYS` are always in effect (they configure the always-on data
+store and its sampling loop), regardless of `PACKETCAPTURE_METRICS_UI_ENABLED`.
+
 | Variable | Purpose |
 | --- | --- |
-| `PACKETCAPTURE_METRICS_UI_HOST` | Bind address; default `127.0.0.1` |
-| `PACKETCAPTURE_METRICS_UI_PORT` | Bind port; default `8090` |
-| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often the dashboard samples health state and persists a packet sample; default `10000` |
-| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for persisted packet, broker-delivery, and reply-lifecycle metrics; default `data/metrics.sqlite3` |
-| `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | Days of persisted metrics to keep; default `0` (unlimited - watch disk usage) |
-| `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` | Upper bound on buckets returned per history query; default `180` |
+| `PACKETCAPTURE_METRICS_UI_HOST` | Dashboard bind address; default `127.0.0.1` |
+| `PACKETCAPTURE_METRICS_UI_PORT` | Dashboard bind port; default `8090` |
+| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often health state is sampled and a packet sample persisted; default `10000` |
+| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for all persisted state (packet/broker-delivery/reply-lifecycle metrics, the `!lookup` repeater registry); default `data/metrics.sqlite3` |
+| `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | Days of persisted historical metrics to keep; default `0` (unlimited - watch disk usage) |
+| `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` | Upper bound on buckets returned per history query (dashboard-only); default `180` |
 
 ## Run
 
@@ -351,9 +406,10 @@ src/
   packets/    raw radio event -> normalize -> validate -> decode pipeline (every reception is published, no dedup gate - see below)
   mqtt/       broker connections (config-file loader + schema), topic templates, observer status, LetsMesh on-device JWT auth
   bots/       channel bots: channel discovery/creation, message decrypt, trigger matching; the shared reply queue owns send timing and reply-lifecycle metrics
+  nodes/      the node/repeater registry `!lookup` reads/writes (advert parsing + verification) - backed by metrics/store.js, not its own in-memory state
   health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
-  metrics/    local SQLite-backed persistence for packet/broker-delivery/reply-lifecycle metrics (node:sqlite)
-  web/        optional live metrics dashboard (plain node:http + SSE), gated by PACKETCAPTURE_METRICS_UI_ENABLED
+  metrics/    the observer's core, always-on SQLite-backed data store (node:sqlite) and its sample-persist-prune loop - not gated by the dashboard flag
+  web/        optional live metrics dashboard (plain node:http + SSE) - a *viewer* over metrics/, gated by PACKETCAPTURE_METRICS_UI_ENABLED
   web/client/ the dashboard's own CSS/JS, served as static files (see below) - not inlined, not bundled
 ```
 

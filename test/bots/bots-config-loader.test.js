@@ -106,3 +106,44 @@ test('allows the same trigger name across two different bots', () => {
   const result = withTempFile(JSON.stringify([botA, botB]), (filePath) => loadBotsConfig(filePath));
   assert.equal(result.length, 2);
 });
+
+const VALID_LOOKUP_COMMAND = {
+  trigger: '!lookup',
+  kind: 'lookup',
+  foundResponse: '📡 {query} = {name}',
+  notFoundResponse: '❓ no repeater heard with prefix {query}',
+  ambiguousResponse: '⚠️ {matchCount} repeaters match {query}, most recent: {name}',
+  invalidResponse: '⚠️ give at least 1 byte in hex'
+};
+
+test('loads a well-formed kind: "lookup" command', () => {
+  const bot = { ...VALID_BOT, commands: [VALID_LOOKUP_COMMAND] };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].commands[0].kind, 'lookup');
+});
+
+test('rejects a kind: "lookup" command missing one of its four outcome templates', () => {
+  const withoutAmbiguous = { ...VALID_LOOKUP_COMMAND };
+  delete withoutAmbiguous.ambiguousResponse;
+  const bot = { ...VALID_BOT, commands: [withoutAmbiguous] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /missing ambiguousResponse/
+  );
+});
+
+test('rejects a kind: "lookup" command that also carries a response template', () => {
+  const bot = { ...VALID_BOT, commands: [{ ...VALID_LOOKUP_COMMAND, response: 'not allowed here' }] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /must not have response\/overflowResponse/
+  );
+});
+
+test('rejects an exact (non-lookup) command that carries a lookup-only field', () => {
+  const bot = { ...VALID_BOT, commands: [{ trigger: '!echo', response: 'hi', foundResponse: 'not allowed here' }] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /has foundResponse/
+  );
+});
