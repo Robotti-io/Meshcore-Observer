@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NodeRegistry } from '../../src/nodes/node-registry.js';
+import { MetricsStore } from '../../src/metrics/store.js';
 
 function silentLogger() {
   const calls = { debug: [], info: [], warn: [] };
@@ -39,67 +40,85 @@ function sequentialClock(startMs = Date.parse('2026-01-01T00:00:00.000Z')) {
   };
 }
 
-function newRegistry(overrides = {}) {
-  return new NodeRegistry({
-    logger: silentLogger(),
-    parseAdvert: stubParseAdvert,
-    now: sequentialClock(),
-    ...overrides
-  });
+// A real MetricsStore (:memory:), not a hand-rolled fake - NodeRegistry is
+// now a thin wrapper over its `upsertNode`/`findNodesByPublicKeyPrefix`
+// (persisted metrics/state are a core observer capability independent of
+// the dashboard - see AGENTS.md's "Persistence" section), so exercising it
+// against the real SQL contract is both simpler and more representative
+// than maintaining a second, parallel in-memory implementation of prefix
+// matching/type filtering/ambiguity resolution that could drift from it.
+function newRegistry({ store = new MetricsStore({ dbPath: ':memory:' }), ...overrides } = {}) {
+  return {
+    store,
+    registry: new NodeRegistry({
+      logger: silentLogger(),
+      parseAdvert: stubParseAdvert,
+      now: sequentialClock(),
+      store,
+      ...overrides
+    })
+  };
+}
+
+function allNodes(store) {
+  return store.queryNodes({ limit: 1000, offset: 0 }).nodes;
 }
 
 test('ignores a packet that is not a parseable advert', async () => {
-  const registry = newRegistry();
+  const { registry, store } = newRegistry();
   await registry.recordFromDecodedPacket({ __advert: null });
-  assert.equal(registry.size(), 0);
+  assert.equal(allNodes(store).length, 0);
 });
 
 test('ignores an advert with no name set', async () => {
-  const registry = newRegistry();
+  const { registry, store } = newRegistry();
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: null }) });
-  assert.equal(registry.size(), 0);
+  assert.equal(allNodes(store).length, 0);
 });
 
 test('drops and warns on an advert with a name whose signature does not verify', async () => {
   const logger = silentLogger();
-  const registry = newRegistry({ logger });
+  const { registry, store } = newRegistry({ logger });
   await registry.recordFromDecodedPacket({
     __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: 'Spoofed', verified: false })
   });
 
-  assert.equal(registry.size(), 0);
+  assert.equal(allNodes(store).length, 0);
   assert.ok(logger.calls.warn.some((call) => call.message.includes('did not verify')));
 });
 
 test('stores a verified, named advert, keyed by its full uppercase public key', async () => {
-  const registry = newRegistry();
+  const { registry, store } = newRegistry();
   const publicKeyHex = 'e85c'.repeat(16);
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) });
 
-  assert.equal(registry.size(), 1);
-  const [node] = registry.entries();
+  const nodes = allNodes(store);
+  assert.equal(nodes.length, 1);
+  const [node] = nodes;
   assert.equal(node.publicKeyHex, publicKeyHex.toUpperCase());
   assert.equal(node.name, 'Summit Repeater');
   assert.equal(node.type, 'REPEATER');
   assert.ok(node.lastHeardAt);
 });
 
-test('a later verified advert for the same key overwrites the name and refreshes lastHeardAt', async () => {
-  const registry = newRegistry();
+test('a later verified advert for the same key overwrites the name and refreshes lastHeardAt, but not firstHeardAt', async () => {
+  const { registry, store } = newRegistry();
   const publicKeyHex = 'E85C'.repeat(16);
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Old Name' }) });
-  const firstHeardAt = registry.entries()[0].lastHeardAt;
+  const firstNode = allNodes(store)[0];
 
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'New Name' }) });
 
-  assert.equal(registry.size(), 1);
-  const [node] = registry.entries();
+  const nodes = allNodes(store);
+  assert.equal(nodes.length, 1);
+  const [node] = nodes;
   assert.equal(node.name, 'New Name');
-  assert.ok(node.lastHeardAt > firstHeardAt);
+  assert.ok(node.lastHeardAt > firstNode.lastHeardAt);
+  assert.equal(node.firstHeardAt, firstNode.firstHeardAt);
 });
 
 test('findByPrefix rejects queries shorter than 1 byte, non-hex characters, and overlong queries', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: 'Repeater' }) });
 
   assert.equal(registry.findByPrefix('').status, 'invalid');
@@ -109,7 +128,7 @@ test('findByPrefix rejects queries shorter than 1 byte, non-hex characters, and 
 });
 
 test('findByPrefix allows an odd (non-byte-aligned) hex length beyond the 1-byte floor', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   const publicKeyHex = 'E85C'.repeat(16);
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Repeater' }) });
 
@@ -119,7 +138,7 @@ test('findByPrefix allows an odd (non-byte-aligned) hex length beyond the 1-byte
 });
 
 test('findByPrefix matches case-insensitively and supports a full-key exact match', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   const publicKeyHex = 'E85C'.repeat(16);
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Repeater' }) });
 
@@ -128,12 +147,12 @@ test('findByPrefix matches case-insensitively and supports a full-key exact matc
 });
 
 test('findByPrefix returns not_found for a valid query with zero matches', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   assert.deepEqual(registry.findByPrefix('E85C'), { status: 'not_found', query: 'E85C' });
 });
 
 test('findByPrefix with a type filter excludes a matching node of a different type', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   await registry.recordFromDecodedPacket({
     __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: 'Chat Node', type: 'CHAT' })
   });
@@ -146,7 +165,7 @@ test('findByPrefix with a type filter excludes a matching node of a different ty
 });
 
 test('findByPrefix returns ambiguous with a count and the most-recently-heard match when more than one node matches', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   await registry.recordFromDecodedPacket({
     __advert: fakeAdvert({ publicKeyHex: 'E85C1111'.padEnd(64, '0'), name: 'Older Repeater' })
   });
@@ -160,45 +179,8 @@ test('findByPrefix returns ambiguous with a count and the most-recently-heard ma
   assert.equal(result.node.name, 'Newer Repeater');
 });
 
-test('calls recordNode with the resolved record on a successful store, but not when nothing is stored', async () => {
-  const calls = [];
-  const registry = newRegistry({ recordNode: (record) => calls.push(record) });
-  const publicKeyHex = 'E85C'.repeat(16);
-
-  await registry.recordFromDecodedPacket({ __advert: null });
-  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: null }) });
-  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Spoofed', verified: false }) });
-  assert.equal(calls.length, 0);
-
-  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) });
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], {
-    publicKeyHex: publicKeyHex.toUpperCase(),
-    name: 'Summit Repeater',
-    type: 'REPEATER',
-    heardAt: calls[0].heardAt
-  });
-  assert.ok(calls[0].heardAt);
-});
-
-test('a recordNode failure is caught and logged without undoing the in-memory update', async () => {
-  const logger = silentLogger();
-  const registry = newRegistry({
-    logger,
-    recordNode: () => {
-      throw new Error('disk full');
-    }
-  });
-  const publicKeyHex = 'E85C'.repeat(16);
-
-  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) });
-
-  assert.equal(registry.size(), 1);
-  assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to persist a node event')));
-});
-
 test('findByPrefix ambiguity is decided after any type filter is applied', async () => {
-  const registry = newRegistry();
+  const { registry } = newRegistry();
   await registry.recordFromDecodedPacket({
     __advert: fakeAdvert({ publicKeyHex: 'E85C1111'.padEnd(64, '0'), name: 'Repeater', type: 'REPEATER' })
   });
@@ -209,4 +191,20 @@ test('findByPrefix ambiguity is decided after any type filter is applied', async
   const result = registry.findByPrefix('E85C', { type: 'REPEATER' });
   assert.equal(result.status, 'found');
   assert.equal(result.node.name, 'Repeater');
+});
+
+test('a store failure while recording an advert is caught and logged, never thrown', async () => {
+  const logger = silentLogger();
+  const throwingStore = {
+    upsertNode: () => {
+      throw new Error('disk full');
+    }
+  };
+  const { registry } = newRegistry({ logger, store: throwingStore });
+  const publicKeyHex = 'E85C'.repeat(16);
+
+  await assert.doesNotReject(() =>
+    registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) })
+  );
+  assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to persist a verified advert')));
 });

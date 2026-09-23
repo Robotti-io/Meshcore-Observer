@@ -153,14 +153,26 @@ test('queryBrokerDeliveryTotals omits zero-count (broker, outcome) pairs rather 
   store.close();
 });
 
+// Seeds one already-resolved reply (enqueue -> peek -> resolve) rather
+// than a direct table insert, exercising the real path a resolved row is
+// produced through now that bot_replies covers a reply's whole lifecycle
+// (see the store's v5 migration doc comment) - there's no more standalone
+// "just record an outcome" API to seed historical rows with directly.
+function seedResolvedReply(store, { status, resolvedAt, queuedMs = 0, ...itemOverrides }) {
+  store.enqueueReplyItem(baseReplyQueueItem({ enqueuedAt: resolvedAt - queuedMs, expiresAt: resolvedAt + 60_000, ...itemOverrides }));
+  const item = store.peekOldestPendingReplyItem();
+  store.resolveReplyItem(item.id, { status, resolvedAt, queuedMs });
+}
+
 test('records and queries reply events, scoped by bot name/outcome and time window', () => {
   const store = openStore();
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'aa', outcome: 'sent', occurredAt: 1_000, queuedMs: 10 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'bb', outcome: 'sent', occurredAt: 2_000, queuedMs: 12 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!test', sender: 'Jeymz', hash: 'cc', outcome: 'sent', occurredAt: 3_000, queuedMs: 8 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'dd', outcome: 'failed', occurredAt: 3_500, queuedMs: 20 });
-  store.recordBotReplyEvent({ botName: 'weather', trigger: '!wx', sender: 'Robotti', hash: 'ee', outcome: 'sent', occurredAt: 4_000, queuedMs: 5 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'ff', outcome: 'sent', occurredAt: 999_999, queuedMs: 9 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'aa', status: 'sent', resolvedAt: 1_000, queuedMs: 10 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'bb', status: 'sent', resolvedAt: 2_000, queuedMs: 12 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!test', sender: 'Jeymz', hash: 'cc', status: 'sent', resolvedAt: 3_000, queuedMs: 8 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'dd', status: 'failed', resolvedAt: 3_500, queuedMs: 20 });
+  seedResolvedReply(store, { botName: 'weather', trigger: '!wx', sender: 'Robotti', hash: 'ee', status: 'sent', resolvedAt: 4_000, queuedMs: 5 });
+  // Outside the queried window below - must not be counted.
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', sender: 'Jeymz', hash: 'ff', status: 'sent', resolvedAt: 999_999, queuedMs: 9 });
 
   const counts = store.queryBotCommandCounts({ botName: 'echo', start: 0, end: 10_000 });
   assert.deepEqual(counts, [
@@ -177,33 +189,32 @@ test('records and queries reply events, scoped by bot name/outcome and time wind
   store.close();
 });
 
-test('recordBotReplyEvent stores a null sender/hash/queuedMs when omitted', () => {
-  const store = openStore();
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 1_000 });
-
-  const outcomeTotals = store.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 });
-  assert.deepEqual(outcomeTotals, [{ botName: 'echo', outcome: 'expired', total: 1 }]);
-  store.close();
-});
-
 test('queryReplyOutcomeTotals sums every outcome across every bot, within the requested window', () => {
   const store = openStore();
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 1_000 });
-  store.recordBotReplyEvent({ botName: 'weather', trigger: '!wx', outcome: 'sent', occurredAt: 2_000 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'failed', occurredAt: 3_000 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 4_000 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 5_000 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'cancelled', occurredAt: 6_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'sent', resolvedAt: 1_000 });
+  seedResolvedReply(store, { botName: 'weather', trigger: '!wx', status: 'sent', resolvedAt: 2_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'failed', resolvedAt: 3_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'expired', resolvedAt: 4_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'expired', resolvedAt: 5_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'cancelled', resolvedAt: 6_000 });
   // Outside the queried window below - must not be counted.
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 999_999_999 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'sent', resolvedAt: 999_999_999 });
 
   assert.deepEqual(store.queryReplyOutcomeTotals({ start: 0, end: 10_000 }), { sent: 2, failed: 1, expired: 2, cancelled: 1 });
   store.close();
 });
 
-test('queryReplyOutcomeTotals returns all-zero counts when nothing was recorded in the window', () => {
+test('queryReplyOutcomeTotals excludes still-pending items (only resolved statuses count)', () => {
   const store = openStore();
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 999_999_999 });
+  store.enqueueReplyItem(baseReplyQueueItem({ enqueuedAt: 1_000, expiresAt: 61_000 }));
+
+  assert.deepEqual(store.queryReplyOutcomeTotals({ start: 0, end: 10_000 }), { sent: 0, failed: 0, expired: 0, cancelled: 0 });
+  store.close();
+});
+
+test('queryReplyOutcomeTotals returns all-zero counts when nothing was resolved in the window', () => {
+  const store = openStore();
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'sent', resolvedAt: 999_999_999 });
   assert.deepEqual(store.queryReplyOutcomeTotals({ start: 0, end: 10_000 }), { sent: 0, failed: 0, expired: 0, cancelled: 0 });
   store.close();
 });
@@ -338,6 +349,143 @@ test('queryNodes returns everything, unfiltered, when q and type are both omitte
   store.close();
 });
 
+function baseReplyQueueItem(overrides = {}) {
+  return {
+    botName: 'echo',
+    channel: '#echo',
+    trigger: '!echo',
+    sender: 'Jeymz',
+    hopCount: 1,
+    path: 'AA',
+    hash: 'deadbeef',
+    enqueuedAt: 1_000,
+    expiresAt: 61_000,
+    ...overrides
+  };
+}
+
+test('enqueueReplyItem persists a pending item, reflected in countPendingReplyItems', () => {
+  const store = openStore();
+  assert.equal(store.countPendingReplyItems(), 0);
+
+  store.enqueueReplyItem(baseReplyQueueItem());
+  assert.equal(store.countPendingReplyItems(), 1);
+  store.close();
+});
+
+test('peekOldestPendingReplyItem returns null and changes nothing when the table is empty', () => {
+  const store = openStore();
+  assert.equal(store.peekOldestPendingReplyItem(), null);
+  store.close();
+});
+
+test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, carrying every field, without removing it', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem({ trigger: '!second', enqueuedAt: 2_000, expiresAt: 62_000 }));
+  store.enqueueReplyItem(
+    baseReplyQueueItem({
+      trigger: '!first',
+      sender: 'Robotti',
+      hopCount: 3,
+      path: 'AA➡️BB',
+      hash: 'cafef00d',
+      query: 'E85C',
+      lookupOutcome: 'found',
+      name: 'Summit Repeater',
+      matchCount: 1,
+      enqueuedAt: 1_000,
+      expiresAt: 61_000
+    })
+  );
+
+  const item = store.peekOldestPendingReplyItem();
+  assert.equal(item.trigger, '!first');
+  assert.equal(item.botName, 'echo');
+  assert.equal(item.channel, '#echo');
+  assert.equal(item.sender, 'Robotti');
+  assert.equal(item.hopCount, 3);
+  assert.equal(item.path, 'AA➡️BB');
+  assert.equal(item.hash, 'cafef00d');
+  assert.equal(item.query, 'E85C');
+  assert.equal(item.lookupOutcome, 'found');
+  assert.equal(item.name, 'Summit Repeater');
+  assert.equal(item.matchCount, 1);
+  assert.equal(item.enqueuedAt, 1_000);
+  assert.equal(item.expiresAt, 61_000);
+  assert.equal(item.status, 'pending');
+
+  assert.equal(store.countPendingReplyItems(), 2, 'peeking must not remove or resolve anything');
+  assert.equal(store.peekOldestPendingReplyItem().trigger, '!first', 'peeking again returns the same oldest item');
+  store.close();
+});
+
+test('enqueueReplyItem stores optional lookup-only fields as null when omitted', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem());
+
+  const item = store.peekOldestPendingReplyItem();
+  assert.equal(item.query, null);
+  assert.equal(item.lookupOutcome, null);
+  assert.equal(item.name, null);
+  assert.equal(item.matchCount, null);
+  store.close();
+});
+
+test('resolveReplyItem moves an item out of pending, recording status/resolvedAt/queuedMs', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem({ enqueuedAt: 1_000 }));
+  const item = store.peekOldestPendingReplyItem();
+
+  store.resolveReplyItem(item.id, { status: 'sent', resolvedAt: 1_500, queuedMs: 500 });
+
+  assert.equal(store.countPendingReplyItems(), 0);
+  const resolved = store.getReplyById(item.id);
+  assert.equal(resolved.status, 'sent');
+  assert.equal(resolved.resolvedAt, 1_500);
+  assert.equal(resolved.queuedMs, 500);
+  // Every other field (bot/channel/trigger/etc.) is untouched by resolving.
+  assert.equal(resolved.trigger, '!echo');
+  assert.equal(resolved.enqueuedAt, 1_000);
+});
+
+test('getReplyById returns null for an id that does not exist', () => {
+  const store = openStore();
+  assert.equal(store.getReplyById(999), null);
+  store.close();
+});
+
+test('takeExpiredReplyItems marks and returns only items at or before the given time as expired, oldest first', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem({ trigger: '!fresh', enqueuedAt: 1_000, expiresAt: 100_000 }));
+  store.enqueueReplyItem(baseReplyQueueItem({ trigger: '!stale-newer', enqueuedAt: 2_000, expiresAt: 5_000 }));
+  store.enqueueReplyItem(baseReplyQueueItem({ trigger: '!stale-older', enqueuedAt: 1_500, expiresAt: 4_000 }));
+
+  const expired = store.takeExpiredReplyItems(10_000);
+  assert.deepEqual(expired.map((i) => i.trigger), ['!stale-older', '!stale-newer']);
+  // The returned rows reflect state *before* the expiry, per the method's
+  // own doc comment - still 'pending' here, not 'expired'.
+  assert.ok(expired.every((i) => i.status === 'pending'));
+  assert.equal(store.countPendingReplyItems(), 1);
+
+  const staleOlder = store.getReplyById(expired[0].id);
+  assert.equal(staleOlder.status, 'expired');
+  assert.equal(staleOlder.resolvedAt, 10_000);
+  assert.equal(staleOlder.queuedMs, 10_000 - 1_500);
+
+  const remaining = store.peekOldestPendingReplyItem();
+  assert.equal(remaining.trigger, '!fresh');
+  store.close();
+});
+
+test('takeExpiredReplyItems returns an empty array and changes nothing when none are expired', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem({ expiresAt: 100_000 }));
+
+  assert.deepEqual(store.takeExpiredReplyItems(0), []);
+  assert.equal(store.countPendingReplyItems(), 1);
+  store.close();
+});
+
 test('getEarliestSampleAt returns null with no data and the minimum sample_at once populated', () => {
   const store = openStore();
   assert.equal(store.getEarliestSampleAt(), null);
@@ -349,12 +497,12 @@ test('getEarliestSampleAt returns null with no data and the minimum sample_at on
   store.close();
 });
 
-test('pruneOlderThan removes samples, their child rows, and bot reply events at or before the cutoff', () => {
+test('pruneOlderThan removes samples, their child rows, and resolved replies at or before the cutoff', () => {
   const store = openStore();
   store.recordPacketSample(baseSample({ sampleAt: 1_000, packetsByType: { advert: 1 }, brokerDeliveries: { okimesh: { sent: 1, skipped: 0, failed: 0 } } }));
   store.recordPacketSample(baseSample({ sampleAt: 50_000, packetsByType: { advert: 1 }, brokerDeliveries: { okimesh: { sent: 1, skipped: 0, failed: 0 } } }));
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 1_000 });
-  store.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 50_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'sent', resolvedAt: 1_000 });
+  seedResolvedReply(store, { botName: 'echo', trigger: '!echo', status: 'sent', resolvedAt: 50_000 });
 
   store.pruneOlderThan(10_000);
 
@@ -368,6 +516,17 @@ test('pruneOlderThan removes samples, their child rows, and bot reply events at 
   assert.deepEqual(store.queryBotCommandCounts({ botName: 'echo', start: 0, end: 100_000 }), [
     { trigger: '!echo', count: 1 }
   ]);
+  store.close();
+});
+
+test('pruneOlderThan never removes a still-pending item, no matter how old its enqueuedAt is', () => {
+  const store = openStore();
+  store.enqueueReplyItem(baseReplyQueueItem({ trigger: '!ancient', enqueuedAt: 1_000, expiresAt: 999_999_999 }));
+
+  store.pruneOlderThan(500_000);
+
+  assert.equal(store.countPendingReplyItems(), 1);
+  assert.equal(store.peekOldestPendingReplyItem().trigger, '!ancient');
   store.close();
 });
 

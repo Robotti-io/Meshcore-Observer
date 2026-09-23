@@ -13,11 +13,9 @@ import {
   validateNodesListQuery
 } from './schemas.js';
 import { resolveRangeWindow, RangeError as RangeResolutionError } from './metrics-range.js';
-import { computeSampleDelta } from './metrics-sample.js';
 import { bucketBotCommandCounts } from './bot-command-buckets.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_NODES_LIMIT = 50;
 
 const WEB_DIR = dirname(fileURLToPath(import.meta.url));
@@ -47,6 +45,17 @@ const STATIC_ASSETS = new Map(
  * that remains its own protected boundary, so the caller is expected to
  * bind this to a loopback host unless the operator has explicitly opted
  * into wider exposure (and accepted the risk that implies).
+ *
+ * Purely a *viewer/query* layer over MetricsStore now - the sample-persist-
+ * prune loop that used to live here (an internal `setInterval`, only ever
+ * running while this HTTP server happened to be listening) has moved to
+ * MetricsSampler (see src/metrics/sampler.js), since persisted metrics are
+ * a core observer capability independent of whether this optional
+ * dashboard is enabled. An optional injected `sampler` is only used here to
+ * broadcast its `'sample'` events to connected SSE clients - if omitted,
+ * `/api/metrics/stream` still sends its initial snapshot on connect, it
+ * just never pushes a follow-up until the caller emits nothing (which
+ * shouldn't happen outside a test that doesn't care about SSE).
  */
 export class MetricsServer {
   #serviceHealth;
@@ -56,22 +65,25 @@ export class MetricsServer {
   #port;
   #sampleIntervalMs;
   #maxChartBuckets;
-  #retentionDays;
   #logger;
+  #sampler;
+  #onSample;
   #server = null;
-  #sampleTimer = null;
   #sseClients = new Set();
-  #lastSnapshot = null;
-  #lastPrunedAt = null;
 
   /**
-   * @param {{serviceHealth: object, metricsStore: object, botsConfig: {name: string, commands: {trigger: string}[]}[], host: string, port: number, sampleIntervalMs: number, maxChartBuckets: number, retentionDays: number, logger: object}} options
+   * @param {{serviceHealth: object, metricsStore: object, botsConfig: {name: string, commands: {trigger: string}[]}[], host: string, port: number, sampleIntervalMs: number, maxChartBuckets: number, logger: object, sampler?: import('node:events').EventEmitter}} options
    * `botsConfig` is the validated bots configuration array (see
    * src/config/schema.js) - only `name` and each command's `trigger` are
    * used, to build the stable, config-ordered trigger list each bot's
    * command chart is keyed against (see bot-command-buckets.js).
+   * `sampleIntervalMs` is only read here for bucket-width math in
+   * #handleHistory (see resolveBucketWidthMs in src/metrics/store.js) -
+   * the interval the sampler actually ticks at lives with MetricsSampler
+   * itself now, which is a separate instance sharing the same configured
+   * value.
    */
-  constructor({ serviceHealth, metricsStore, botsConfig, host, port, sampleIntervalMs, maxChartBuckets, retentionDays, logger }) {
+  constructor({ serviceHealth, metricsStore, botsConfig, host, port, sampleIntervalMs, maxChartBuckets, logger, sampler }) {
     this.#serviceHealth = serviceHealth;
     this.#metricsStore = metricsStore;
     this.#botsConfig = botsConfig;
@@ -79,15 +91,15 @@ export class MetricsServer {
     this.#port = port;
     this.#sampleIntervalMs = sampleIntervalMs;
     this.#maxChartBuckets = maxChartBuckets;
-    this.#retentionDays = retentionDays;
     this.#logger = logger;
+    this.#sampler = sampler;
   }
 
   /**
    * @returns {Promise<void>} resolves once the server is listening, or
    * rejects (e.g. `EADDRINUSE`) if binding fails. On rejection, all state is
    * cleared so the metrics UI is left fully stopped and `start()` can be
-   * retried; the sample timer is not started until listening succeeds.
+   * retried.
    */
   start() {
     if (this.#server) {
@@ -98,6 +110,11 @@ export class MetricsServer {
       this.#logger.warn('services.metricsUi', 'metrics UI bound to a non-loopback host with no authentication', {
         host: this.#host
       });
+    }
+
+    if (this.#sampler) {
+      this.#onSample = (snapshot) => this.#broadcastSnapshot(snapshot);
+      this.#sampler.on('sample', this.#onSample);
     }
 
     const server = createServer((req, res) => this.#handleRequest(req, res));
@@ -121,9 +138,6 @@ export class MetricsServer {
           this.#logger.warn('services.metricsUi', 'metrics UI server error', { error: err.message });
         });
 
-        this.#sampleTimer = setInterval(() => this.#tick(), this.#sampleIntervalMs);
-        this.#sampleTimer.unref();
-
         const address = server.address();
         this.#logger.info('services.metricsUi', 'metrics UI listening', { host: address.address, port: address.port });
         resolve();
@@ -136,11 +150,11 @@ export class MetricsServer {
     return this.#server ? this.#server.address() : null;
   }
 
-  /** Stops the sample timer, closes any open SSE connections, and closes the server. */
+  /** Unsubscribes from the sampler (if any), closes any open SSE connections, and closes the server. */
   async stop() {
-    if (this.#sampleTimer) {
-      clearInterval(this.#sampleTimer);
-      this.#sampleTimer = null;
+    if (this.#sampler && this.#onSample) {
+      this.#sampler.off('sample', this.#onSample);
+      this.#onSample = null;
     }
 
     for (const res of this.#sseClients) {
@@ -158,12 +172,7 @@ export class MetricsServer {
     });
   }
 
-  #tick() {
-    const snapshot = this.#serviceHealth.snapshot();
-    this.#recordSample(snapshot);
-    this.#maybePrune();
-    this.#lastSnapshot = snapshot;
-
+  #broadcastSnapshot(snapshot) {
     const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
     for (const res of this.#sseClients) {
       try {
@@ -172,42 +181,11 @@ export class MetricsServer {
         // A client's connection can go bad between ticks before its own
         // 'close' event fires (see #handleStream) - isolate that here so
         // one broken SSE client can't stop the broadcast to every other
-        // one, or stop future ticks from persisting/pruning samples.
+        // one, or stop the sampler's own persist/prune work (that loop
+        // lives independently in MetricsSampler now regardless).
         this.#logger.warn('services.metricsUi', 'failed to write to an SSE client, removing it', { error: err.message });
         this.#sseClients.delete(res);
       }
-    }
-  }
-
-  #recordSample(snapshot) {
-    const sample = computeSampleDelta({
-      prevSnapshot: this.#lastSnapshot,
-      snapshot,
-      sampleAt: Date.now(),
-      intervalMs: this.#sampleIntervalMs
-    });
-
-    try {
-      this.#metricsStore.recordPacketSample(sample);
-    } catch (err) {
-      this.#logger.warn('services.metricsUi', 'failed to persist a metrics sample', { error: err.message });
-    }
-  }
-
-  /** Prunes persisted metrics older than the configured retention window, at most once per day. */
-  #maybePrune() {
-    if (this.#retentionDays <= 0) {
-      return;
-    }
-    const now = Date.now();
-    if (this.#lastPrunedAt !== null && now - this.#lastPrunedAt < ONE_DAY_MS) {
-      return;
-    }
-    this.#lastPrunedAt = now;
-    try {
-      this.#metricsStore.pruneOlderThan(now - this.#retentionDays * ONE_DAY_MS);
-    } catch (err) {
-      this.#logger.warn('services.metricsUi', 'failed to prune persisted metrics', { error: err.message });
     }
   }
 
@@ -513,9 +491,9 @@ export class MetricsServer {
     });
     // A write failure on a broken connection typically surfaces as an
     // 'error' event (asynchronously), not a thrown exception - the
-    // try/catch around #tick()'s broadcast loop covers the rarer
+    // try/catch around #broadcastSnapshot()'s loop covers the rarer
     // synchronous-throw case; this covers the common one. Without this,
-    // an unremoved dead client would keep failing every future tick.
+    // an unremoved dead client would keep failing every future broadcast.
     res.on('error', (err) => {
       this.#logger.warn('services.metricsUi', 'SSE client connection error, removing it', { error: err.message });
       this.#sseClients.delete(res);

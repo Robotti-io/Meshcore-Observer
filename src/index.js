@@ -14,15 +14,25 @@ import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { NodeRegistry } from './nodes/node-registry.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
+import { MetricsSampler } from './metrics/sampler.js';
 import packageInfo from '../package.json' with { type: 'json' };
 
-// src/metrics/store.js is imported dynamically, only when the metrics UI is
-// enabled (see below) - it statically imports node:sqlite, which requires
-// Node >=22.13.0 (see docs/plans/feat-improved_metrics_reporting.md). A
-// dynamic import lets a too-old runtime fail with a clear, caught warning
-// that just disables the metrics UI, rather than crashing every startup
-// (including ones that never touch the metrics UI at all) with a raw
-// ERR_UNKNOWN_BUILTIN_MODULE from a top-level import.
+// src/metrics/store.js is imported dynamically - it statically imports
+// node:sqlite, which requires Node >=22.13.0. package.json's own `engines`
+// field already declares that as this project's minimum, but a dynamic
+// import here lets startup fail with one clear, specific error message
+// (see below) rather than a raw ERR_UNKNOWN_BUILTIN_MODULE from a
+// top-level import the moment an operator runs this on an older Node.
+//
+// The persisted store this opens is a *core* observer capability, not a
+// side effect of the optional HTTP dashboard: every feature that used to
+// keep its own in-memory state (the node/repeater registry backing
+// `!lookup`, bot reply-lifecycle counters) now reads and writes through it
+// unconditionally, regardless of whether PACKETCAPTURE_METRICS_UI_ENABLED
+// is set - that flag only controls whether the HTTP dashboard itself is
+// served. A store that fails to open is therefore a startup-blocking
+// failure, the same as an invalid configuration value, not a
+// warn-and-degrade one.
 
 const SHUTDOWN_TIMEOUT_MS = 10000;
 const HEALTH_LOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -48,20 +58,22 @@ async function main() {
     botCount: config.bots.length
   });
 
-  // Constructed early (before the reply queue and MQTT wiring below) so
-  // both can be given metrics-recording hooks at construction time.
-  let metricsStore = null;
-  if (config.metricsUi.enabled) {
-    try {
-      const { MetricsStore } = await import('./metrics/store.js');
-      metricsStore = new MetricsStore({ dbPath: config.metricsUi.dbPath });
-    } catch (err) {
-      logger.warn(
-        'services.metricsUi',
-        'metrics UI disabled: could not open the persisted metrics store (node:sqlite requires Node >=22.13.0)',
-        { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
-      );
-    }
+  // Constructed early (before hardware/network side effects, and before the
+  // reply queue/node registry below, both of which now depend on it
+  // directly) - see the import comment above for why a failure here is
+  // fatal rather than a degrade-and-continue warning.
+  let metricsStore;
+  try {
+    const { MetricsStore } = await import('./metrics/store.js');
+    metricsStore = new MetricsStore({ dbPath: config.metricsUi.dbPath });
+  } catch (err) {
+    logger.error(
+      'services.metricsUi',
+      'failed to open the persisted data store - Node >=22.13.0 with node:sqlite support is now a hard requirement for this observer (see README\'s Requirements section)',
+      { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
+    );
+    process.exitCode = 1;
+    return;
   }
 
   const radioManager = new RadioManager({ config, logger });
@@ -82,17 +94,18 @@ async function main() {
   // only reads from it later (once a quiet window is actually observed),
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
-  const nodeRegistry = new NodeRegistry({
-    logger,
-    recordNode: metricsStore ? (record) => metricsStore.upsertNode(record) : undefined
-  });
+  const nodeRegistry = new NodeRegistry({ logger, store: metricsStore });
   const replyQueue = new ReplyQueue({
     quietMs: config.botReplyQueue.quietMs,
     ttlMs: config.botReplyQueue.ttlMs,
     logger,
     dispatch: createReplyDispatcher(botsByName),
-    recordOutcome: metricsStore ? (event) => metricsStore.recordBotReplyEvent(event) : undefined
+    store: metricsStore
   });
+  // Resumes any reply still pending from a previous process (see
+  // reply-queue.js's class doc comment and AGENTS.md's "Persistence"
+  // section) - a no-op if nothing was left queued, the common case.
+  replyQueue.start();
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
   // JWT auth seam, kept separate from generic MQTT connection code per
@@ -226,8 +239,20 @@ async function main() {
   }, HEALTH_LOG_INTERVAL_MS);
   healthLogTimer.unref();
 
+  // Unconditional - see the import comment near the top of this file:
+  // persisted metrics/state are a core capability now, independent of
+  // whether the HTTP dashboard below is enabled.
+  const metricsSampler = new MetricsSampler({
+    serviceHealth,
+    metricsStore,
+    sampleIntervalMs: config.metricsUi.sampleIntervalMs,
+    retentionDays: config.metricsUi.retentionDays,
+    logger
+  });
+  metricsSampler.start();
+
   let metricsServer = null;
-  if (metricsStore) {
+  if (config.metricsUi.enabled) {
     metricsServer = new MetricsServer({
       serviceHealth,
       metricsStore,
@@ -236,8 +261,8 @@ async function main() {
       port: config.metricsUi.port,
       sampleIntervalMs: config.metricsUi.sampleIntervalMs,
       maxChartBuckets: config.metricsUi.maxChartBuckets,
-      retentionDays: config.metricsUi.retentionDays,
-      logger
+      logger,
+      sampler: metricsSampler
     });
     metricsServer.start().catch((err) => {
       logger.warn('services.metricsUi', 'failed to start metrics UI', { error: err.message });
@@ -276,9 +301,8 @@ async function main() {
     if (metricsServer) {
       await metricsServer.stop();
     }
-    if (metricsStore) {
-      metricsStore.close();
-    }
+    metricsSampler.stop();
+    metricsStore.close();
 
     const deviceInfo = radioManager.getDeviceInfo();
     if (deviceInfo && mqttManager.hasAnyConnected()) {

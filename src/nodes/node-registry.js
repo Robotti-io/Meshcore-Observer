@@ -13,36 +13,35 @@ function normalizeQuery(rawQuery) {
 }
 
 /**
- * A general, in-memory "contact list" of every node this observer has heard
- * advertise a name, keyed by its full public key - see
- * docs/plans/feat-bot_command_to_lookup_repeater_name.md for the full
- * design rationale. No persistence (v1 constraint per AGENTS.md): it
- * rebuilds from scratch as adverts are re-heard after every restart, which
- * is also what keeps stored names honest rather than stale.
+ * A general "contact list" of every node this observer has heard advertise
+ * a name, keyed by its full public key - see
+ * docs/plans/feat-bot_command_to_lookup_repeater_name.md for the original
+ * design rationale. Backed directly by MetricsStore's `nodes` table (see
+ * `store`'s `upsertNode`/`findNodesByPublicKeyPrefix`) rather than an
+ * in-memory Map: persisted metrics/state are now a core observer
+ * capability independent of whether the optional HTTP dashboard is
+ * enabled, so `!lookup`'s data survives a restart the same way every other
+ * feature backed by MetricsStore does. `store`'s reads are synchronous
+ * (node:sqlite's DatabaseSync), so this stays exactly as fast/simple a
+ * dependency for ChannelBot's hot path as the old in-memory Map was.
  */
 export class NodeRegistry {
-  #nodesByPublicKey = new Map();
   #logger;
   #parseAdvert;
   #now;
-  #recordNode;
+  #store;
 
   /**
-   * `recordNode`, when given, is called with `{publicKeyHex, name, type,
-   * heardAt}` every time a verified named advert updates this registry's
-   * in-memory state (both a brand-new node and a re-heard one) - the seam
-   * a persistence layer (see src/metrics/store.js's upsertNode) hangs off
-   * to back the dashboard's node totals/search without this module knowing
-   * anything about SQL or MetricsStore. A failure here is caught and
-   * logged, never allowed to undo the in-memory update it followed or
-   * propagate out of recordFromDecodedPacket - this registry's own
-   * correctness must never depend on a persistence side effect succeeding.
+   * @param {{logger: object, store: {upsertNode: Function, findNodesByPublicKeyPrefix: Function}, parseAdvert?: Function, now?: () => number}} options
+   * `store` is required (typically the app's single MetricsStore instance -
+   * see src/index.js) - persistence is no longer optional here, matching
+   * every other feature MetricsStore now backs.
    */
-  constructor({ logger, parseAdvert = parseAdvertFromPacket, now = () => Date.now(), recordNode = () => {} }) {
+  constructor({ logger, store, parseAdvert = parseAdvertFromPacket, now = () => Date.now() }) {
     this.#logger = logger;
+    this.#store = store;
     this.#parseAdvert = parseAdvert;
     this.#now = now;
-    this.#recordNode = recordNode;
   }
 
   /**
@@ -57,9 +56,9 @@ export class NodeRegistry {
    *    skipped: a name is only trusted once
    *    `await advert.isVerified()` confirms it.
    *
-   * Repeated adverts overwrite the previous record for that public key, so
-   * both `name` and `lastHeardAt` always reflect the most recently
-   * verified advert heard.
+   * Repeated adverts upsert the same row, so both `name` and `lastHeardAt`
+   * always reflect the most recently verified advert heard (see
+   * MetricsStore#upsertNode - `firstHeardAt` is set once and never moves).
    *
    * @param {{raw: string}} decodedPacket
    */
@@ -78,13 +77,10 @@ export class NodeRegistry {
     }
 
     const publicKeyHex = Buffer.from(advert.publicKey).toString('hex').toUpperCase();
-    const record = { publicKeyHex, name: advert.parsed.name, type: advert.parsed.type, lastHeardAt: this.#now() };
-    this.#nodesByPublicKey.set(publicKeyHex, record);
-
     try {
-      this.#recordNode({ publicKeyHex, name: record.name, type: record.type, heardAt: record.lastHeardAt });
+      this.#store.upsertNode({ publicKeyHex, name: advert.parsed.name, type: advert.parsed.type, heardAt: this.#now() });
     } catch (err) {
-      this.#logger.warn('services.nodeRegistry', 'failed to persist a node event for metrics', { error: err.message });
+      this.#logger.warn('services.nodeRegistry', 'failed to persist a verified advert', { error: err.message });
     }
   }
 
@@ -102,8 +98,9 @@ export class NodeRegistry {
    *   {{status: 'found', query: string, node: object}} |
    *   {{status: 'ambiguous', query: string, matchCount: number, node: object}}
    *   For 'ambiguous', `node` is the most-recently-heard of the matches
-   *   (matches are sorted by `lastHeardAt` descending), so a caller can
-   *   surface a best-guess name alongside the count.
+   *   (MetricsStore#findNodesByPublicKeyPrefix already returns them sorted
+   *   by `lastHeardAt` descending), so a caller can surface a best-guess
+   *   name alongside the count.
    */
   findByPrefix(rawQuery, { type } = {}) {
     const query = normalizeQuery(rawQuery);
@@ -111,10 +108,7 @@ export class NodeRegistry {
       return { status: 'invalid' };
     }
 
-    const matches = [...this.#nodesByPublicKey.values()]
-      .filter((node) => node.publicKeyHex.startsWith(query))
-      .filter((node) => !type || node.type === type)
-      .sort((a, b) => b.lastHeardAt - a.lastHeardAt);
+    const matches = this.#store.findNodesByPublicKeyPrefix(query, { type });
 
     if (matches.length === 0) {
       return { status: 'not_found', query };
@@ -123,14 +117,5 @@ export class NodeRegistry {
       return { status: 'found', query, node: matches[0] };
     }
     return { status: 'ambiguous', query, matchCount: matches.length, node: matches[0] };
-  }
-
-  /** Every stored node, any type - for diagnostics/tests. */
-  entries() {
-    return [...this.#nodesByPublicKey.values()];
-  }
-
-  size() {
-    return this.#nodesByPublicKey.size;
   }
 }

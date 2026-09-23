@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { MetricsServer } from '../../src/web/metrics-server.js';
 import { MetricsStore } from '../../src/metrics/store.js';
+import { MetricsSampler } from '../../src/metrics/sampler.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web');
 
@@ -40,6 +41,28 @@ function fakeServiceHealth(overrides = {}) {
   };
 }
 
+// Seeds one already-resolved reply (enqueue -> peek -> resolve) rather
+// than a direct table insert - bot_replies covers a reply's whole
+// lifecycle now (see the store's v5 migration doc comment), so there's no
+// standalone "just record an outcome" API to seed historical rows with
+// directly. Mirrors test/metrics/store.test.js's own helper of the same
+// name/shape.
+function seedResolvedReply(store, { botName, trigger, status, occurredAt }) {
+  store.enqueueReplyItem({
+    botName,
+    channel: '#test',
+    trigger,
+    sender: 'Jeymz',
+    hopCount: 1,
+    path: 'AA',
+    hash: 'deadbeef',
+    enqueuedAt: occurredAt,
+    expiresAt: occurredAt + 60000
+  });
+  const item = store.peekOldestPendingReplyItem();
+  store.resolveReplyItem(item.id, { status, resolvedAt: occurredAt, queuedMs: 0 });
+}
+
 function defaultBotsConfig() {
   return [
     {
@@ -52,7 +75,15 @@ function defaultBotsConfig() {
   ];
 }
 
+// MetricsSampler now owns the sample-persist-prune loop independently of
+// MetricsServer (see src/metrics/sampler.js and AGENTS.md's "Persistence"
+// section) - every test gets one running alongside the server, matching
+// how src/index.js wires them, so the two tests that actually care about
+// live sampling/SSE-broadcast behavior still exercise it for real.
 async function withServer({ serviceHealth = fakeServiceHealth(), metricsStore = new MetricsStore({ dbPath: ':memory:' }), botsConfig = defaultBotsConfig(), sampleIntervalMs = 60000, maxChartBuckets = 180, retentionDays = 0, logger = fakeLogger() } = {}, fn) {
+  const sampler = new MetricsSampler({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, logger });
+  sampler.start();
+
   const server = new MetricsServer({
     serviceHealth,
     metricsStore,
@@ -61,15 +92,16 @@ async function withServer({ serviceHealth = fakeServiceHealth(), metricsStore = 
     port: 0,
     sampleIntervalMs,
     maxChartBuckets,
-    retentionDays,
-    logger
+    logger,
+    sampler
   });
   await server.start();
   const { port } = server.address();
   try {
-    await fn(`http://127.0.0.1:${port}`, { metricsStore, server, logger });
+    await fn(`http://127.0.0.1:${port}`, { metricsStore, sampler, server, logger });
   } finally {
     await server.stop();
+    sampler.stop();
     metricsStore.close();
   }
 }
@@ -87,13 +119,13 @@ test('GET /api/metrics returns the current ServiceHealth snapshot as JSON', asyn
 
 test('GET /api/metrics/reply-queue reports outcome totals summed across every bot, from the persisted store', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 1000 });
-  metricsStore.recordBotReplyEvent({ botName: 'weather', trigger: '!wx', outcome: 'sent', occurredAt: 2000 });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'failed', occurredAt: 3000 });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'expired', occurredAt: 4000 });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'cancelled', occurredAt: 5000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 1000 });
+  seedResolvedReply(metricsStore, { botName: 'weather', trigger: '!wx', status: 'sent', occurredAt: 2000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'failed', occurredAt: 3000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'expired', occurredAt: 4000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'cancelled', occurredAt: 5000 });
   // Outside the queried window below - must not be counted.
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 999_999 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 999_999 });
 
   await withServer({ metricsStore }, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/api/metrics/reply-queue?start=0&end=10000`);
@@ -328,8 +360,8 @@ test('GET /api/metrics/packet-types resolves "all" against the earliest persiste
 
 test('GET /api/metrics/bots/commands returns every configured bot, zero-filled, in config order', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 5000 });
-  metricsStore.recordBotReplyEvent({ botName: 'echo', trigger: '!echo', outcome: 'sent', occurredAt: 6000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 5000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 6000 });
 
   const botsConfig = [
     {
@@ -374,7 +406,7 @@ test('GET /api/metrics/bots/commands returns every configured bot, zero-filled, 
 test('GET /api/metrics/bots/commands folds an 8th-and-later configured command into "Other"', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
   const commands = Array.from({ length: 8 }, (_, i) => ({ trigger: `!cmd${i}`, response: 'x' }));
-  metricsStore.recordBotReplyEvent({ botName: 'multi', trigger: '!cmd7', outcome: 'sent', occurredAt: 5000 });
+  seedResolvedReply(metricsStore, { botName: 'multi', trigger: '!cmd7', status: 'sent', occurredAt: 5000 });
 
   const botsConfig = [{ name: 'multi', channel: '#multi', enabled: true, minHops: 0, commands }];
 
