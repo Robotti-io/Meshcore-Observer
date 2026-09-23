@@ -421,8 +421,8 @@ export class MetricsStore {
 
   /**
    * Per-broker, per-outcome (sent/skipped/failed) packet delivery totals
-   * over [start, end). Not yet surfaced on the dashboard; structured so a
-   * future view can query it directly rather than needing a schema change.
+   * over [start, end) - backs the dashboard's "MQTT brokers" section (see
+   * metrics-server.js's #handleBrokerDeliveries).
    *
    * @param {{start: number, end: number}} options
    * @returns {{brokerId: string, outcome: string, total: number}[]}

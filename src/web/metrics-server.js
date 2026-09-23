@@ -289,6 +289,11 @@ export class MetricsServer {
       return;
     }
 
+    if (pathname === '/api/metrics/brokers') {
+      this.#handleBrokerDeliveries(res, searchParams);
+      return;
+    }
+
     if (pathname === '/api/metrics/stream') {
       this.#handleStream(res);
       return;
@@ -401,6 +406,40 @@ export class MetricsServer {
     });
 
     this.#sendJson(res, 200, { start: window.start, end: window.end, bots });
+  }
+
+  /**
+   * Per configured broker, sent/skipped/failed packet-delivery totals for
+   * the requested range - the historical, range-scoped counterpart to the
+   * live connected/last-connected state already in the ServiceHealth
+   * snapshot (see renderSnapshot's #brokers-table on the dashboard). Every
+   * currently-configured broker is included even with zero deliveries in
+   * range, matching the bots/commands endpoint's zero-fill convention.
+   * Broker IDs come from the live snapshot rather than a separate config
+   * list, since ServiceHealth already derives them from MqttManager.
+   */
+  #handleBrokerDeliveries(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateRangeOnlyQuery);
+    if (!resolved) {
+      return;
+    }
+    const { window } = resolved;
+
+    const totals = this.#metricsStore.queryBrokerDeliveryTotals(window);
+    const countsByBroker = new Map();
+    for (const { brokerId, outcome, total } of totals) {
+      const counts = countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 };
+      counts[outcome] = total;
+      countsByBroker.set(brokerId, counts);
+    }
+
+    const brokerIds = Object.keys(this.#serviceHealth.snapshot().mqtt);
+    const brokers = brokerIds.map((brokerId) => ({
+      brokerId,
+      ...(countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 })
+    }));
+
+    this.#sendJson(res, 200, { start: window.start, end: window.end, brokers });
   }
 
   #handleStream(res) {

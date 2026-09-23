@@ -199,6 +199,32 @@ test('recordPublishResults tallies cumulative per-broker sent/skipped/failed out
   assert.deepEqual(snapshot.mqtt.letsmesh.deliveries, { sent: 0, skipped: 1, failed: 1 });
 });
 
+test('an earlier snapshot\'s deliveries stay frozen at their point in time, unaffected by later recordPublishResults calls', () => {
+  // Regression test: snapshot() used to return the #brokerDeliveries Map's
+  // own object by reference, so an earlier snapshot's counts silently kept
+  // changing underneath callers as more publishes were recorded - which
+  // broke metrics-sample.js's tick-to-tick delta (prevSnapshot and the new
+  // snapshot ended up aliasing the same mutated object, so every delta
+  // after the first collapsed to ~0 regardless of real publish volume).
+  const mqttManager = fakeMqttManager({ okimesh: 'connected' });
+  const health = new ServiceHealth({
+    radioManager: fakeRadioManager(),
+    mqttManager,
+    packetPipeline: fakePacketPipeline(),
+    bots: []
+  });
+
+  health.recordPublishResults([{ brokerId: 'okimesh', outcome: 'sent' }]);
+  const firstSnapshot = health.snapshot();
+
+  health.recordPublishResults([{ brokerId: 'okimesh', outcome: 'sent' }]);
+  health.recordPublishResults([{ brokerId: 'okimesh', outcome: 'sent' }]);
+  const secondSnapshot = health.snapshot();
+
+  assert.deepEqual(firstSnapshot.mqtt.okimesh.deliveries, { sent: 1, skipped: 0, failed: 0 });
+  assert.deepEqual(secondSnapshot.mqtt.okimesh.deliveries, { sent: 3, skipped: 0, failed: 0 });
+});
+
 test('each bot reports its own live ready/repliesSent, not a snapshot taken once', () => {
   const bot = fakeBot({ ready: false, repliesSent: 0 });
   const health = new ServiceHealth({
