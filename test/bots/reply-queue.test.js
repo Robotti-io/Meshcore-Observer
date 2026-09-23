@@ -187,31 +187,183 @@ test('logs a warning with channel/sender and continues when dispatching a queued
   assert.equal(failureLog.meta.sender, 'Jeymz');
 });
 
-test('getStats() reports a live size plus lifetime enqueued/sent/expired/failed counters', async () => {
+test('getStats() reports only the live queue depth - lifetime counters are persisted via recordOutcome instead', async () => {
   const logger = silentLogger();
   const { dispatch } = testDispatcher();
   const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger, dispatch });
 
-  assert.deepEqual(queue.getStats(), { size: 0, totalEnqueued: 0, totalSent: 0, totalExpired: 0, totalFailed: 0 });
+  assert.deepEqual(queue.getStats(), { size: 0 });
 
   queue.enqueue(baseItem({ trigger: '!ok' }));
-  assert.equal(queue.getStats().size, 1);
-  assert.equal(queue.getStats().totalEnqueued, 1);
+  assert.deepEqual(queue.getStats(), { size: 1 });
 
-  await waitFor(() => queue.getStats().totalSent === 1);
-  assert.deepEqual(queue.getStats(), { size: 0, totalEnqueued: 1, totalSent: 1, totalExpired: 0, totalFailed: 0 });
+  await waitFor(() => queue.size === 0);
+  assert.deepEqual(queue.getStats(), { size: 0 });
+});
 
-  const { dispatch: brokenDispatch } = testDispatcher({
-    '!broken': () => {
-      throw new Error('nope');
+test('stop() drops every queued reply without sending it, and logs a warning per dropped item', async () => {
+  const { dispatch, calls } = testDispatcher();
+  const logger = silentLogger();
+  // quietMs long enough that neither item would have sent on its own before
+  // stop() runs.
+  const queue = new ReplyQueue({ quietMs: 10000, ttlMs: 60000, pollIntervalMs: POLL_MS, logger, dispatch });
+
+  queue.enqueue(baseItem({ trigger: '!first', channel: '#echo', sender: 'Jeymz' }));
+  queue.enqueue(baseItem({ trigger: '!second', channel: '#echo', sender: 'Robotti' }));
+  assert.equal(queue.size, 2);
+
+  await queue.stop();
+
+  assert.equal(queue.size, 0);
+  assert.equal(calls.length, 0, 'a cancelled item must never reach dispatch');
+  const dropped = logger.calls.warn.filter((c) => c.message.includes('dropped a queued reply on shutdown'));
+  assert.equal(dropped.length, 2);
+  assert.deepEqual(
+    dropped.map((c) => c.meta.trigger).sort(),
+    ['!first', '!second']
+  );
+});
+
+test('stop() prevents further enqueue() calls from being accepted', async () => {
+  const { dispatch, calls } = testDispatcher();
+  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+
+  await queue.stop();
+  queue.enqueue(baseItem());
+
+  assert.equal(queue.size, 0);
+  await new Promise((resolve) => setTimeout(resolve, QUIET_MS * 2));
+  assert.equal(calls.length, 0);
+});
+
+test('stop() is idempotent', async () => {
+  const { dispatch } = testDispatcher();
+  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
+
+  queue.enqueue(baseItem());
+  await queue.stop();
+  await assert.doesNotReject(() => queue.stop());
+});
+
+test('stop() waits for an in-flight send to finish before resolving', async () => {
+  const events = [];
+  const { dispatch } = testDispatcher({
+    '!slow': async () => {
+      events.push('start');
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS * 6));
+      events.push('end');
     }
   });
-  const failingQueue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger, dispatch: brokenDispatch });
-  failingQueue.enqueue(baseItem({ trigger: '!broken' }));
-  await waitFor(() => failingQueue.getStats().totalFailed === 1);
+  const queue = new ReplyQueue({ quietMs: QUIET_MS, ttlMs: TTL_MS, pollIntervalMs: POLL_MS, logger: silentLogger(), dispatch });
 
-  const expiringQueue = new ReplyQueue({ quietMs: 500, ttlMs: 20, pollIntervalMs: POLL_MS, logger, dispatch });
-  expiringQueue.enqueue(baseItem({ trigger: '!expires' }));
-  await waitFor(() => expiringQueue.getStats().totalExpired === 1, { timeoutMs: 2000 });
-  assert.equal(expiringQueue.getStats().totalSent, 0);
+  queue.enqueue(baseItem({ trigger: '!slow' }));
+  await waitFor(() => events.includes('start'));
+
+  await queue.stop();
+  assert.deepEqual(events, ['start', 'end']);
+});
+
+test('recordOutcome is called with "sent", including sender/hash/queuedMs, once a reply actually sends', async () => {
+  const { dispatch } = testDispatcher();
+  const recorded = [];
+  const queue = new ReplyQueue({
+    quietMs: QUIET_MS,
+    ttlMs: TTL_MS,
+    pollIntervalMs: POLL_MS,
+    logger: silentLogger(),
+    dispatch,
+    recordOutcome: (event) => recorded.push(event)
+  });
+
+  queue.enqueue(baseItem({ trigger: '!echo', sender: 'Jeymz', hash: 'deadbeef' }));
+  await waitFor(() => recorded.length === 1);
+
+  assert.equal(recorded[0].botName, 'echo');
+  assert.equal(recorded[0].trigger, '!echo');
+  assert.equal(recorded[0].sender, 'Jeymz');
+  assert.equal(recorded[0].hash, 'deadbeef');
+  assert.equal(recorded[0].outcome, 'sent');
+  assert.ok(Number.isInteger(recorded[0].occurredAt));
+  assert.ok(recorded[0].queuedMs >= 0);
+});
+
+test('recordOutcome is called with "failed" when dispatching a queued item throws', async () => {
+  const { dispatch } = testDispatcher({
+    '!broken': () => {
+      throw new Error('radio busy');
+    }
+  });
+  const recorded = [];
+  const queue = new ReplyQueue({
+    quietMs: QUIET_MS,
+    ttlMs: TTL_MS,
+    pollIntervalMs: POLL_MS,
+    logger: silentLogger(),
+    dispatch,
+    recordOutcome: (event) => recorded.push(event)
+  });
+
+  queue.enqueue(baseItem({ trigger: '!broken' }));
+  await waitFor(() => recorded.length === 1);
+
+  assert.equal(recorded[0].outcome, 'failed');
+  assert.equal(recorded[0].trigger, '!broken');
+});
+
+test('recordOutcome is called with "expired" when a reply is dropped before a quiet window is observed', async () => {
+  const { dispatch } = testDispatcher();
+  const recorded = [];
+  const queue = new ReplyQueue({
+    quietMs: 500,
+    ttlMs: 20,
+    pollIntervalMs: POLL_MS,
+    logger: silentLogger(),
+    dispatch,
+    recordOutcome: (event) => recorded.push(event)
+  });
+
+  queue.enqueue(baseItem({ trigger: '!echo' }));
+  await waitFor(() => recorded.length === 1, { timeoutMs: 2000 });
+
+  assert.equal(recorded[0].outcome, 'expired');
+  assert.ok(recorded[0].queuedMs >= 20);
+});
+
+test('recordOutcome is called with "cancelled" for every reply dropped by stop()', async () => {
+  const { dispatch } = testDispatcher();
+  const recorded = [];
+  const queue = new ReplyQueue({
+    quietMs: 10000,
+    ttlMs: 60000,
+    pollIntervalMs: POLL_MS,
+    logger: silentLogger(),
+    dispatch,
+    recordOutcome: (event) => recorded.push(event)
+  });
+
+  queue.enqueue(baseItem({ trigger: '!echo' }));
+  await queue.stop();
+
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].outcome, 'cancelled');
+});
+
+test('a failure inside recordOutcome is caught and logged, and does not prevent the reply from sending', async () => {
+  const { dispatch, calls } = testDispatcher();
+  const logger = silentLogger();
+  const queue = new ReplyQueue({
+    quietMs: QUIET_MS,
+    ttlMs: TTL_MS,
+    pollIntervalMs: POLL_MS,
+    logger,
+    dispatch,
+    recordOutcome: () => {
+      throw new Error('store unavailable');
+    }
+  });
+
+  queue.enqueue(baseItem({ trigger: '!echo' }));
+  await waitFor(() => calls.length === 1);
+
+  assert.ok(logger.calls.warn.some((c) => c.message.includes('failed to record a reply outcome')));
 });

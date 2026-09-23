@@ -13,7 +13,7 @@
  * read fresh from its source at snapshot() time, so it can never drift out
  * of sync with reality.
  */
-const DEFAULT_REPLY_QUEUE_STATS = { size: 0, totalEnqueued: 0, totalSent: 0, totalExpired: 0, totalFailed: 0 };
+const DEFAULT_REPLY_QUEUE_STATS = { size: 0 };
 
 export class ServiceHealth {
   #now;
@@ -27,13 +27,18 @@ export class ServiceHealth {
   #radioReconnectCount = 0;
   #hasConnectedOnce = false;
   #packetsReceived = 0;
-  #packetsPublished = 0;
+  #packetsDecoded = 0;
   // Keyed by the decoded packet's `packet_type` string (the MeshCore
   // PAYLOAD_TYPE_* numeric code from @liamcottle/meshcore.js, e.g. "4" for
   // ADVERT) - human-readable labels are a display-layer concern, not this
   // module's.
   #packetsByType = new Map();
   #mqttLastConnectedAt = new Map();
+  // Cumulative, per-broker outcome counts for actual publish *attempts*
+  // (sent/skipped/failed) - fed externally via recordPublishResults(), not
+  // inferred from the packet pipeline (see docs/Code Review - 2026-09-22.md
+  // item 4: entering the pipeline is not the same as reaching a broker).
+  #brokerDeliveries = new Map();
 
   /**
    * @param {{radioManager: object, mqttManager: object, packetPipeline: object, bots: {name: string, enabled: boolean, bot: object}[], replyQueue?: {getStats: () => object}, now?: () => Date}} options
@@ -70,7 +75,7 @@ export class ServiceHealth {
       this.#packetsReceived += 1;
     });
     packetPipeline.on('packet', (packet) => {
-      this.#packetsPublished += 1;
+      this.#packetsDecoded += 1;
       this.#packetsByType.set(packet.packet_type, (this.#packetsByType.get(packet.packet_type) ?? 0) + 1);
     });
     mqttManager.on('broker.connected', (brokerId) => {
@@ -78,12 +83,28 @@ export class ServiceHealth {
     });
   }
 
+  /**
+   * Records the outcome of one actual publish attempt per configured
+   * broker - called externally (see index.js) once ObserverPublisher's
+   * publish call resolves, rather than inferred from the packet pipeline.
+   *
+   * @param {{brokerId: string, outcome: 'sent'|'skipped'|'failed'}[]} results
+   */
+  recordPublishResults(results) {
+    for (const { brokerId, outcome } of results) {
+      const counts = this.#brokerDeliveries.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 };
+      counts[outcome] += 1;
+      this.#brokerDeliveries.set(brokerId, counts);
+    }
+  }
+
   snapshot() {
     const mqtt = {};
     for (const [brokerId, state] of Object.entries(this.#mqttManager.getStates())) {
       mqtt[brokerId] = {
         connected: state === 'connected',
-        lastConnectedAt: this.#mqttLastConnectedAt.get(brokerId) ?? null
+        lastConnectedAt: this.#mqttLastConnectedAt.get(brokerId) ?? null,
+        deliveries: this.#brokerDeliveries.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 }
       };
     }
 
@@ -93,7 +114,7 @@ export class ServiceHealth {
       radioLastConnectedAt: this.#radioLastConnectedAt,
       radioReconnectCount: this.#radioReconnectCount,
       packetsReceived: this.#packetsReceived,
-      packetsPublished: this.#packetsPublished,
+      packetsDecoded: this.#packetsDecoded,
       packetsByType: Object.fromEntries(this.#packetsByType),
       mqtt,
       bots: this.#bots.map(({ name, enabled, bot }) => ({

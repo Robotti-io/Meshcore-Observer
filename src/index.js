@@ -47,6 +47,22 @@ async function main() {
     botCount: config.bots.length
   });
 
+  // Constructed early (before the reply queue and MQTT wiring below) so
+  // both can be given metrics-recording hooks at construction time.
+  let metricsStore = null;
+  if (config.metricsUi.enabled) {
+    try {
+      const { MetricsStore } = await import('./metrics/store.js');
+      metricsStore = new MetricsStore({ dbPath: config.metricsUi.dbPath });
+    } catch (err) {
+      logger.warn(
+        'services.metricsUi',
+        'metrics UI disabled: could not open the persisted metrics store (node:sqlite requires Node >=22.13.0)',
+        { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
+      );
+    }
+  }
+
   const radioManager = new RadioManager({ config, logger });
 
   const packetPipeline = new PacketPipeline({
@@ -69,7 +85,8 @@ async function main() {
     quietMs: config.botReplyQueue.quietMs,
     ttlMs: config.botReplyQueue.ttlMs,
     logger,
-    dispatch: createReplyDispatcher(botsByName)
+    dispatch: createReplyDispatcher(botsByName),
+    recordOutcome: metricsStore ? (event) => metricsStore.recordBotReplyEvent(event) : undefined
   });
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
@@ -158,39 +175,8 @@ async function main() {
   // window detection (see reply-queue.js).
   radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
-  packetPipeline.on('packet', (packet) => {
-    observerPublisher.publishPacket(packet).catch((err) => {
-      logger.warn('services.mqtt', 'failed to publish packet', { error: err.message });
-    });
-  });
-
-  // Constructed before the bots below (rather than alongside the rest of
-  // the metrics UI further down) so each ChannelBot can be given a
-  // recordBotCommand hook at construction time.
-  let metricsStore = null;
-  if (config.metricsUi.enabled) {
-    try {
-      const { MetricsStore } = await import('./metrics/store.js');
-      metricsStore = new MetricsStore({ dbPath: config.metricsUi.dbPath });
-    } catch (err) {
-      logger.warn(
-        'services.metricsUi',
-        'metrics UI disabled: could not open the persisted metrics store (node:sqlite requires Node >=22.13.0)',
-        { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
-      );
-    }
-  }
-
   const bots = config.bots.map((botConfig) => {
-    const bot = new ChannelBot({
-      radioManager,
-      botConfig,
-      logger,
-      recordBotCommand: metricsStore
-        ? (botName, trigger, occurredAt) => metricsStore.recordBotCommand({ botName, trigger, occurredAt })
-        : undefined,
-      replyQueue
-    });
+    const bot = new ChannelBot({ radioManager, botConfig, logger, replyQueue });
     botsByName.set(botConfig.name, bot);
     return { name: botConfig.name, enabled: botConfig.enabled, bot };
   });
@@ -205,6 +191,20 @@ async function main() {
     bots,
     replyQueue
   });
+
+  // Fed the actual per-broker outcome of every publish attempt (see
+  // MqttManager#publish), rather than serviceHealth inferring "published"
+  // from the packet pipeline alone (docs/Code Review - 2026-09-22.md item 4:
+  // entering the pipeline is not the same as reaching a broker).
+  packetPipeline.on('packet', (packet) => {
+    observerPublisher
+      .publishPacket(packet)
+      .then((results) => serviceHealth.recordPublishResults(results))
+      .catch((err) => {
+        logger.warn('services.mqtt', 'failed to publish packet', { error: err.message });
+      });
+  });
+
   const healthLogTimer = setInterval(() => {
     logger.info('app.health', 'health snapshot', serviceHealth.snapshot());
   }, HEALTH_LOG_INTERVAL_MS);
@@ -243,6 +243,15 @@ async function main() {
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS);
     timeout.unref();
+
+    // Stop accepting bot work first (docs/project_plan.spec.md Section 22):
+    // unsubscribe every bot from radio events so no new trigger can be
+    // matched, then stop the shared reply queue so nothing already queued
+    // sends later while MQTT/radio are closing below.
+    for (const { bot } of bots) {
+      bot.stop();
+    }
+    await replyQueue.stop();
 
     clearInterval(healthLogTimer);
     for (const stop of stopTokenRefreshLoops) {

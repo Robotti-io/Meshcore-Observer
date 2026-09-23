@@ -69,17 +69,11 @@ export class ChannelBot {
   #channelHash = null;
   #ready = false;
   #repliesSent = 0;
-  #recordBotCommand;
   #replyQueue;
+  #onRadioConnected = null;
+  #onRadioPacket = null;
 
   /**
-   * `recordBotCommand` is an optional `(botName, trigger, occurredAt) => void`
-   * hook for persisting per-command usage (see src/metrics/store.js); it
-   * defaults to a no-op so this bot works standalone (e.g. in tests) without
-   * a metrics store. Injected rather than importing the store directly, to
-   * keep this module decoupled from the metrics feature per the existing
-   * constructor-injection pattern for its other collaborators.
-   *
    * `replyQueue` (see reply-queue.js) is a single instance *shared across
    * every configured bot* - "the local frequency" is one physical radio,
    * so FIFO ordering and quiet-window detection only make sense as one
@@ -88,14 +82,16 @@ export class ChannelBot {
    * sendQueuedReply(), with its own catch - so a bot built without one
    * (e.g. in tests that don't care about send timing) still replies
    * right away and a send failure still can't escape as an unhandled
-   * rejection.
+   * rejection. It's also the single place reply-lifecycle metrics are
+   * recorded (see reply-queue.js's recordOutcome) - this bot has no
+   * enqueue timestamp of its own to report against, so it doesn't attempt
+   * to record anything metrics-related itself.
    */
   constructor({
     radioManager,
     botConfig,
     logger,
     deduplicator = new PacketDeduplicator(),
-    recordBotCommand = () => {},
     replyQueue
   }) {
     this.#radioManager = radioManager;
@@ -107,7 +103,6 @@ export class ChannelBot {
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
     this.#logger = logger;
     this.#deduplicator = deduplicator;
-    this.#recordBotCommand = recordBotCommand;
     // sendQueuedReply() intentionally lets a send failure propagate (see
     // its own doc comment) for a real ReplyQueue to catch/count/log - this
     // default stub is the one place standing in for that catch when no
@@ -134,22 +129,45 @@ export class ChannelBot {
       return;
     }
 
-    this.#radioManager.on('radio.connected', () => {
+    this.#onRadioConnected = () => {
       this.#setup().catch((err) => {
         this.#logger.warn('bots.channelBot', 'unexpected error during channel setup', {
           bot: this.#name,
           error: err.message
         });
       });
-    });
-    this.#radioManager.on('radio.packet', (rawPush) => {
+    };
+    this.#onRadioPacket = (rawPush) => {
       this.#handleRawPacket(rawPush).catch((err) => {
         this.#logger.warn('bots.channelBot', 'unexpected error handling a packet', {
           bot: this.#name,
           error: err.message
         });
       });
-    });
+    };
+    this.#radioManager.on('radio.connected', this.#onRadioConnected);
+    this.#radioManager.on('radio.packet', this.#onRadioPacket);
+  }
+
+  /**
+   * Idempotent: unsubscribes this bot from radio events and marks it not
+   * ready, so a shutdown in progress (see index.js) can guarantee no new
+   * packet ever reaches #handleRawPacket() again, even if the radio
+   * connection itself stays open a little longer while other resources
+   * finish closing. Safe to call whether or not start() ever ran (a bot
+   * disabled by configuration never subscribed to begin with) and safe to
+   * call more than once.
+   */
+  stop() {
+    if (this.#onRadioConnected) {
+      this.#radioManager.off('radio.connected', this.#onRadioConnected);
+      this.#onRadioConnected = null;
+    }
+    if (this.#onRadioPacket) {
+      this.#radioManager.off('radio.packet', this.#onRadioPacket);
+      this.#onRadioPacket = null;
+    }
+    this.#ready = false;
   }
 
   isReady() {
@@ -313,8 +331,10 @@ export class ChannelBot {
 
   /**
    * Renders and sends the reply for one queued item, then records its
-   * own bookkeeping (counters, metrics, logging). Public because it's
-   * invoked from outside this instance - by the shared ReplyQueue's
+   * own bookkeeping (counters, logging) - reply-lifecycle metrics
+   * persistence lives in the shared ReplyQueue instead (see reply-queue.js),
+   * which has the enqueue timestamp this method doesn't. Public because
+   * it's invoked from outside this instance - by the shared ReplyQueue's
    * dispatcher (see reply-dispatcher.js) once a quiet window is
    * observed, not by anything reachable from over-the-air data.
    *
@@ -352,19 +372,5 @@ export class ChannelBot {
     await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
-
-    try {
-      this.#recordBotCommand(this.#name, trigger, Date.now());
-    } catch (err) {
-      // A metrics-persistence failure must never be mistaken for a failed
-      // reply (Section 21: bot failure must not stop observer operation)
-      // - the reply already sent successfully by this point, so this one
-      // is still caught and logged locally rather than propagated.
-      this.#logger.warn('bots.channelBot', 'failed to record command metrics for a sent reply', {
-        bot: this.#name,
-        trigger,
-        error: err.message
-      });
-    }
   }
 }

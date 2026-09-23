@@ -1,6 +1,6 @@
 {
   "name": "meshcore-observer",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "description": "A meshcore observer & echo bot",
   "license": "ISC",
   "author": "Robotti Tech Services",
@@ -30,7 +30,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.10.0",
-    "nodemon": "^3.1.14"
+    "eslint": "^10.10.0"
   }
 }

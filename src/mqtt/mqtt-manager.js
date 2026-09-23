@@ -64,24 +64,43 @@ export class MqttManager extends EventEmitter {
   }
 
   /**
-   * Publishes to every currently connected broker independently. A broker
-   * that isn't connected is silently skipped (it will publish once it
-   * reconnects, for the next call); a broker whose publish call fails logs
-   * a warning but never affects the others.
+   * Publishes to every configured broker independently. A broker that
+   * isn't connected is skipped (it will publish once it reconnects, for
+   * the next call) and reported as "skipped" below, rather than silently
+   * dropped from the result entirely - callers that need to know whether a
+   * publish actually reached a broker (e.g. ServiceHealth's per-broker
+   * delivery metrics) can't tell "skipped" apart from "sent" otherwise. A
+   * broker whose publish call fails logs a warning, is reported as
+   * "failed", but never affects the others.
+   *
+   * @returns {Promise<{brokerId: string, outcome: 'sent'|'skipped'|'failed', error?: string}[]>}
    */
   async publish(topic, payload, options) {
-    const connectedBrokers = this.#brokers.filter((broker) => broker.isConnected());
-    const results = await Promise.allSettled(
-      connectedBrokers.map((broker) => broker.publish(topic, payload, options))
-    );
+    // Each connected broker's publish() is started here, synchronously,
+    // not deferred - Promise.allSettled below just waits for whichever
+    // ones were actually started.
+    const attempts = this.#brokers.map((broker) => ({
+      broker,
+      promise: broker.isConnected() ? broker.publish(topic, payload, options) : null
+    }));
 
-    results.forEach((result, index) => {
+    const settled = await Promise.allSettled(attempts.filter(({ promise }) => promise).map(({ promise }) => promise));
+
+    let settledIndex = 0;
+    return attempts.map(({ broker, promise }) => {
+      if (!promise) {
+        return { brokerId: broker.id, outcome: 'skipped' };
+      }
+      const result = settled[settledIndex];
+      settledIndex += 1;
       if (result.status === 'rejected') {
         this.#logger.warn('services.mqtt', 'publish to broker failed', {
-          broker: connectedBrokers[index].id,
+          broker: broker.id,
           error: result.reason?.message
         });
+        return { brokerId: broker.id, outcome: 'failed', error: result.reason?.message };
       }
+      return { brokerId: broker.id, outcome: 'sent' };
     });
   }
 }

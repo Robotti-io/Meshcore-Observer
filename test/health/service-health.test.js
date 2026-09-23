@@ -63,9 +63,11 @@ test('reports a sensible initial snapshot before anything has happened', () => {
   assert.equal(snapshot.radioLastConnectedAt, null);
   assert.equal(snapshot.radioReconnectCount, 0);
   assert.equal(snapshot.packetsReceived, 0);
-  assert.equal(snapshot.packetsPublished, 0);
+  assert.equal(snapshot.packetsDecoded, 0);
   assert.deepEqual(snapshot.packetsByType, {});
-  assert.deepEqual(snapshot.mqtt, { okimesh: { connected: false, lastConnectedAt: null } });
+  assert.deepEqual(snapshot.mqtt, {
+    okimesh: { connected: false, lastConnectedAt: null, deliveries: { sent: 0, skipped: 0, failed: 0 } }
+  });
   assert.deepEqual(snapshot.bots, [{ name: 'echo', enabled: true, ready: false, repliesSent: 0 }]);
 });
 
@@ -126,7 +128,7 @@ test('counts raw packets received and packets that made it through the pipeline 
 
   const snapshot = health.snapshot();
   assert.equal(snapshot.packetsReceived, 3);
-  assert.equal(snapshot.packetsPublished, 1);
+  assert.equal(snapshot.packetsDecoded, 1);
 });
 
 test('tallies published packets by their packet_type code', () => {
@@ -162,7 +164,8 @@ test('tracks per-broker lastConnectedAt while connected reflects the current sta
   let snapshot = health.snapshot();
   assert.deepEqual(snapshot.mqtt.okimesh, {
     connected: true,
-    lastConnectedAt: new Date('2024-01-01T00:00:00.000Z')
+    lastConnectedAt: new Date('2024-01-01T00:00:00.000Z'),
+    deliveries: { sent: 0, skipped: 0, failed: 0 }
   });
 
   // Broker drops to retrying: connected flips live, but the last-connected
@@ -171,6 +174,29 @@ test('tracks per-broker lastConnectedAt while connected reflects the current sta
   snapshot = health.snapshot();
   assert.equal(snapshot.mqtt.okimesh.connected, false);
   assert.deepEqual(snapshot.mqtt.okimesh.lastConnectedAt, new Date('2024-01-01T00:00:00.000Z'));
+});
+
+test('recordPublishResults tallies cumulative per-broker sent/skipped/failed outcomes', () => {
+  const mqttManager = fakeMqttManager({ okimesh: 'connected', letsmesh: 'connected' });
+  const health = new ServiceHealth({
+    radioManager: fakeRadioManager(),
+    mqttManager,
+    packetPipeline: fakePacketPipeline(),
+    bots: []
+  });
+
+  health.recordPublishResults([
+    { brokerId: 'okimesh', outcome: 'sent' },
+    { brokerId: 'letsmesh', outcome: 'skipped' }
+  ]);
+  health.recordPublishResults([
+    { brokerId: 'okimesh', outcome: 'sent' },
+    { brokerId: 'letsmesh', outcome: 'failed' }
+  ]);
+
+  const snapshot = health.snapshot();
+  assert.deepEqual(snapshot.mqtt.okimesh.deliveries, { sent: 2, skipped: 0, failed: 0 });
+  assert.deepEqual(snapshot.mqtt.letsmesh.deliveries, { sent: 0, skipped: 1, failed: 1 });
 });
 
 test('each bot reports its own live ready/repliesSent, not a snapshot taken once', () => {
@@ -209,7 +235,7 @@ test('reports multiple independent bots, including a disabled one', () => {
   assert.deepEqual(snapshot.bots[1], { name: 'weather', enabled: false, ready: false, repliesSent: 0 });
 });
 
-test('defaults replyQueue to all-zero stats when none is provided', () => {
+test('defaults replyQueue to a zero size when none is provided', () => {
   const health = new ServiceHealth({
     radioManager: fakeRadioManager(),
     mqttManager: fakeMqttManager(),
@@ -217,17 +243,11 @@ test('defaults replyQueue to all-zero stats when none is provided', () => {
     bots: []
   });
 
-  assert.deepEqual(health.snapshot().replyQueue, {
-    size: 0,
-    totalEnqueued: 0,
-    totalSent: 0,
-    totalExpired: 0,
-    totalFailed: 0
-  });
+  assert.deepEqual(health.snapshot().replyQueue, { size: 0 });
 });
 
-test('reports the injected replyQueue\'s stats live, not a snapshot taken once', () => {
-  let stats = { size: 1, totalEnqueued: 1, totalSent: 0, totalExpired: 0, totalFailed: 0 };
+test('reports the injected replyQueue\'s live size, not a snapshot taken once', () => {
+  let stats = { size: 1 };
   const replyQueue = { getStats: () => stats };
   const health = new ServiceHealth({
     radioManager: fakeRadioManager(),
@@ -239,6 +259,6 @@ test('reports the injected replyQueue\'s stats live, not a snapshot taken once',
 
   assert.deepEqual(health.snapshot().replyQueue, stats);
 
-  stats = { size: 0, totalEnqueued: 1, totalSent: 1, totalExpired: 0, totalFailed: 0 };
+  stats = { size: 0 };
   assert.deepEqual(health.snapshot().replyQueue, stats);
 });

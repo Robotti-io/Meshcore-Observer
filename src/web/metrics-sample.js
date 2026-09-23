@@ -21,7 +21,7 @@ import { bucketPacketsByType } from './packet-type-buckets.js';
  */
 export function computeSampleDelta({ prevSnapshot, snapshot, sampleAt, intervalMs }) {
   const packetsReceived = snapshot.packetsReceived - (prevSnapshot?.packetsReceived ?? 0);
-  const packetsPublished = snapshot.packetsPublished - (prevSnapshot?.packetsPublished ?? 0);
+  const packetsDecoded = snapshot.packetsDecoded - (prevSnapshot?.packetsDecoded ?? 0);
 
   const packetsByTypeDelta = {};
   for (const [code, count] of Object.entries(snapshot.packetsByType)) {
@@ -31,18 +31,38 @@ export function computeSampleDelta({ prevSnapshot, snapshot, sampleAt, intervalM
     }
   }
 
+  const ZERO_DELIVERIES = { sent: 0, skipped: 0, failed: 0 };
+  const brokerDeliveriesDelta = {};
+  for (const [brokerId, state] of Object.entries(snapshot.mqtt)) {
+    const prevDeliveries = prevSnapshot?.mqtt?.[brokerId]?.deliveries ?? ZERO_DELIVERIES;
+    const currDeliveries = state.deliveries ?? ZERO_DELIVERIES;
+    const delta = {
+      sent: currDeliveries.sent - prevDeliveries.sent,
+      skipped: currDeliveries.skipped - prevDeliveries.skipped,
+      failed: currDeliveries.failed - prevDeliveries.failed
+    };
+    if (delta.sent > 0 || delta.skipped > 0 || delta.failed > 0) {
+      brokerDeliveriesDelta[brokerId] = delta;
+    }
+  }
+
   const mqttStates = Object.values(snapshot.mqtt);
 
   return {
     sampleAt,
     intervalMs,
     packetsReceived,
-    packetsPublished,
+    packetsDecoded,
     radioConnected: snapshot.radioConnected,
     brokersConnected: mqttStates.filter((state) => state.connected).length,
     brokersTotal: mqttStates.length,
     botsReady: snapshot.bots.filter((bot) => bot.ready).length,
     botsTotal: snapshot.bots.length,
-    packetsByType: bucketPacketsByType(packetsByTypeDelta)
+    // Point-in-time gauge, carried through as-is like botsReady/brokersTotal
+    // above - not yet queried back out anywhere, but captured now so a
+    // future queue-depth-over-time chart doesn't need a schema change.
+    replyQueueSize: snapshot.replyQueue.size,
+    packetsByType: bucketPacketsByType(packetsByTypeDelta),
+    brokerDeliveries: brokerDeliveriesDelta
   };
 }

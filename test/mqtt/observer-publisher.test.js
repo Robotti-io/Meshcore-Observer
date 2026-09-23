@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ObserverPublisher } from '../../src/mqtt/observer-publisher.js';
 
-function fakeMqttManager() {
+function fakeMqttManager(results = [{ brokerId: 'okimesh', outcome: 'sent' }]) {
   const calls = [];
   return {
     calls,
     publish: async (topic, payload, options) => {
       calls.push({ topic, payload, options });
+      return results;
     }
   };
 }
@@ -48,4 +49,16 @@ test('status and packets topics for the same device use the same casing', async 
   await publisher.publishPacket({ origin_id: 'DEADBEEF', packet_type: '5' });
 
   assert.equal(mqttManager.calls[0].topic.replace('/status', ''), mqttManager.calls[1].topic.replace('/packets', ''));
+});
+
+test('publishPacket resolves with MqttManager#publish\'s per-broker results, for ServiceHealth to record', async () => {
+  const results = [
+    { brokerId: 'okimesh', outcome: 'sent' },
+    { brokerId: 'letsmesh', outcome: 'skipped' }
+  ];
+  const mqttManager = fakeMqttManager(results);
+  const publisher = new ObserverPublisher({ mqttManager, iata: 'CVG', clientVersion: '1.0.0' });
+
+  const returned = await publisher.publishPacket({ origin_id: 'DEADBEEF', packet_type: '5' });
+  assert.deepEqual(returned, results);
 });

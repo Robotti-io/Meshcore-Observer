@@ -2,9 +2,10 @@ import { existsSync } from 'node:fs';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { configSchema } from './schema.js';
 import { loadBotsConfig } from '../bots/bots-config-loader.js';
+import { loadBrokersConfig } from '../mqtt/brokers-config-loader.js';
 
-const MAX_BROKER_SLOTS = 9;
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
+const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
 
 export class ConfigError extends Error {
   constructor(message) {
@@ -28,19 +29,28 @@ function readBoolean(env, key, fallback) {
   if (value === undefined || value === '') {
     return fallback;
   }
-  return value.trim().toLowerCase() === 'true';
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  throw new ConfigError(`${key} must be "true" or "false", got "${value}"`);
 }
+
+const INTEGER_PATTERN = /^-?\d+$/;
 
 function readInteger(env, key, fallback) {
   const value = env[key];
   if (value === undefined || value === '') {
     return fallback;
   }
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) {
+  const trimmed = value.trim();
+  if (!INTEGER_PATTERN.test(trimmed)) {
     throw new ConfigError(`${key} must be an integer, got "${value}"`);
   }
-  return parsed;
+  return Number.parseInt(trimmed, 10);
 }
 
 function readList(env, key, fallback = []) {
@@ -113,46 +123,55 @@ function readMetricsUi(env) {
   };
 }
 
-function isBrokerSlotConfigured(env, slot) {
-  const prefix = `PACKETCAPTURE_MQTT${slot}_`;
-  return Object.keys(env).some((key) => key.startsWith(prefix));
-}
-
-function readBrokerSlot(env, slot) {
-  const prefix = `PACKETCAPTURE_MQTT${slot}_`;
-  const key = (suffix) => `${prefix}${suffix}`;
-  const method = readString(env, key('AUTH_METHOD'), 'none').toLowerCase();
-
-  return {
-    id: readString(env, key('ID'), `mqtt${slot}`),
-    enabled: readBoolean(env, key('ENABLED'), false),
-    host: readString(env, key('HOST')),
-    port: readInteger(env, key('PORT'), null),
-    transport: readString(env, key('TRANSPORT'), 'tcp'),
-    tls: readBoolean(env, key('TLS'), false),
-    websocketPath: readString(env, key('WEBSOCKET_PATH')),
-    keepalive: readInteger(env, key('KEEPALIVE'), 60),
-    qos: readInteger(env, key('QOS'), 0),
-    retain: readBoolean(env, key('RETAIN'), true),
-    clientIdPrefix: readString(env, key('CLIENT_ID_PREFIX'), 'meshcore-observer'),
-    auth: {
-      method,
-      username: readString(env, key('USERNAME')),
-      password: readString(env, key('PASSWORD')),
-      audience: readString(env, key('TOKEN_AUDIENCE')),
-      tokenTtlSeconds: readInteger(env, key('TOKEN_TTL'), null)
-    }
-  };
-}
-
+/**
+ * Brokers are configured via a JSON file (an array of independent broker
+ * definitions), the same pattern as readBots() below, rather than flat env
+ * vars - one broker's worth of connection settings doesn't fit one KEY=VALUE
+ * pair per field any better than a bot's commands do.
+ * PACKETCAPTURE_BROKERS_CONFIG_FILE points at it; if unset, the default path
+ * is only optional - a missing default file just means no brokers are
+ * configured, but an explicitly configured path that doesn't exist is a
+ * startup error.
+ *
+ * The one field never stored in that file is a password-auth broker's
+ * password: it's read here from PACKETCAPTURE_MQTT<n>_PASSWORD, where <n> is
+ * that broker's 1-based position in the array (not a field in the file
+ * itself) - the same variable name this project has always used for that
+ * purpose, now naming a position in the array instead of an env var prefix.
+ */
 function readBrokers(env) {
-  const brokers = [];
-  for (let slot = 1; slot <= MAX_BROKER_SLOTS; slot += 1) {
-    if (isBrokerSlotConfigured(env, slot)) {
-      brokers.push(readBrokerSlot(env, slot));
-    }
+  const configuredPath = readString(env, 'PACKETCAPTURE_BROKERS_CONFIG_FILE');
+  const path = configuredPath ?? DEFAULT_BROKERS_CONFIG_FILE;
+
+  if (configuredPath && !existsSync(path)) {
+    throw new ConfigError(`PACKETCAPTURE_BROKERS_CONFIG_FILE is set to "${path}", but that file does not exist`);
   }
-  return brokers;
+
+  let brokers;
+  try {
+    brokers = loadBrokersConfig(path);
+  } catch (err) {
+    // Unified into ConfigError so every loadConfig() caller only has one
+    // error type to handle, regardless of whether a problem came from an
+    // env var or the brokers config file.
+    throw new ConfigError(err.message);
+  }
+
+  return brokers.map((broker, index) => {
+    if (broker.auth.method !== 'password') {
+      return broker;
+    }
+    const number = index + 1;
+    const passwordKey = `PACKETCAPTURE_MQTT${number}_PASSWORD`;
+    const password = readString(env, passwordKey);
+    if (!password) {
+      throw new ConfigError(
+        `Broker "${broker.id}" (position ${number} in the brokers config file) uses password auth, ` +
+          `but ${passwordKey} is not set`
+      );
+    }
+    return { ...broker, auth: { ...broker.auth, password } };
+  });
 }
 
 /**
@@ -216,15 +235,6 @@ export function loadConfig(env = process.env) {
 
   if (!config.observer.iata) {
     throw new ConfigError('PACKETCAPTURE_IATA is required');
-  }
-
-  for (const broker of config.brokers) {
-    if (broker.enabled && !broker.host) {
-      throw new ConfigError(`Broker "${broker.id}" is enabled but has no host configured`);
-    }
-    if (broker.enabled && !broker.port) {
-      throw new ConfigError(`Broker "${broker.id}" is enabled but has no port configured`);
-    }
   }
 
   if (config.botReplyQueue.ttlMs < config.botReplyQueue.quietMs) {

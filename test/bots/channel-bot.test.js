@@ -67,6 +67,8 @@ function fakeRadioManager() {
     commandCalls,
     connection,
     on: (event, handler) => emitter.on(event, handler),
+    off: (event, handler) => emitter.off(event, handler),
+    listenerCount: (event) => emitter.listenerCount(event),
     emitConnected: () => emitter.emit('radio.connected', {}),
     emitPacket: (frame) => emitter.emit('radio.packet', { lastSnr: 10, lastRssi: -50, raw: frame }),
     runCommand: async (fn) => fn(connection)
@@ -407,113 +409,9 @@ test('replies immediately when no replyQueue is injected (the default, immediate
   assert.equal(radioManager.commandCalls.length, 1);
 });
 
-test('records the bot-command event only once the queue actually sends it, not at enqueue time', async () => {
-  const radioManager = fakeRadioManager();
-  const replyQueue = fakeReplyQueue();
-  const recorded = [];
-  const bot = new ChannelBot({
-    radioManager,
-    botConfig: baseBotConfig(),
-    logger: silentLogger(),
-    replyQueue,
-    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
-  });
-  await startAndConnect(bot, radioManager);
-
-  const channelKey = deriveHashtagChannelKey('#echo');
-  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
-  await flush();
-  assert.equal(recorded.length, 0, 'must not record before the queue sends');
-
-  const beforeMs = Date.now();
-  await bot.sendQueuedReply(replyQueue.enqueued[0]);
-
-  assert.equal(recorded.length, 1);
-  assert.ok(recorded[0].occurredAt >= beforeMs);
-});
-
-test('records a bot-command event via the injected hook on a successful reply', async () => {
-  const radioManager = fakeRadioManager();
-  const recorded = [];
-  const bot = new ChannelBot({
-    radioManager,
-    botConfig: baseBotConfig(),
-    logger: silentLogger(),
-    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
-  });
-  await startAndConnect(bot, radioManager);
-
-  const channelKey = deriveHashtagChannelKey('#echo');
-  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
-  await flush();
-
-  assert.equal(recorded.length, 1);
-  assert.equal(recorded[0].botName, 'echo');
-  assert.equal(recorded[0].trigger, '!echo');
-  assert.ok(Number.isInteger(recorded[0].occurredAt));
-});
-
-test('does not record a bot-command event when the reply send fails', async () => {
-  const radioManager = fakeRadioManager();
-  radioManager.connection.sendChannelTextMessage = async () => {
-    throw new Error('radio busy');
-  };
-  const recorded = [];
-  const bot = new ChannelBot({
-    radioManager,
-    botConfig: baseBotConfig(),
-    logger: silentLogger(),
-    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
-  });
-  await startAndConnect(bot, radioManager);
-
-  const channelKey = deriveHashtagChannelKey('#echo');
-  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
-  await flush();
-
-  assert.equal(recorded.length, 0);
-});
-
-test('does not record a bot-command event for a deduped redelivery, matching the single sent reply', async () => {
-  const radioManager = fakeRadioManager();
-  const recorded = [];
-  const bot = new ChannelBot({
-    radioManager,
-    botConfig: baseBotConfig(),
-    logger: silentLogger(),
-    recordBotCommand: (botName, trigger, occurredAt) => recorded.push({ botName, trigger, occurredAt })
-  });
-  await startAndConnect(bot, radioManager);
-
-  const channelKey = deriveHashtagChannelKey('#echo');
-  const frame = buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' });
-  radioManager.emitPacket(frame);
-  radioManager.emitPacket(frame);
-  await flush();
-
-  assert.equal(recorded.length, 1);
-});
-
-test('a failure inside recordBotCommand is caught and logged, and does not affect getRepliesSent()', async () => {
-  const radioManager = fakeRadioManager();
-  const logger = silentLogger();
-  const bot = new ChannelBot({
-    radioManager,
-    botConfig: baseBotConfig(),
-    logger,
-    recordBotCommand: () => {
-      throw new Error('store unavailable');
-    }
-  });
-  await startAndConnect(bot, radioManager);
-
-  const channelKey = deriveHashtagChannelKey('#echo');
-  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
-  await flush();
-
-  assert.equal(bot.getRepliesSent(), 1);
-  assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to record command metrics')));
-});
+// Reply-lifecycle metrics recording (recordOutcome) lives in ReplyQueue now,
+// not here - see test/bots/reply-queue.test.js. ChannelBot has no enqueue
+// timestamp of its own to report against.
 
 test('two independent bots on different channels do not cross-respond', async () => {
   const radioManager = fakeRadioManager();
@@ -603,4 +501,57 @@ test('degrades a too-long response to its configured overflowResponse (e.g. a ha
   assert.ok(Buffer.byteLength(message, 'utf8') <= 100);
   assert.ok(!message.includes('➡️'));
   assert.equal(message, `🔁 @[Jeymz]! 20 hops - 🔗 https://map.okimesh.org/#/packets/${expectedHash}`);
+});
+
+test('stop() unsubscribes from radio events, so a packet arriving afterward is ignored', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  bot.stop();
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls.length, 0);
+  assert.equal(radioManager.listenerCount('radio.connected'), 0);
+  assert.equal(radioManager.listenerCount('radio.packet'), 0);
+});
+
+test('stop() marks the bot not ready', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  assert.equal(bot.isReady(), true);
+
+  bot.stop();
+  assert.equal(bot.isReady(), false);
+});
+
+test('stop() is idempotent and safe to call without a prior start()', () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+
+  assert.doesNotThrow(() => bot.stop());
+  assert.doesNotThrow(() => bot.stop());
+});
+
+test('stop() is idempotent after a real start(), and safe to call twice', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  bot.stop();
+  assert.doesNotThrow(() => bot.stop());
+  assert.equal(radioManager.listenerCount('radio.connected'), 0);
+  assert.equal(radioManager.listenerCount('radio.packet'), 0);
+});
+
+test('stop() on a disabled bot is a safe no-op (it never subscribed)', () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ enabled: false }), logger: silentLogger() });
+  bot.start();
+
+  assert.doesNotThrow(() => bot.stop());
 });

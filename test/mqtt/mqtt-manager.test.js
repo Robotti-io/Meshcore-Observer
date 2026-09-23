@@ -74,6 +74,30 @@ test('one broker failing to publish does not affect the others', async () => {
   assert.equal(logger.calls.warn[0].meta.broker, 'a');
 });
 
+test('publish() returns one outcome per configured broker: sent, skipped (disconnected), or failed', async () => {
+  const brokerA = fakeBroker('a', { connected: true });
+  const brokerB = fakeBroker('b', { connected: false });
+  const brokerC = fakeBroker('c', { connected: true, publishError: new Error('down') });
+
+  const manager = new MqttManager({
+    config: { brokers: [{}, {}, {}] },
+    logger: silentLogger(),
+    createBroker: (() => {
+      const queue = [brokerA, brokerB, brokerC];
+      return () => queue.shift();
+    })()
+  });
+
+  const results = await manager.publish('t', 'p');
+
+  assert.deepEqual(results.map((r) => ({ brokerId: r.brokerId, outcome: r.outcome })), [
+    { brokerId: 'a', outcome: 'sent' },
+    { brokerId: 'b', outcome: 'skipped' },
+    { brokerId: 'c', outcome: 'failed' }
+  ]);
+  assert.equal(results[2].error, 'down');
+});
+
 test('forwards connectAll(will) to every broker and re-emits broker.connected with the broker id', () => {
   const receivedWills = [];
   const onConnects = [];
