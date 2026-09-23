@@ -126,6 +126,21 @@ export function chartNoteForBuckets(buckets) {
 }
 
 /**
+ * @returns {string} the node table's pagination note, e.g. "1-25 of 137" or
+ * "No repeaters found." for an empty result set - shared logic for the
+ * offset math so dashboard.js's Prev/Next handlers and this note can never
+ * disagree on where a page starts/ends.
+ */
+export function formatNodePageRange(offset, limit, total) {
+  if (total === 0) {
+    return 'No repeaters found.';
+  }
+  const from = offset + 1;
+  const to = Math.min(offset + limit, total);
+  return `${from}-${to} of ${total}`;
+}
+
+/**
  * Re-orders GET /api/metrics/packet-types' totals (an unordered array,
  * possibly omitting zero-count buckets) into the fixed display order
  * packetTypeBuckets defines, defaulting a missing bucket's count to 0 -

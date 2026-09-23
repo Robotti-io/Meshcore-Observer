@@ -25,11 +25,24 @@ export class NodeRegistry {
   #logger;
   #parseAdvert;
   #now;
+  #recordNode;
 
-  constructor({ logger, parseAdvert = parseAdvertFromPacket, now = () => new Date().toISOString() }) {
+  /**
+   * `recordNode`, when given, is called with `{publicKeyHex, name, type,
+   * heardAt}` every time a verified named advert updates this registry's
+   * in-memory state (both a brand-new node and a re-heard one) - the seam
+   * a persistence layer (see src/metrics/store.js's upsertNode) hangs off
+   * to back the dashboard's node totals/search without this module knowing
+   * anything about SQL or MetricsStore. A failure here is caught and
+   * logged, never allowed to undo the in-memory update it followed or
+   * propagate out of recordFromDecodedPacket - this registry's own
+   * correctness must never depend on a persistence side effect succeeding.
+   */
+  constructor({ logger, parseAdvert = parseAdvertFromPacket, now = () => Date.now(), recordNode = () => {} }) {
     this.#logger = logger;
     this.#parseAdvert = parseAdvert;
     this.#now = now;
+    this.#recordNode = recordNode;
   }
 
   /**
@@ -65,12 +78,14 @@ export class NodeRegistry {
     }
 
     const publicKeyHex = Buffer.from(advert.publicKey).toString('hex').toUpperCase();
-    this.#nodesByPublicKey.set(publicKeyHex, {
-      publicKeyHex,
-      name: advert.parsed.name,
-      type: advert.parsed.type,
-      lastHeardAt: this.#now()
-    });
+    const record = { publicKeyHex, name: advert.parsed.name, type: advert.parsed.type, lastHeardAt: this.#now() };
+    this.#nodesByPublicKey.set(publicKeyHex, record);
+
+    try {
+      this.#recordNode({ publicKeyHex, name: record.name, type: record.type, heardAt: record.lastHeardAt });
+    } catch (err) {
+      this.#logger.warn('services.nodeRegistry', 'failed to persist a node event for metrics', { error: err.message });
+    }
   }
 
   /**
@@ -99,7 +114,7 @@ export class NodeRegistry {
     const matches = [...this.#nodesByPublicKey.values()]
       .filter((node) => node.publicKeyHex.startsWith(query))
       .filter((node) => !type || node.type === type)
-      .sort((a, b) => (a.lastHeardAt < b.lastHeardAt ? 1 : a.lastHeardAt > b.lastHeardAt ? -1 : 0));
+      .sort((a, b) => b.lastHeardAt - a.lastHeardAt);
 
     if (matches.length === 0) {
       return { status: 'not_found', query };

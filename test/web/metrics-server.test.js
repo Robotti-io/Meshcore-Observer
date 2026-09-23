@@ -112,6 +112,94 @@ test('GET /api/metrics/reply-queue rejects an invalid range query the same way a
   });
 });
 
+test('GET /api/metrics/nodes reports added/updated distinct-node counts for the requested range', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'Added In Range', type: 'REPEATER', heardAt: 1000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Re-heard', type: 'REPEATER', heardAt: -1000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Re-heard', type: 'REPEATER', heardAt: 2000 });
+  // Outside the queried window below - must not be counted.
+  metricsStore.upsertNode({ publicKeyHex: 'CC'.repeat(32), name: 'Outside Range', type: 'REPEATER', heardAt: 999_999 });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/nodes?start=0&end=10000`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.start, 0);
+    assert.equal(body.end, 10000);
+    assert.deepEqual(body.totals, { added: 1, updated: 1 });
+  });
+});
+
+test('GET /api/metrics/nodes with type=REPEATER excludes nodes of a different type', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'A Repeater', type: 'REPEATER', heardAt: 1000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'A Chat Node', type: 'CHAT', heardAt: 1000 });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/nodes?start=0&end=10000&type=REPEATER`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.deepEqual(body.totals, { added: 1, updated: 0 });
+  });
+});
+
+test('GET /api/metrics/nodes rejects an invalid range query the same way as the other range endpoints', async () => {
+  await withServer({}, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/nodes`);
+    assert.equal(res.status, 400);
+  });
+});
+
+test('GET /api/nodes returns a page of the current node contact list, most-recently-heard first', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'Older', type: 'REPEATER', heardAt: 1000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Newer', type: 'REPEATER', heardAt: 2000 });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/nodes`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.total, 2);
+    assert.deepEqual(body.nodes.map((n) => n.name), ['Newer', 'Older']);
+  });
+});
+
+test('GET /api/nodes filters by q (name substring or public-key prefix) and type', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'Summit Repeater', type: 'REPEATER', heardAt: 1000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Valley Room', type: 'ROOM', heardAt: 2000 });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const byName = await (await fetch(`${baseUrl}/api/nodes?q=summit`)).json();
+    assert.equal(byName.total, 1);
+    assert.equal(byName.nodes[0].name, 'Summit Repeater');
+
+    const byPrefix = await (await fetch(`${baseUrl}/api/nodes?q=BB`)).json();
+    assert.equal(byPrefix.total, 1);
+    assert.equal(byPrefix.nodes[0].publicKeyHex, 'BB'.repeat(32));
+
+    const byType = await (await fetch(`${baseUrl}/api/nodes?type=ROOM`)).json();
+    assert.equal(byType.total, 1);
+    assert.equal(byType.nodes[0].type, 'ROOM');
+  });
+});
+
+test('GET /api/nodes rejects an unrecognized query parameter', async () => {
+  await withServer({}, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/nodes?typo=1`);
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /invalid query/);
+  });
+});
+
+test('GET /api/nodes rejects an out-of-range limit', async () => {
+  await withServer({}, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/nodes?limit=500`);
+    assert.equal(res.status, 400);
+  });
+});
+
 test('GET /api/metrics/history returns bucketed data for the default 24h range', async () => {
   await withServer({}, async (baseUrl) => {
     const res = await fetch(`${baseUrl}/api/metrics/history?range=24h`);

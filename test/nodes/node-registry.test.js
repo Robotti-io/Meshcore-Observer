@@ -30,12 +30,12 @@ function stubParseAdvert(decodedPacket) {
   return decodedPacket.__advert ?? null;
 }
 
-function sequentialClock(startIso = '2026-01-01T00:00:00.000Z') {
-  let current = new Date(startIso).getTime();
+function sequentialClock(startMs = Date.parse('2026-01-01T00:00:00.000Z')) {
+  let current = startMs;
   return () => {
-    const iso = new Date(current).toISOString();
+    const value = current;
     current += 1000;
-    return iso;
+    return value;
   };
 }
 
@@ -158,6 +158,43 @@ test('findByPrefix returns ambiguous with a count and the most-recently-heard ma
   assert.equal(result.status, 'ambiguous');
   assert.equal(result.matchCount, 2);
   assert.equal(result.node.name, 'Newer Repeater');
+});
+
+test('calls recordNode with the resolved record on a successful store, but not when nothing is stored', async () => {
+  const calls = [];
+  const registry = newRegistry({ recordNode: (record) => calls.push(record) });
+  const publicKeyHex = 'E85C'.repeat(16);
+
+  await registry.recordFromDecodedPacket({ __advert: null });
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: null }) });
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Spoofed', verified: false }) });
+  assert.equal(calls.length, 0);
+
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    publicKeyHex: publicKeyHex.toUpperCase(),
+    name: 'Summit Repeater',
+    type: 'REPEATER',
+    heardAt: calls[0].heardAt
+  });
+  assert.ok(calls[0].heardAt);
+});
+
+test('a recordNode failure is caught and logged without undoing the in-memory update', async () => {
+  const logger = silentLogger();
+  const registry = newRegistry({
+    logger,
+    recordNode: () => {
+      throw new Error('disk full');
+    }
+  });
+  const publicKeyHex = 'E85C'.repeat(16);
+
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex, name: 'Summit Repeater' }) });
+
+  assert.equal(registry.size(), 1);
+  assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to persist a node event')));
 });
 
 test('findByPrefix ambiguity is decided after any type filter is applied', async () => {

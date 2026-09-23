@@ -208,6 +208,136 @@ test('queryReplyOutcomeTotals returns all-zero counts when nothing was recorded 
   store.close();
 });
 
+function baseNode(overrides = {}) {
+  return {
+    publicKeyHex: 'E85C'.repeat(16),
+    name: 'Summit Repeater',
+    type: 'REPEATER',
+    heardAt: 1_000,
+    ...overrides
+  };
+}
+
+test('upsertNode inserts a new node with first_heard_at and last_heard_at both set to heardAt', () => {
+  const store = openStore();
+  store.upsertNode(baseNode());
+
+  const { nodes } = store.queryNodes({ limit: 10, offset: 0 });
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].publicKeyHex, 'E85C'.repeat(16));
+  assert.equal(nodes[0].name, 'Summit Repeater');
+  assert.equal(nodes[0].type, 'REPEATER');
+  assert.equal(nodes[0].firstHeardAt, 1_000);
+  assert.equal(nodes[0].lastHeardAt, 1_000);
+  store.close();
+});
+
+test('upsertNode on an existing public key refreshes name/type/last_heard_at but never first_heard_at', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 1_000, name: 'Old Name' }));
+  store.upsertNode(baseNode({ heardAt: 5_000, name: 'New Name', type: 'CHAT' }));
+
+  const { nodes } = store.queryNodes({ limit: 10, offset: 0 });
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].name, 'New Name');
+  assert.equal(nodes[0].type, 'CHAT');
+  assert.equal(nodes[0].firstHeardAt, 1_000);
+  assert.equal(nodes[0].lastHeardAt, 5_000);
+  store.close();
+});
+
+test('queryNodeTotals counts a once-heard node as added only, never also updated', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 5_000 }));
+
+  assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000 }), { added: 1, updated: 0 });
+  store.close();
+});
+
+test('queryNodeTotals counts a re-heard node as updated (once), independent of when it was first added', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), heardAt: -1_000 })); // added before the window
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), heardAt: 5_000 })); // re-heard inside the window
+
+  assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000 }), { added: 0, updated: 1 });
+  store.close();
+});
+
+test('queryNodeTotals with a type filter only counts nodes of that type', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 5_000, type: 'REPEATER' }));
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), heardAt: 5_000, type: 'CHAT' }));
+
+  assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000, type: 'REPEATER' }), { added: 1, updated: 0 });
+  store.close();
+});
+
+test('queryNodeTotals excludes nodes whose first/last heard falls outside the window', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 999_999 }));
+
+  assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000 }), { added: 0, updated: 0 });
+  store.close();
+});
+
+test('queryNodes matches a case-insensitive name substring', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ name: 'Summit Repeater' }));
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), name: 'Valley Room', type: 'ROOM' }));
+
+  const { total, nodes } = store.queryNodes({ q: 'summit', limit: 10, offset: 0 });
+  assert.equal(total, 1);
+  assert.equal(nodes[0].name, 'Summit Repeater');
+  store.close();
+});
+
+test('queryNodes matches a public-key hex prefix', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ publicKeyHex: 'E85C'.repeat(16) }));
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), name: 'Other' }));
+
+  const { total, nodes } = store.queryNodes({ q: 'e85c', limit: 10, offset: 0 });
+  assert.equal(total, 1);
+  assert.equal(nodes[0].publicKeyHex, 'E85C'.repeat(16));
+  store.close();
+});
+
+test('queryNodes filters by type', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ type: 'REPEATER' }));
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), name: 'Other', type: 'CHAT' }));
+
+  const { total, nodes } = store.queryNodes({ type: 'CHAT', limit: 10, offset: 0 });
+  assert.equal(total, 1);
+  assert.equal(nodes[0].type, 'CHAT');
+  store.close();
+});
+
+test('queryNodes paginates via limit/offset and sorts most-recently-heard first', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), name: 'Oldest', heardAt: 1_000 }));
+  store.upsertNode(baseNode({ publicKeyHex: 'BB'.repeat(32), name: 'Newest', heardAt: 3_000 }));
+  store.upsertNode(baseNode({ publicKeyHex: 'CC'.repeat(32), name: 'Middle', heardAt: 2_000 }));
+
+  const page1 = store.queryNodes({ limit: 2, offset: 0 });
+  assert.equal(page1.total, 3);
+  assert.deepEqual(page1.nodes.map((n) => n.name), ['Newest', 'Middle']);
+
+  const page2 = store.queryNodes({ limit: 2, offset: 2 });
+  assert.deepEqual(page2.nodes.map((n) => n.name), ['Oldest']);
+  store.close();
+});
+
+test('queryNodes returns everything, unfiltered, when q and type are both omitted', () => {
+  const store = openStore();
+  store.upsertNode(baseNode());
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), name: 'Other', type: 'CHAT' }));
+
+  const { total } = store.queryNodes({ limit: 10, offset: 0 });
+  assert.equal(total, 2);
+  store.close();
+});
+
 test('getEarliestSampleAt returns null with no data and the minimum sample_at once populated', () => {
   const store = openStore();
   assert.equal(store.getEarliestSampleAt(), null);

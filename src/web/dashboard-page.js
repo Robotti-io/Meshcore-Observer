@@ -103,6 +103,27 @@ export function renderDashboardHtml() {
   <div id="bot-commands-container"></div>
 </section>
 
+<section>
+  <h2>Repeaters</h2>
+  <p class="section-note">Added/updated reflect the range selected above; the table below is live current state (searchable), not range-scoped.</p>
+  <div id="node-tiles" class="tile-grid">
+    <div class="tile"><h2>Added</h2><p id="nodes-added">0</p></div>
+    <div class="tile"><h2>Updated</h2><p id="nodes-updated">0</p></div>
+  </div>
+  <div class="search-bar">
+    <input type="search" id="nodes-search" placeholder="Search by name or public key prefix…" aria-label="Search repeaters">
+  </div>
+  <table id="nodes-table">
+    <thead><tr><th>Name</th><th>Public key</th><th>First heard</th><th>Last heard</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="pagination" id="nodes-pagination">
+    <button type="button" id="nodes-prev">Prev</button>
+    <span id="nodes-page-note"></span>
+    <button type="button" id="nodes-next">Next</button>
+  </div>
+</section>
+
 <script src="${CHARTJS_URL}" integrity="${CHARTJS_INTEGRITY}" crossorigin="anonymous"></script>
 <script type="module" src="dashboard.js"></script>
 </body>

@@ -283,8 +283,10 @@ set on your behalf.
 
 ### 3. Metrics UI (optional)
 
-An optional live dashboard shows radio/MQTT/bot status and packet counters,
-served over plain HTTP with no server-side dependency. It's off by default.
+An optional live dashboard shows radio/MQTT/bot status, packet counters,
+and a searchable table of known repeaters (backed by the same verified-name
+registry `!lookup` uses - see "Repeater name lookup" above), served over
+plain HTTP with no server-side dependency. It's off by default.
 
 ```sh
 PACKETCAPTURE_METRICS_UI_ENABLED=true

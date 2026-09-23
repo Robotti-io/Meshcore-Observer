@@ -91,6 +91,32 @@ const MIGRATIONS = [
        SELECT occurred_at, bot_name, trigger, NULL, NULL, 'sent', NULL FROM bot_command_events`,
       'DROP TABLE bot_command_events'
     ]
+  },
+  {
+    // Backs the dashboard's node ("!lookup" repeater registry) totals and
+    // search/browse table - see
+    // docs/plans/feat-bot_command_to_lookup_repeater_name.md and
+    // NodeRegistry's `recordNode` hook. One row per public key (a current-
+    // state snapshot, not an append-only log - see the class doc comment
+    // on why it's excluded from pruneOlderThan), upserted every time a
+    // verified named advert is heard: first_heard_at is set once, on
+    // insert, and never touched again; last_heard_at is refreshed on every
+    // upsert. "Added in range" and "updated in range" (queryNodeTotals)
+    // are both derived from these two columns rather than a separate
+    // event-log table, since only the latest state of each node - not a
+    // full history of every re-hear - is needed for that count.
+    version: 3,
+    statements: [
+      `CREATE TABLE nodes (
+        public_key_hex   TEXT PRIMARY KEY,
+        name             TEXT NOT NULL,
+        type             TEXT,
+        first_heard_at   INTEGER NOT NULL,
+        last_heard_at    INTEGER NOT NULL
+      )`,
+      'CREATE INDEX idx_nodes_first_heard_at ON nodes(first_heard_at)',
+      'CREATE INDEX idx_nodes_last_heard_at ON nodes(last_heard_at)'
+    ]
   }
 ];
 
@@ -138,6 +164,7 @@ export class MetricsStore {
   #insertPacketTypeStmt;
   #insertBrokerDeliveryStmt;
   #insertBotReplyEventStmt;
+  #upsertNodeStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -167,6 +194,14 @@ export class MetricsStore {
     this.#insertBotReplyEventStmt = this.#db.prepare(`
       INSERT INTO bot_reply_events (occurred_at, bot_name, trigger, sender, hash, outcome, queued_ms)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    this.#upsertNodeStmt = this.#db.prepare(`
+      INSERT INTO nodes (public_key_hex, name, type, first_heard_at, last_heard_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(public_key_hex) DO UPDATE SET
+        name = excluded.name,
+        type = excluded.type,
+        last_heard_at = excluded.last_heard_at
     `);
   }
 
@@ -442,6 +477,90 @@ export class MetricsStore {
       .all(start, end);
 
     return rows.map((row) => ({ brokerId: row.brokerId, outcome: row.outcome, total: Number(row.total) }));
+  }
+
+  /**
+   * Upserts one node's current state - called from NodeRegistry's
+   * `recordNode` hook every time a verified named advert is heard, for
+   * both a brand-new public key and a re-heard one. `heardAt` becomes
+   * `first_heard_at` only on the first call for a given `publicKeyHex`
+   * (a later call never moves it); `last_heard_at` is refreshed every time.
+   *
+   * @param {{publicKeyHex: string, name: string, type: string|null, heardAt: number}} node
+   */
+  upsertNode({ publicKeyHex, name, type, heardAt }) {
+    this.#upsertNodeStmt.run(publicKeyHex, name, type ?? null, heardAt, heardAt);
+  }
+
+  /**
+   * Distinct-node counts over [start, end) for the dashboard's node tiles:
+   * `added` is nodes first heard in range; `updated` is nodes re-heard
+   * (last_heard_at in range) *after* their initial add - a node heard only
+   * once (first_heard_at === last_heard_at) counts toward `added` only,
+   * never both, even if that single hearing falls in range. `type`,
+   * optional, narrows to one advert type (e.g. the dashboard's "Repeaters"
+   * tiles always pass `'REPEATER'`) - matched via `(? = '' OR ...)` rather
+   * than building the WHERE clause conditionally, same as queryNodes()
+   * below.
+   *
+   * @param {{start: number, end: number, type?: string}} options
+   * @returns {{added: number, updated: number}}
+   */
+  queryNodeTotals({ start, end, type = '' }) {
+    const row = this.#db
+      .prepare(
+        `
+        SELECT
+          SUM(CASE WHEN first_heard_at >= ? AND first_heard_at < ? AND (? = '' OR type = ?) THEN 1 ELSE 0 END) AS added,
+          SUM(CASE WHEN last_heard_at >= ? AND last_heard_at < ? AND last_heard_at != first_heard_at AND (? = '' OR type = ?) THEN 1 ELSE 0 END) AS updated
+        FROM nodes
+      `
+      )
+      .get(start, end, type, type, start, end, type, type);
+
+    return { added: Number(row.added ?? 0), updated: Number(row.updated ?? 0) };
+  }
+
+  /**
+   * A page of the current node "contact list" - not range-scoped (it's
+   * live current state, not history) - optionally filtered by a search
+   * term (case-insensitive name substring, or a public-key hex prefix -
+   * whichever matches) and/or an exact `type`, sorted most-recently-heard
+   * first. `q`/`type` are matched via `(? = '' OR ...)` rather than
+   * building the WHERE clause conditionally in JS, so this stays one
+   * static, always-parameterized prepared statement - see the class doc
+   * comment's "never a generic query passthrough" rule.
+   *
+   * @param {{q?: string, type?: string, limit: number, offset: number}} options
+   * @returns {{total: number, nodes: {publicKeyHex: string, name: string, type: string|null, firstHeardAt: number, lastHeardAt: number}[]}}
+   */
+  queryNodes({ q = '', type = '', limit, offset }) {
+    const normalizedQ = q.toUpperCase();
+    const whereClause = `
+      WHERE (? = '' OR name LIKE '%' || ? || '%' COLLATE NOCASE OR public_key_hex LIKE ? || '%')
+        AND (? = '' OR type = ?)
+    `;
+
+    const { total } = this.#db
+      .prepare(`SELECT COUNT(*) AS total FROM nodes ${whereClause}`)
+      .get(q, q, normalizedQ, type, type);
+
+    const rows = this.#db
+      .prepare(
+        `
+        SELECT public_key_hex AS publicKeyHex, name, type, first_heard_at AS firstHeardAt, last_heard_at AS lastHeardAt
+        FROM nodes
+        ${whereClause}
+        ORDER BY last_heard_at DESC
+        LIMIT ? OFFSET ?
+      `
+      )
+      .all(q, q, normalizedQ, type, type, limit, offset);
+
+    return {
+      total: Number(total),
+      nodes: rows.map((row) => ({ ...row, firstHeardAt: Number(row.firstHeardAt), lastHeardAt: Number(row.lastHeardAt) }))
+    };
   }
 
   /** Deletes packet samples, their child rows, and bot reply events at or before `cutoffMs`. */

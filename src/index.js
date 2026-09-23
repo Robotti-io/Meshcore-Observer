@@ -82,7 +82,10 @@ async function main() {
   // only reads from it later (once a quiet window is actually observed),
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
-  const nodeRegistry = new NodeRegistry({ logger });
+  const nodeRegistry = new NodeRegistry({
+    logger,
+    recordNode: metricsStore ? (record) => metricsStore.upsertNode(record) : undefined
+  });
   const replyQueue = new ReplyQueue({
     quietMs: config.botReplyQueue.quietMs,
     ttlMs: config.botReplyQueue.ttlMs,

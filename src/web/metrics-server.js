@@ -4,13 +4,21 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { renderDashboardHtml } from './dashboard-page.js';
 import { PACKET_TYPE_BUCKETS } from './packet-type-buckets.js';
-import { parseRangeQuery, validateMetricsHistoryQuery, validateRangeOnlyQuery } from './schemas.js';
+import {
+  parseRangeQuery,
+  validateMetricsHistoryQuery,
+  validateRangeOnlyQuery,
+  validateNodeTotalsQuery,
+  parseNodesListQuery,
+  validateNodesListQuery
+} from './schemas.js';
 import { resolveRangeWindow, RangeError as RangeResolutionError } from './metrics-range.js';
 import { computeSampleDelta } from './metrics-sample.js';
 import { bucketBotCommandCounts } from './bot-command-buckets.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_NODES_LIMIT = 50;
 
 const WEB_DIR = dirname(fileURLToPath(import.meta.url));
 const TEXT_JS = 'text/javascript; charset=utf-8';
@@ -294,6 +302,16 @@ export class MetricsServer {
       return;
     }
 
+    if (pathname === '/api/metrics/nodes') {
+      this.#handleNodeTotals(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/nodes') {
+      this.#handleNodesList(res, searchParams);
+      return;
+    }
+
     if (pathname === '/api/metrics/stream') {
       this.#handleStream(res);
       return;
@@ -440,6 +458,46 @@ export class MetricsServer {
     }));
 
     this.#sendJson(res, 200, { start: window.start, end: window.end, brokers });
+  }
+
+  /**
+   * Distinct-node "added"/"updated" counts for the requested range (see
+   * MetricsStore#queryNodeTotals) - the range-scoped half of the node
+   * ("!lookup" repeater registry) dashboard section. The other half,
+   * search/browse, is /api/nodes below - deliberately *not* range-scoped,
+   * since it lists current state, not history.
+   */
+  #handleNodeTotals(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateNodeTotalsQuery);
+    if (!resolved) {
+      return;
+    }
+    const { query, window } = resolved;
+
+    const totals = this.#metricsStore.queryNodeTotals({ ...window, type: query.type ?? '' });
+    this.#sendJson(res, 200, { start: window.start, end: window.end, totals });
+  }
+
+  /**
+   * A page of the current node contact list (see MetricsStore#queryNodes),
+   * optionally filtered by `q` (name substring or public-key hex prefix)
+   * and/or `type`. Not range-scoped - see #handleNodeTotals above for the
+   * range-scoped added/updated counts.
+   */
+  #handleNodesList(res, searchParams) {
+    const query = parseNodesListQuery(searchParams);
+    if (!validateNodesListQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateNodesListQuery.errors.map((e) => e.message).join('; ')}` });
+      return;
+    }
+
+    const result = this.#metricsStore.queryNodes({
+      q: query.q ?? '',
+      type: query.type ?? '',
+      limit: query.limit ?? DEFAULT_NODES_LIMIT,
+      offset: query.offset ?? 0
+    });
+    this.#sendJson(res, 200, result);
   }
 
   #handleStream(res) {
