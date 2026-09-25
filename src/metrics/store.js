@@ -212,6 +212,18 @@ const MIGRATIONS = [
       'DROP TABLE reply_queue_items',
       'DROP TABLE bot_reply_events'
     ]
+  },
+  {
+    // Lookup replies are resolved before enqueue and may wait through a
+    // restart. Keep the node timestamp, display prefix, and all-repeater
+    // total with each queued item so dispatch renders the original lookup
+    // result without consulting state that may have changed since enqueue.
+    version: 6,
+    statements: [
+      'ALTER TABLE bot_replies ADD COLUMN last_heard_at INTEGER',
+      'ALTER TABLE bot_replies ADD COLUMN node_prefix TEXT',
+      'ALTER TABLE bot_replies ADD COLUMN repeater_count INTEGER'
+    ]
   }
 ];
 
@@ -225,6 +237,7 @@ const MIGRATIONS = [
 const BOT_REPLY_COLUMNS = `
   id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
   query, lookup_outcome AS lookupOutcome, name, match_count AS matchCount,
+  last_heard_at AS lastHeardAt, node_prefix AS nodePrefix, repeater_count AS repeaterCount,
   enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
   resolved_at AS resolvedAt, queued_ms AS queuedMs
 `;
@@ -239,6 +252,8 @@ function mapBotReplyRow(row) {
     id: Number(row.id),
     hopCount: toNumberOrNull(row.hopCount),
     matchCount: toNumberOrNull(row.matchCount),
+    lastHeardAt: toNumberOrNull(row.lastHeardAt),
+    repeaterCount: toNumberOrNull(row.repeaterCount),
     enqueuedAt: toNumberOrNull(row.enqueuedAt),
     expiresAt: toNumberOrNull(row.expiresAt),
     resolvedAt: toNumberOrNull(row.resolvedAt),
@@ -333,8 +348,9 @@ export class MetricsStore {
     this.#insertBotReplyStmt = this.#db.prepare(`
       INSERT INTO bot_replies (
         bot_name, channel, trigger, sender, hop_count, path, hash,
-        query, lookup_outcome, name, match_count, enqueued_at, expires_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        query, lookup_outcome, name, match_count, last_heard_at, node_prefix, repeater_count,
+        enqueued_at, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
     `);
     this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
@@ -658,6 +674,14 @@ export class MetricsStore {
     return { added: Number(row.added ?? 0), updated: Number(row.updated ?? 0) };
   }
 
+  /** Counts the current node registry, optionally narrowed to one advert type. */
+  countNodesByType(type = '') {
+    const { total } = this.#db
+      .prepare('SELECT COUNT(*) AS total FROM nodes WHERE (? = \'\' OR type = ?)')
+      .get(type, type);
+    return Number(total);
+  }
+
   /**
    * A page of the current node "contact list" - not range-scoped (it's
    * live current state, not history) - optionally filtered by a search
@@ -737,7 +761,7 @@ export class MetricsStore {
    * it later with no extra lookups - see the v5 migration's doc comment for
    * why this and every resolved reply live in the same table now.
    *
-   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, enqueuedAt: number, expiresAt: number}} item
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, lastHeardAt?: number, nodePrefix?: string, repeaterCount?: number, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
     this.#insertBotReplyStmt.run(
@@ -752,6 +776,9 @@ export class MetricsStore {
       item.lookupOutcome ?? null,
       item.name ?? null,
       item.matchCount ?? null,
+      item.lastHeardAt ?? null,
+      item.nodePrefix ?? null,
+      item.repeaterCount ?? null,
       item.enqueuedAt,
       item.expiresAt
     );

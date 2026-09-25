@@ -1,5 +1,10 @@
 # Plan: `!lookup <hex-prefix>` bot command
 
+> Historical implementation plan. The registry, persistent lookup, and
+> `{lastHeard}` response enhancement have since been implemented. See
+> [feat-repeater_lookup_enhancements.md](feat-repeater_lookup_enhancements.md)
+> for the later lookup response work and current behavior.
+
 ## Goal
 
 A channel-bot command that resolves a *repeater's* advertised name from a
@@ -167,9 +172,9 @@ existing `replyQueue`.
   `type: 'REPEATER'` - see below. For the `ambiguous` outcome, `{name}` is
   the most-recently-heard of the matches (see `findByPrefix` above), paired
   with `{matchCount}` for the total. `lastHeardAt` is captured in the
-  registry now but not otherwise exposed in the response for this phase; a
-  `{lastHeard}` placeholder is an easy future addition once TTL/eviction
-  is designed.)
+  registry and is now exposed through `{lastHeard}` by the later lookup
+  enhancement. The registry currently has no TTL/eviction policy; see the
+  newer plan for the documented count semantics.)
 - `#handleRawPacket` matching order:
   1. Exact match against `this.#commands` (unchanged).
   2. If no exact match, check configured `'lookup'` commands: does

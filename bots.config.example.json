@@ -23,8 +23,8 @@
       {
         "trigger": "!lookup",
         "kind": "lookup",
-        "foundResponse": "📡 @[{sender}]! {query} = {name}",
-        "notFoundResponse": "❓ @[{sender}]! no repeater heard with prefix {query} yet",
+        "foundResponse": "📡 @[{sender}]! {nodePrefix} (heard {lastHeard}) = {name}",
+        "notFoundResponse": "❓ @[{sender}]! no repeater with prefix {query} heard in our list of {repeaterCount} repeaters.",
         "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
         "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
       }

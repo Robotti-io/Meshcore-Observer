@@ -117,7 +117,7 @@ response-template commands:
 ```jsonc
 [
   {
-    "name": "echo",              // a label, used in logs
+    "name": "echo_bot",              // a label, used in logs
     "channel": "#echo",          // a public hashtag channel; created automatically if it doesn't already exist on the radio
     "enabled": true,
     "minHops": 1,                // reject messages heard with fewer relay hops than this
@@ -135,8 +135,8 @@ response-template commands:
       {
         "trigger": "!lookup",
         "kind": "lookup",
-        "foundResponse": "📡 @[{sender}]! {query} = {name}",
-        "notFoundResponse": "❓ @[{sender}]! no repeater heard with prefix {query} yet",
+        "foundResponse": "📡 @[{sender}]! {nodePrefix} (heard {lastHeard}) = {name}",
+        "notFoundResponse": "❓ @[{sender}]! no repeater with prefix {query} heard in our list of {repeaterCount} repeaters.",
         "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
         "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
       }
@@ -167,7 +167,7 @@ emptied out, then hard truncation as a last resort if it's still too long.
 #### Repeater name lookup (`kind: "lookup"`)
 
 A command can opt into argument parsing instead of exact matching by
-setting `"kind": "lookup"`. This observer keeps an in-memory record of
+setting `"kind": "lookup"`. This observer keeps a SQLite-backed record of
 every REPEATER whose advertised name it has verified (its ADVERT's
 signature checks out against its own claimed public key - an unverified
 advert never contributes a name), keyed by full public key. A `!lookup`
@@ -183,10 +183,14 @@ A `"lookup"` command needs four response templates instead of one -
 `!lookup` example above). They're chosen by outcome:
 
 - **found** - exactly one repeater's key starts with the query. `{name}`
-  is available alongside `{query}`.
+  and `{lastHeard}` are available. `{lastHeard}` is a compact relative age
+  such as `20m ago` or `1h ago`, calculated when the queued reply is sent.
+  `{nodePrefix}` is the normalized query for prefixes of at least two
+  bytes; shorter prefixes show the first two bytes of the matched key
+  (for example, `!lookup E85` can return `E85C`).
 - **not_found** - a valid query, but no matching repeater has been heard
-  from (yet - this only knows about repeaters, and only after a real
-  restart-surviving advert has been heard and verified).
+  from. `{repeaterCount}` is the count of all stored repeaters, including
+  entries heard at any time because the registry has no TTL.
 - **ambiguous** - more than one repeater's key starts with the query.
   `{matchCount}` is the total, and `{name}` is the most recently heard of
   the matches - a useful guess while asking for a longer, more specific

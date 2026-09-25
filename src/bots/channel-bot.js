@@ -10,6 +10,27 @@ import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.j
 const PAYLOAD_TYPE_GRP_TXT = 0x05;
 const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
 
+function formatRelativeAge(timestamp, now) {
+  if (timestamp === undefined || timestamp === null) {
+    return 'unknown';
+  }
+
+  const ageMs = Math.max(0, now - Number(timestamp));
+  if (ageMs < 60 * 1000) {
+    return 'just now';
+  }
+
+  const units = [
+    ['y', 365 * 24 * 60 * 60 * 1000],
+    ['mo', 30 * 24 * 60 * 60 * 1000],
+    ['d', 24 * 60 * 60 * 1000],
+    ['h', 60 * 60 * 1000],
+    ['m', 60 * 1000]
+  ];
+  const [unit, durationMs] = units.find(([, duration]) => ageMs >= duration);
+  return `${Math.floor(ageMs / durationMs)}${unit} ago`;
+}
+
 function hopCountFor(packet) {
   if (DIRECT_ROUTES.has(packet.route_type_string)) {
     return 0;
@@ -72,6 +93,7 @@ export class ChannelBot {
   #ready = false;
   #repliesSent = 0;
   #replyQueue;
+  #now;
   #onRadioConnected = null;
   #onRadioPacket = null;
 
@@ -95,7 +117,8 @@ export class ChannelBot {
     logger,
     deduplicator = new PacketDeduplicator(),
     replyQueue,
-    nodeRegistry
+    nodeRegistry,
+    now = () => Date.now()
   }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
@@ -106,6 +129,7 @@ export class ChannelBot {
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
     this.#lookupCommands = botConfig.commands.filter((command) => command.kind === 'lookup');
     this.#nodeRegistry = nodeRegistry;
+    this.#now = now;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
 
@@ -279,11 +303,14 @@ export class ChannelBot {
     let query;
     let name;
     let matchCount;
+    let lastHeardAt;
+    let nodePrefix;
+    let repeaterCount;
 
     if (!command) {
       const lookupMatch = this.#matchLookupCommand(decrypted.text);
       if (lookupMatch) {
-        ({ command, outcome: lookupOutcome, query, name, matchCount } = lookupMatch);
+        ({ command, outcome: lookupOutcome, query, name, matchCount, lastHeardAt, nodePrefix, repeaterCount } = lookupMatch);
       }
     }
 
@@ -364,7 +391,10 @@ export class ChannelBot {
       query,
       lookupOutcome,
       name,
-      matchCount
+      matchCount,
+      lastHeardAt,
+      nodePrefix,
+      repeaterCount
     });
   }
 
@@ -402,7 +432,13 @@ export class ChannelBot {
         outcome: result.status,
         query: result.query ?? query,
         name: result.node?.name,
-        matchCount: result.matchCount
+        matchCount: result.matchCount,
+        lastHeardAt: result.node?.lastHeardAt,
+        nodePrefix:
+          result.status === 'found' && query.length < 4
+            ? result.node?.publicKeyHex?.slice(0, 4) ?? result.query ?? query
+            : result.query ?? query,
+        repeaterCount: result.status === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined
       };
     }
     return null;
@@ -428,9 +464,9 @@ export class ChannelBot {
    * is what provides that guarantee for this path, one level up from
    * where every other public method here still catches locally.
    *
-   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number}} item
+   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, lastHeardAt?: number, nodePrefix?: string, repeaterCount?: number}} item
    */
-  async sendQueuedReply({ trigger, sender, hopCount, path, hash, query, lookupOutcome, name, matchCount }) {
+  async sendQueuedReply({ trigger, sender, hopCount, path, hash, query, lookupOutcome, name, matchCount, lastHeardAt, nodePrefix, repeaterCount }) {
     const command = this.#commands.get(trigger);
     if (!command) {
       // Not expected in the current architecture (bots.config.json is
@@ -456,7 +492,20 @@ export class ChannelBot {
     const { message, degraded } = renderResponse({
       template,
       overflowTemplate,
-      values: { sender, hopCount, path, trigger, hash, query, name, matchCount },
+      values: {
+        sender,
+        hopCount,
+        path,
+        trigger,
+        hash,
+        query,
+        name,
+        matchCount,
+        lastHeard: formatRelativeAge(lastHeardAt, this.#now()),
+        nodePrefix: nodePrefix ?? query,
+        repeaterCount:
+          repeaterCount ?? (lookupOutcome === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined)
+      },
       maxBytes: this.#maxMessageBytes
     });
 
