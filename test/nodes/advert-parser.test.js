@@ -54,6 +54,10 @@ test('returns null for a packet that is not an ADVERT', () => {
   assert.equal(parseAdvertFromPacket(decodedPacketFor(frame)), null);
 });
 
+test('skips reparsing when the decoded packet type is not ADVERT', () => {
+  assert.equal(parseAdvertFromPacket({ packet_type: '1', raw: 'not-hex' }), null);
+});
+
 test('returns null for a truncated advert payload instead of throwing', () => {
   const tooShort = Buffer.alloc(10); // needs 32+4+64=100 bytes before appData even starts
   const frame = buildRawFrame({ payloadType: PayloadType.ADVERT, routeType: RouteType.FLOOD, pathHashSize: 1, payload: tooShort });

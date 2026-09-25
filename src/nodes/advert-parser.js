@@ -18,6 +18,14 @@ const PAYLOAD_TYPE_ADVERT = 0x04;
  * @returns {import('@liamcottle/meshcore.js').Advert | null}
  */
 export function parseAdvertFromPacket(decodedPacket) {
+  // PacketPipeline has already decoded the payload type. Most receptions
+  // are not adverts, so avoid rebuilding and reparsing their frame here.
+  // Keep the fallback for callers that provide only `raw`; the parsed packet
+  // below remains the authority before an advert is returned.
+  if (decodedPacket.packet_type !== undefined && decodedPacket.packet_type !== String(PAYLOAD_TYPE_ADVERT)) {
+    return null;
+  }
+
   let packet;
   try {
     packet = Packet.fromBytes(Buffer.from(decodedPacket.raw, 'hex'));

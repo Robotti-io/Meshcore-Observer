@@ -32,7 +32,7 @@ export class NodeRegistry {
   #store;
 
   /**
-   * @param {{logger: object, store: {upsertNode: Function, findNodesByPublicKeyPrefix: Function}, parseAdvert?: Function, now?: () => number}} options
+   * @param {{logger: object, store: {upsertNode: Function, findNodesByPublicKeyPrefix: Function, countNodesByType: Function}, parseAdvert?: Function, now?: () => number}} options
    * `store` is required (typically the app's single MetricsStore instance -
    * see src/index.js) - persistence is no longer optional here, matching
    * every other feature MetricsStore now backs.
@@ -117,5 +117,10 @@ export class NodeRegistry {
       return { status: 'found', query, node: matches[0] };
     }
     return { status: 'ambiguous', query, matchCount: matches.length, node: matches[0] };
+  }
+
+  /** Total number of repeaters currently stored, with no age/TTL filter. */
+  countRepeaters() {
+    return this.#store.countNodesByType('REPEATER');
   }
 }

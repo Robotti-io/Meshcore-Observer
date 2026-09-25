@@ -127,6 +127,15 @@ test('findByPrefix rejects queries shorter than 1 byte, non-hex characters, and 
   assert.equal(registry.findByPrefix('E8'.repeat(40)).status, 'invalid');
 });
 
+test('countRepeaters returns the total stored repeater count across all heard times', async () => {
+  const { registry } = newRegistry();
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: 'Repeater One' }) });
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'AA'.repeat(32), name: 'Chat Node', type: 'CHAT' }) });
+  await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'BB'.repeat(32), name: 'Repeater Two' }) });
+
+  assert.equal(registry.countRepeaters(), 2);
+});
+
 test('findByPrefix allows an odd (non-byte-aligned) hex length beyond the 1-byte floor', async () => {
   const { registry } = newRegistry();
   const publicKeyHex = 'E85C'.repeat(16);

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
+import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 
 function silentLogger() {
@@ -56,12 +57,18 @@ const POLL_MS = 5;
 // could drift from it.
 function newQueue(overrides = {}) {
   const store = overrides.store ?? new MetricsStore({ dbPath: ':memory:' });
+  const airtimeCoordinator =
+    overrides.airtimeCoordinator ??
+    new AirtimeCoordinator({
+      quietMs: overrides.quietMs ?? QUIET_MS,
+      now: overrides.now
+    });
   return new ReplyQueue({
-    quietMs: QUIET_MS,
     ttlMs: TTL_MS,
     pollIntervalMs: POLL_MS,
     logger: silentLogger(),
     store,
+    airtimeCoordinator,
     ...overrides
   });
 }

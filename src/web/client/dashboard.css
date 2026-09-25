@@ -16,6 +16,9 @@
   --cat-8: #e34948;
   --control-border: color-mix(in srgb, canvastext 25%, transparent);
   --control-active-bg: color-mix(in srgb, canvastext 12%, transparent);
+  --trend-increase: #237a35;
+  --trend-decrease: #b42318;
+  --trend-neutral: color-mix(in srgb, canvastext 58%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -30,6 +33,8 @@
     --cat-6: #008300;
     --cat-7: #9085e9;
     --cat-8: #e66767;
+    --trend-increase: #79d98a;
+    --trend-decrease: #ff8b80;
   }
 }
 body {
@@ -39,27 +44,59 @@ body {
   background: canvas;
   color: canvastext;
 }
-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 1.25rem; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 1.25rem; }
 header h1 { font-size: 1.25rem; margin: 0; }
 #connection-indicator { font-size: 0.9rem; opacity: 0.7; }
 #connection-indicator.live { color: #2e9e44; opacity: 1; }
 #connection-indicator.down { color: #c4432b; opacity: 1; }
+.freshness { font-size: 0.75rem; opacity: 0.7; }
+.freshness.error { color: #c4432b; opacity: 1; }
 section { margin-bottom: 1.75rem; }
 section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 0 0 0.6rem; }
 .section-note { font-size: 0.8rem; opacity: 0.7; margin: -0.4rem 0 0.6rem; }
-#tiles, .tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+.data-status { font-size: 0.8rem; opacity: 0.7; margin: -0.35rem 0 0.6rem; min-height: 1.2em; }
+.data-status.error { color: #c4432b; opacity: 1; }
+.data-status.loading { opacity: 0.7; }
+.scope-label { font-size: 0.65rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.65; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.dashboard-nav { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 1.25rem; }
+.dashboard-nav a { color: canvastext; text-decoration: none; font-size: 0.9rem; padding: 0.35rem 0.7rem; border: 1px solid var(--control-border); border-radius: 999px; }
+.dashboard-nav a[aria-current="page"] { background: var(--control-active-bg); font-weight: 600; }
+.dashboard-view[hidden] { display: none; }
+.tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
 .tile-grid { margin-bottom: 1.25rem; }
 .tile { border: 1px solid color-mix(in srgb, canvastext 20%, transparent); border-radius: 8px; padding: 0.85rem 1rem; }
 .tile h2 { margin: 0 0 0.35rem; font-size: 0.8rem; }
 .tile p { margin: 0; font-size: 1.4rem; font-weight: 600; }
 .tile p.sub { font-size: 0.8rem; font-weight: 400; opacity: 0.7; margin-top: 0.25rem; }
+.tile p.metric-value { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.45rem; }
+.metric-trend { font-size: 0.62em; font-weight: 600; white-space: nowrap; }
+.metric-trend.increase { color: var(--trend-increase); }
+.metric-trend.decrease { color: var(--trend-decrease); }
+.metric-trend.unchanged { color: var(--trend-neutral); }
+#uptime { display: flex; gap: 0.35em; font-variant-numeric: tabular-nums; }
+#uptime .uptime-segment { border-radius: 0.2em; padding: 0 0.04em; }
+#uptime .uptime-segment[hidden] { display: none; }
+.data-status time { font-variant-numeric: tabular-nums; }
+.heartbeat-segment.heartbeat { border-radius: 0.2em; animation: uptime-heartbeat 720ms ease-out; }
+@keyframes uptime-heartbeat {
+  0%, 100% { color: inherit; background-color: transparent; text-shadow: none; }
+  24% { color: #2e9e44; background-color: color-mix(in srgb, #2e9e44 13%, transparent); text-shadow: 0 0 0.45em color-mix(in srgb, #2e9e44 35%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .heartbeat-segment.heartbeat { animation: none; }
+}
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid color-mix(in srgb, canvastext 15%, transparent); }
+.table-scroll { max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
+.table-scroll:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
 td.count { text-align: right; font-variant-numeric: tabular-nums; }
+.empty-state { font-size: 0.9rem; opacity: 0.75; padding: 0.75rem 0; }
 .ok { color: #2e9e44; }
 .bad { color: #c4432b; }
 #chart-wrap { position: relative; height: 240px; border: 1px solid color-mix(in srgb, canvastext 20%, transparent); border-radius: 8px; padding: 0.5rem; box-sizing: border-box; }
 #chart-fallback { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 1rem; font-size: 0.85rem; opacity: 0.7; }
+.chart-summary { font-size: 0.8rem; opacity: 0.75; margin: 0.35rem 0 0.75rem; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 0.5rem; vertical-align: middle; }
 .swatch.dashed { background: none; border: 1.5px dashed var(--chart-muted); }
 .range-selector { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.75rem; }
@@ -71,10 +108,13 @@ td.count { text-align: right; font-variant-numeric: tabular-nums; }
 .range-custom button { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid var(--control-border); background: transparent; color: canvastext; cursor: pointer; }
 .range-error { font-size: 0.8rem; color: #c4432b; margin-left: 0.3rem; }
 .split-layout { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: flex-start; }
-.split-layout table { flex: 1 1 320px; min-width: 280px; }
+.split-layout > table, .split-layout > .table-scroll { flex: 1 1 320px; min-width: 0; }
 .pie-wrap { position: relative; width: 200px; height: 200px; flex: 0 0 auto; }
 @media (max-width: 560px) {
   .pie-wrap { width: 160px; height: 160px; }
+  .range-custom.visible { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); width: 100%; max-width: 100%; min-width: 0; }
+  .range-custom input[type="date"] { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; }
+  .range-custom button, .range-error { grid-column: 1 / -1; justify-self: start; }
 }
 .bot-command-block { margin-bottom: 1.5rem; }
 .bot-command-block h3 { font-size: 0.85rem; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; }

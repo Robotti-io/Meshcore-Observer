@@ -110,6 +110,10 @@ function readBotReplyQueue(env) {
   };
 }
 
+function readFloodAdvert(env) {
+  return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 47) };
+}
+
 function readMetricsUi(env) {
   return {
     enabled: readBoolean(env, 'PACKETCAPTURE_METRICS_UI_ENABLED', false),
@@ -218,7 +222,8 @@ export function loadConfig(env = process.env) {
     brokers: readBrokers(env),
     bots: readBots(env),
     metricsUi: readMetricsUi(env),
-    botReplyQueue: readBotReplyQueue(env)
+    botReplyQueue: readBotReplyQueue(env),
+    floodAdvert: readFloodAdvert(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {

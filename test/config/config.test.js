@@ -71,8 +71,25 @@ test('normalizes a minimal valid serial configuration with defaults', () => {
   assert.equal(config.radio.reconnect.maxDelayMs, 15000);
   assert.equal(config.observer.iata, 'CVG');
   assert.equal(config.logging.level, 'info');
+  assert.deepEqual(config.floodAdvert, { intervalHours: 47 });
   assert.deepEqual(config.brokers, []);
   assert.deepEqual(config.bots, []);
+});
+
+test('accepts startup-only and 47-to-168-hour flood advert intervals', () => {
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: '0' })).floodAdvert.intervalHours, 0);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: '47' })).floodAdvert.intervalHours, 47);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: '168' })).floodAdvert.intervalHours, 168);
+});
+
+test('rejects flood advert intervals below 47 hours except zero and above 168 hours', () => {
+  for (const value of ['-1', '1', '2', '3', '46', '169', '47.5', 'hourly']) {
+    assert.throws(
+      () => loadConfig(baseEnv({ PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: value })),
+      ConfigError,
+      `expected ${value} to be rejected`
+    );
+  }
 });
 
 test('parses a comma-separated serial port list', () => {

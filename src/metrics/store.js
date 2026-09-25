@@ -212,6 +212,39 @@ const MIGRATIONS = [
       'DROP TABLE reply_queue_items',
       'DROP TABLE bot_reply_events'
     ]
+  },
+  {
+    // Lookup replies are resolved before enqueue and may wait through a
+    // restart. Keep the node timestamp, display prefix, and all-repeater
+    // total with each queued item so dispatch renders the original lookup
+    // result without consulting state that may have changed since enqueue.
+    version: 6,
+    statements: [
+      'ALTER TABLE bot_replies ADD COLUMN last_heard_at INTEGER',
+      'ALTER TABLE bot_replies ADD COLUMN node_prefix TEXT',
+      'ALTER TABLE bot_replies ADD COLUMN repeater_count INTEGER'
+    ]
+  },
+  {
+    // One durable slot is enough for the observer's periodic self-advert:
+    // missed intervals coalesce, while a startup can resume an advert that
+    // was still waiting for quiet air. An attempt left in `sending` at a
+    // process restart is ambiguous (the radio may already have accepted it)
+    // and is recovered using its attempt timestamp rather than immediately
+    // issued a second time.
+    version: 7,
+    statements: [
+      `CREATE TABLE flood_advert_state (
+        id                  INTEGER PRIMARY KEY CHECK (id = 1),
+        status              TEXT NOT NULL CHECK (status IN ('idle', 'pending', 'sending')),
+        requested_at        INTEGER,
+        attempt_started_at  INTEGER,
+        last_attempt_at     INTEGER,
+        last_sent_at        INTEGER,
+        next_due_at         INTEGER
+      )`,
+      "INSERT INTO flood_advert_state (id, status) VALUES (1, 'idle')"
+    ]
   }
 ];
 
@@ -225,6 +258,7 @@ const MIGRATIONS = [
 const BOT_REPLY_COLUMNS = `
   id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
   query, lookup_outcome AS lookupOutcome, name, match_count AS matchCount,
+  last_heard_at AS lastHeardAt, node_prefix AS nodePrefix, repeater_count AS repeaterCount,
   enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
   resolved_at AS resolvedAt, queued_ms AS queuedMs
 `;
@@ -239,6 +273,8 @@ function mapBotReplyRow(row) {
     id: Number(row.id),
     hopCount: toNumberOrNull(row.hopCount),
     matchCount: toNumberOrNull(row.matchCount),
+    lastHeardAt: toNumberOrNull(row.lastHeardAt),
+    repeaterCount: toNumberOrNull(row.repeaterCount),
     enqueuedAt: toNumberOrNull(row.enqueuedAt),
     expiresAt: toNumberOrNull(row.expiresAt),
     resolvedAt: toNumberOrNull(row.resolvedAt),
@@ -296,6 +332,11 @@ export class MetricsStore {
   #expireBotRepliesStmt;
   #peekOldestPendingBotReplyStmt;
   #resolveBotReplyStmt;
+  #selectFloodAdvertStateStmt;
+  #requestFloodAdvertStmt;
+  #startFloodAdvertAttemptStmt;
+  #resolveFloodAdvertAttemptStmt;
+  #recoverFloodAdvertAttemptStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -333,8 +374,9 @@ export class MetricsStore {
     this.#insertBotReplyStmt = this.#db.prepare(`
       INSERT INTO bot_replies (
         bot_name, channel, trigger, sender, hop_count, path, hash,
-        query, lookup_outcome, name, match_count, enqueued_at, expires_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        query, lookup_outcome, name, match_count, last_heard_at, node_prefix, repeater_count,
+        enqueued_at, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
     `);
     this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
@@ -347,6 +389,32 @@ export class MetricsStore {
       `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' ORDER BY enqueued_at ASC LIMIT 1`
     );
     this.#resolveBotReplyStmt = this.#db.prepare('UPDATE bot_replies SET status = ?, resolved_at = ?, queued_ms = ? WHERE id = ?');
+    this.#selectFloodAdvertStateStmt = this.#db.prepare(`
+      SELECT status, requested_at AS requestedAt, attempt_started_at AS attemptStartedAt,
+             last_attempt_at AS lastAttemptAt, last_sent_at AS lastSentAt, next_due_at AS nextDueAt
+      FROM flood_advert_state WHERE id = 1
+    `);
+    this.#requestFloodAdvertStmt = this.#db.prepare(`
+      UPDATE flood_advert_state SET status = 'pending', requested_at = ?
+      WHERE id = 1 AND status = 'idle'
+    `);
+    this.#startFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state SET status = 'sending', attempt_started_at = ?, last_attempt_at = ?
+      WHERE id = 1 AND status = 'pending'
+    `);
+    this.#resolveFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state
+      SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
+          last_sent_at = CASE WHEN ? = 1 THEN ? ELSE last_sent_at END,
+          next_due_at = ?
+      WHERE id = 1 AND status = 'sending'
+    `);
+    this.#recoverFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state
+      SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
+          last_attempt_at = ?, next_due_at = ?
+      WHERE id = 1 AND status = 'sending'
+    `);
   }
 
   #runMigrations() {
@@ -544,6 +612,31 @@ export class MetricsStore {
   }
 
   /**
+   * Per-trigger sent reply counts for every bot over [start, end), grouped
+   * in one database query for dashboard views. Configured bots with no
+   * rows are intentionally omitted here; the caller applies the validated
+   * bot configuration to preserve configured order and zero-fill.
+   *
+   * @param {{start: number, end: number}} options
+   * @returns {{botName: string, trigger: string, count: number}[]}
+   */
+  queryBotCommandCountsByBot({ start, end }) {
+    const rows = this.#db
+      .prepare(
+        `
+        SELECT bot_name AS botName, trigger, COUNT(*) AS total
+        FROM bot_replies
+        WHERE status = 'sent' AND resolved_at >= ? AND resolved_at < ?
+        GROUP BY bot_name, trigger
+        ORDER BY bot_name, trigger
+      `
+      )
+      .all(start, end);
+
+    return rows.map((row) => ({ botName: row.botName, trigger: row.trigger, count: Number(row.total) }));
+  }
+
+  /**
    * Reply-lifecycle outcome totals over [start, end), summed across every
    * bot - backs the dashboard's reply-queue tiles (see metrics-server.js),
    * which - like every other historical chart on the dashboard - are
@@ -658,6 +751,62 @@ export class MetricsStore {
     return { added: Number(row.added ?? 0), updated: Number(row.updated ?? 0) };
   }
 
+  /** Counts the current node registry, optionally narrowed to one advert type. */
+  countNodesByType(type = '') {
+    const { total } = this.#db
+      .prepare('SELECT COUNT(*) AS total FROM nodes WHERE (? = \'\' OR type = ?)')
+      .get(type, type);
+    return Number(total);
+  }
+
+  /** Returns the single durable flood-advert scheduler state row. */
+  getFloodAdvertState() {
+    const row = this.#selectFloodAdvertStateStmt.get();
+    if (!row) {
+      throw new Error('flood advert state row is missing');
+    }
+    return {
+      status: row.status,
+      requestedAt: toNumberOrNull(row.requestedAt),
+      attemptStartedAt: toNumberOrNull(row.attemptStartedAt),
+      lastAttemptAt: toNumberOrNull(row.lastAttemptAt),
+      lastSentAt: toNumberOrNull(row.lastSentAt),
+      nextDueAt: toNumberOrNull(row.nextDueAt)
+    };
+  }
+
+  /** Creates a pending request only when the durable slot is idle. */
+  requestFloodAdvert(requestedAt) {
+    this.#requestFloodAdvertStmt.run(requestedAt);
+    return this.getFloodAdvertState();
+  }
+
+  /** Atomically claims the pending request before invoking the device. */
+  startFloodAdvertAttempt(attemptStartedAt) {
+    return Number(this.#startFloodAdvertAttemptStmt.run(attemptStartedAt, attemptStartedAt).changes) === 1;
+  }
+
+  /** Resolves an attempt and establishes the next allowed attempt time. */
+  resolveFloodAdvertAttempt({ resolvedAt, intervalMs, sent }) {
+    return Number(
+      this.#resolveFloodAdvertAttemptStmt.run(sent ? 1 : 0, resolvedAt, resolvedAt + intervalMs).changes
+    ) === 1;
+  }
+
+  /**
+   * Recovers a command interrupted by process exit. Since the radio may
+   * already have accepted it, do not make the slot immediately runnable.
+   */
+  recoverFloodAdvertAttempt({ intervalMs, uncertainAttemptIntervalMs = intervalMs }) {
+    const state = this.getFloodAdvertState();
+    if (state.status !== 'sending' || state.attemptStartedAt === null) {
+      return false;
+    }
+    const retryAfterMs = Math.max(intervalMs, uncertainAttemptIntervalMs);
+    const nextDueAt = state.attemptStartedAt + retryAfterMs;
+    return Number(this.#recoverFloodAdvertAttemptStmt.run(state.attemptStartedAt, nextDueAt).changes) === 1;
+  }
+
   /**
    * A page of the current node "contact list" - not range-scoped (it's
    * live current state, not history) - optionally filtered by a search
@@ -737,7 +886,7 @@ export class MetricsStore {
    * it later with no extra lookups - see the v5 migration's doc comment for
    * why this and every resolved reply live in the same table now.
    *
-   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, enqueuedAt: number, expiresAt: number}} item
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, lastHeardAt?: number, nodePrefix?: string, repeaterCount?: number, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
     this.#insertBotReplyStmt.run(
@@ -752,6 +901,9 @@ export class MetricsStore {
       item.lookupOutcome ?? null,
       item.name ?? null,
       item.matchCount ?? null,
+      item.lastHeardAt ?? null,
+      item.nodePrefix ?? null,
+      item.repeaterCount ?? null,
       item.enqueuedAt,
       item.expiresAt
     );

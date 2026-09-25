@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore, resolveBucketWidthMs } from '../../src/metrics/store.js';
 
 function openStore() {
@@ -26,6 +27,37 @@ function baseSample(overrides = {}) {
     ...overrides
   };
 }
+
+test('persists one coalesced flood advert request and schedules the next interval after resolution', () => {
+  const store = openStore();
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: null, lastSentAt: null, nextDueAt: null
+  });
+  store.requestFloodAdvert(1000);
+  assert.deepEqual(store.requestFloodAdvert(2000), {
+    status: 'pending', requestedAt: 1000, attemptStartedAt: null, lastAttemptAt: null, lastSentAt: null, nextDueAt: null
+  });
+  assert.equal(store.startFloodAdvertAttempt(3000), true);
+  assert.equal(store.startFloodAdvertAttempt(4000), false);
+  assert.equal(store.resolveFloodAdvertAttempt({ resolvedAt: 5000, intervalMs: 10_800_000, sent: true }), true);
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: 3000,
+    lastSentAt: 5000, nextDueAt: 10_805_000
+  });
+  store.close();
+});
+
+test('defers recovery of an interrupted flood advert attempt to avoid an immediate duplicate', () => {
+  const store = openStore();
+  store.requestFloodAdvert(1000);
+  store.startFloodAdvertAttempt(2000);
+  assert.equal(store.recoverFloodAdvertAttempt({ intervalMs: 0, uncertainAttemptIntervalMs: 10_800_000 }), true);
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: 2000,
+    lastSentAt: null, nextDueAt: 10_802_000
+  });
+  store.close();
+});
 
 test('resolveBucketWidthMs picks the sample interval when the range easily fits within maxBuckets', () => {
   const width = resolveBucketWidthMs({ rangeMs: 60_000, maxBuckets: 180, sampleIntervalMs: 10_000 });
@@ -291,6 +323,20 @@ test('queryNodeTotals excludes nodes whose first/last heard falls outside the wi
   store.close();
 });
 
+test('countNodesByType counts all current nodes or only rows of the requested type', () => {
+  const store = openStore();
+  store.upsertNode(baseNode());
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), type: 'REPEATER' }));
+  store.upsertNode(baseNode({ publicKeyHex: 'BB'.repeat(32), type: 'CHAT' }));
+  store.upsertNode(baseNode({ publicKeyHex: 'CC'.repeat(32), type: null }));
+
+  assert.equal(store.countNodesByType(), 4);
+  assert.equal(store.countNodesByType('REPEATER'), 2);
+  assert.equal(store.countNodesByType('CHAT'), 1);
+  assert.equal(store.countNodesByType('ROOM'), 0);
+  store.close();
+});
+
 test('queryNodes matches a case-insensitive name substring', () => {
   const store = openStore();
   store.upsertNode(baseNode({ name: 'Summit Repeater' }));
@@ -393,6 +439,9 @@ test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, 
       lookupOutcome: 'found',
       name: 'Summit Repeater',
       matchCount: 1,
+      lastHeardAt: 900,
+      nodePrefix: 'E85C',
+      repeaterCount: 17,
       enqueuedAt: 1_000,
       expiresAt: 61_000
     })
@@ -410,6 +459,9 @@ test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, 
   assert.equal(item.lookupOutcome, 'found');
   assert.equal(item.name, 'Summit Repeater');
   assert.equal(item.matchCount, 1);
+  assert.equal(item.lastHeardAt, 900);
+  assert.equal(item.nodePrefix, 'E85C');
+  assert.equal(item.repeaterCount, 17);
   assert.equal(item.enqueuedAt, 1_000);
   assert.equal(item.expiresAt, 61_000);
   assert.equal(item.status, 'pending');
@@ -428,6 +480,28 @@ test('enqueueReplyItem stores optional lookup-only fields as null when omitted',
   assert.equal(item.lookupOutcome, null);
   assert.equal(item.name, null);
   assert.equal(item.matchCount, null);
+  assert.equal(item.lastHeardAt, null);
+  assert.equal(item.nodePrefix, null);
+  assert.equal(item.repeaterCount, null);
+  store.close();
+});
+
+test('enqueueReplyItem persists lookup response metadata for dispatch after restart', () => {
+  const store = openStore();
+  store.enqueueReplyItem(
+    baseReplyQueueItem({
+      query: 'E8',
+      lookupOutcome: 'not_found',
+      repeaterCount: 17,
+      enqueuedAt: 1_000,
+      expiresAt: 61_000
+    })
+  );
+
+  const item = store.peekOldestPendingReplyItem();
+  assert.equal(item.repeaterCount, 17);
+  assert.equal(item.lastHeardAt, null);
+  assert.equal(item.nodePrefix, null);
   store.close();
 });
 
@@ -544,6 +618,72 @@ test('creates the db file\'s parent directory, and reopening it later re-runs mi
       { packetTypeBucket: 'advert', total: 1 }
     ]);
     second.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migrates a v5 database without losing pending replies or resolved reply history', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-metrics-v5-'));
+  const dbPath = join(dir, 'metrics.sqlite3');
+
+  try {
+    const oldDb = new DatabaseSync(dbPath);
+    oldDb.exec(`
+      CREATE TABLE metrics_samples (
+        id INTEGER PRIMARY KEY, sample_at INTEGER NOT NULL, interval_ms INTEGER NOT NULL,
+        packets_received INTEGER NOT NULL, packets_decoded INTEGER NOT NULL,
+        radio_connected INTEGER NOT NULL, brokers_connected INTEGER NOT NULL,
+        brokers_total INTEGER NOT NULL, bots_ready INTEGER NOT NULL, bots_total INTEGER NOT NULL,
+        reply_queue_size INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE metrics_sample_packet_types (
+        sample_id INTEGER NOT NULL, packet_type_bucket TEXT NOT NULL, count INTEGER NOT NULL,
+        PRIMARY KEY (sample_id, packet_type_bucket)
+      );
+      CREATE TABLE metrics_sample_broker_deliveries (
+        sample_id INTEGER NOT NULL, broker_id TEXT NOT NULL, outcome TEXT NOT NULL, count INTEGER NOT NULL,
+        PRIMARY KEY (sample_id, broker_id, outcome)
+      );
+      CREATE TABLE nodes (
+        public_key_hex TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT,
+        first_heard_at INTEGER NOT NULL, last_heard_at INTEGER NOT NULL
+      );
+      CREATE TABLE bot_replies (
+        id INTEGER PRIMARY KEY, bot_name TEXT NOT NULL, channel TEXT, trigger TEXT NOT NULL,
+        sender TEXT, hop_count INTEGER, path TEXT, hash TEXT, query TEXT, lookup_outcome TEXT,
+        name TEXT, match_count INTEGER, enqueued_at INTEGER, expires_at INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'expired', 'cancelled')),
+        resolved_at INTEGER, queued_ms INTEGER
+      );
+      INSERT INTO bot_replies (
+        id, bot_name, channel, trigger, sender, hop_count, path, hash, query, lookup_outcome,
+        name, match_count, enqueued_at, expires_at, status
+      ) VALUES (1, 'echo', '#echo', '!lookup', 'Jeymz', 1, 'AA', 'deadbeef', 'E85', 'found',
+                'Summit Repeater', 1, 1000, 61000, 'pending');
+      INSERT INTO bot_replies (id, bot_name, trigger, status, resolved_at, queued_ms)
+      VALUES (2, 'echo', '!echo', 'sent', 1200, 200);
+      PRAGMA user_version = 5;
+    `);
+    oldDb.close();
+
+    const store = new MetricsStore({ dbPath });
+    const pending = store.peekOldestPendingReplyItem();
+    assert.equal(pending.query, 'E85');
+    assert.equal(pending.name, 'Summit Repeater');
+    assert.equal(pending.status, 'pending');
+    assert.equal(pending.lastHeardAt, null);
+    assert.equal(pending.nodePrefix, null);
+    assert.equal(pending.repeaterCount, null);
+    assert.equal(store.countPendingReplyItems(), 1);
+    assert.deepEqual(store.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 }), [
+      { botName: 'echo', outcome: 'sent', total: 1 }
+    ]);
+    store.close();
+
+    const migratedDb = new DatabaseSync(dbPath);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 7);
+    migratedDb.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
