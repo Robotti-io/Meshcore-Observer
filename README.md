@@ -288,10 +288,27 @@ firmware version. This is a mesh-wide, repeater-operator change, not
 something this observer (a companion-mode client, not a repeater) can
 set on your behalf.
 
+#### Companion flood adverts
+
+After the radio connects, the observer asks the Companion device to send
+its own flood advert. It waits for the same quiet-air window as bot replies,
+and shares the radio's outbound reservation with them. The next advert is
+scheduled from the time the Companion accepts the previous command; the
+interval is a minimum cadence and can be delayed by traffic or a radio
+disconnect. Requests that become due while disconnected or while the air is
+busy coalesce into one pending advert. Pending work survives process
+restarts, and an interrupted command is deferred because the device may
+already have accepted it. Flood adverts can be retransmitted by repeaters.
+
+| Variable | Purpose |
+| --- | --- |
+| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert interval in whole hours; default `3`, valid values `3` through `168`. Set to `0` for startup-only. |
+
 ### 3. Metrics UI (optional)
 
 This observer always persists its metrics/state (packet activity, bot
-reply outcomes, the `!lookup` repeater registry) to a local SQLite
+reply outcomes, the `!lookup` repeater registry, and the flood-advert
+scheduler job) to a local SQLite
 database (`node:sqlite`, a Node built-in - see PACKETCAPTURE_METRICS_UI_DB_PATH
 below) - that's a core capability, not something you need the dashboard
 enabled for. What's actually optional is the HTTP dashboard itself: a live

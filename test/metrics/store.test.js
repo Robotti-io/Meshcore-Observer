@@ -28,6 +28,37 @@ function baseSample(overrides = {}) {
   };
 }
 
+test('persists one coalesced flood advert request and schedules the next interval after resolution', () => {
+  const store = openStore();
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: null, lastSentAt: null, nextDueAt: null
+  });
+  store.requestFloodAdvert(1000);
+  assert.deepEqual(store.requestFloodAdvert(2000), {
+    status: 'pending', requestedAt: 1000, attemptStartedAt: null, lastAttemptAt: null, lastSentAt: null, nextDueAt: null
+  });
+  assert.equal(store.startFloodAdvertAttempt(3000), true);
+  assert.equal(store.startFloodAdvertAttempt(4000), false);
+  assert.equal(store.resolveFloodAdvertAttempt({ resolvedAt: 5000, intervalMs: 10_800_000, sent: true }), true);
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: 3000,
+    lastSentAt: 5000, nextDueAt: 10_805_000
+  });
+  store.close();
+});
+
+test('defers recovery of an interrupted flood advert attempt to avoid an immediate duplicate', () => {
+  const store = openStore();
+  store.requestFloodAdvert(1000);
+  store.startFloodAdvertAttempt(2000);
+  assert.equal(store.recoverFloodAdvertAttempt({ intervalMs: 0, uncertainAttemptIntervalMs: 10_800_000 }), true);
+  assert.deepEqual(store.getFloodAdvertState(), {
+    status: 'idle', requestedAt: null, attemptStartedAt: null, lastAttemptAt: 2000,
+    lastSentAt: null, nextDueAt: 10_802_000
+  });
+  store.close();
+});
+
 test('resolveBucketWidthMs picks the sample interval when the range easily fits within maxBuckets', () => {
   const width = resolveBucketWidthMs({ rangeMs: 60_000, maxBuckets: 180, sampleIntervalMs: 10_000 });
   assert.equal(width, 10_000);
@@ -651,7 +682,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 6);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 7);
     migratedDb.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

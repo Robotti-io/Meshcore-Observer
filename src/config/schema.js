@@ -4,7 +4,7 @@ export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert'],
   properties: {
     radio: {
       type: 'object',
@@ -54,6 +54,17 @@ export const configSchema = {
       properties: {
         quietMs: { type: 'integer', minimum: 0 },
         ttlMs: { type: 'integer', minimum: 0 }
+      }
+    },
+    floodAdvert: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['intervalHours'],
+      properties: {
+        intervalHours: {
+          type: 'integer',
+          anyOf: [{ const: 0 }, { minimum: 3, maximum: 168 }]
+        }
       }
     },
     metricsUi: {

@@ -25,20 +25,18 @@ const DEFAULT_POLL_INTERVAL_MS = 250;
  *
  * There is no channel-energy/CAD reading exposed to this companion app,
  * only "have we heard any RF packet recently" - so "quiet" is inferred
- * from the time since the last observed activity. `noteActivity()` must
- * be called for every heard `radio.packet` (regardless of which logical
- * MeshCore channel it's on - the physical RF channel is shared across
- * all of them) AND is called internally whenever this queue sends
- * something itself, since our own transmission occupies the same shared
- * channel and the next queued item must wait its own fresh quiet window
- * afterward. That self-reset is what makes an unbounded queue safe
+ * from the shared AirtimeCoordinator. `noteActivity()` feeds every heard
+ * `radio.packet` into it (regardless of logical MeshCore channel).
+ * The coordinator also resets activity before every outbound send, so
+ * other radio transmitters wait for a fresh quiet window. That self-reset
+ * is what makes an unbounded queue safe
  * without a size cap: the drain rate is inherently bounded to roughly
  * one reply per quiet period no matter how many are queued, so a burst
  * of triggers can only make the queue back up, never make it burst
  * replies out - TTL alone bounds how long a backup can grow. Unlike
  * `expiresAt`, "channel busy right now" has no meaningful value to
- * persist across a restart, so `#lastActivityAt` stays in-memory,
- * defaulting to "just active" at construction (see the constructor).
+ * persist across a restart, so airtime state stays in-memory and defaults
+ * to "just active" when the shared coordinator is constructed.
  *
  * Queued items are plain data (see enqueue()), never callbacks - this
  * keeps the queue directly inspectable/reportable (queued-per-bot,
@@ -48,38 +46,32 @@ const DEFAULT_POLL_INTERVAL_MS = 250;
  * every enqueue() call site.
  */
 export class ReplyQueue {
-  #quietMs;
   #ttlMs;
   #pollIntervalMs;
   #logger;
   #dispatch;
   #now;
   #store;
-  #lastActivityAt;
+  #airtimeCoordinator;
   #timer = null;
   #sending = false;
   #stopped = false;
 
   /**
-   * @param {{quietMs: number, ttlMs: number, logger: object, dispatch: (item: object) => Promise<void>, store: object, pollIntervalMs?: number, now?: () => number}} options
+   * @param {{ttlMs: number, logger: object, dispatch: (item: object) => Promise<void>, store: object, airtimeCoordinator: {noteActivity: Function, tryRunWhenQuiet: Function}, pollIntervalMs?: number, now?: () => number}} options
    * `store` is required (typically the app's single MetricsStore instance -
    * see src/index.js) - it's both this queue's persistence and its
    * reply-lifecycle history now (see the class doc comment), not an
    * optional side channel.
    */
-  constructor({ quietMs, ttlMs, logger, dispatch, store, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, now = () => Date.now() }) {
-    this.#quietMs = quietMs;
+  constructor({ ttlMs, logger, dispatch, store, airtimeCoordinator, pollIntervalMs = DEFAULT_POLL_INTERVAL_MS, now = () => Date.now() }) {
     this.#ttlMs = ttlMs;
     this.#logger = logger;
     this.#dispatch = dispatch;
     this.#store = store;
+    this.#airtimeCoordinator = airtimeCoordinator;
     this.#pollIntervalMs = pollIntervalMs;
     this.#now = now;
-    // Assumed just-active at construction, so the very first possible send
-    // still requires observing a real quiet window from process start,
-    // rather than firing immediately before any channel activity has
-    // actually been observed - true whether or not resumed items exist.
-    this.#lastActivityAt = now();
   }
 
   /**
@@ -100,9 +92,9 @@ export class ReplyQueue {
     }
   }
 
-  /** Marks the shared channel as busy right now - call for every heard RF packet. */
+  /** Marks the shared channel busy; call for every heard RF packet. */
   noteActivity() {
-    this.#lastActivityAt = this.#now();
+    this.#airtimeCoordinator.noteActivity();
   }
 
   /**
@@ -237,22 +229,19 @@ export class ReplyQueue {
       return;
     }
 
-    if (now - this.#lastActivityAt < this.#quietMs) {
-      return; // still within a busy/recently-active window - try again next tick
-    }
-
     const next = this.#store.peekOldestPendingReplyItem();
     if (!next) {
       return; // raced with the empty-check above (e.g. a concurrent expiry) - try again next tick
     }
 
     this.#sending = true;
-    // Reset the clock immediately, not after the send resolves, so a
-    // concurrent tick can't also treat the channel as still quiet while
-    // our own transmission is in flight.
-    this.noteActivity();
     try {
-      await this.#dispatch(next);
+      const transmission = this.#airtimeCoordinator.tryRunWhenQuiet(() => this.#dispatch(next));
+      if (!transmission) {
+        this.#sending = false;
+        return;
+      }
+      await transmission;
       this.#resolve(next, 'sent', this.#now());
     } catch (err) {
       this.#logger.warn('bots.replyQueue', 'failed to send a queued reply', {

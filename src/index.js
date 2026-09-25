@@ -11,6 +11,8 @@ import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
 import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
+import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
+import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
 import { NodeRegistry } from './nodes/node-registry.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
@@ -95,17 +97,27 @@ async function main() {
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
   const nodeRegistry = new NodeRegistry({ logger, store: metricsStore });
+  const airtimeCoordinator = new AirtimeCoordinator({ quietMs: config.botReplyQueue.quietMs });
   const replyQueue = new ReplyQueue({
-    quietMs: config.botReplyQueue.quietMs,
     ttlMs: config.botReplyQueue.ttlMs,
     logger,
     dispatch: createReplyDispatcher(botsByName),
-    store: metricsStore
+    store: metricsStore,
+    airtimeCoordinator
   });
   // Resumes any reply still pending from a previous process (see
   // reply-queue.js's class doc comment and AGENTS.md's "Persistence"
   // section) - a no-op if nothing was left queued, the common case.
   replyQueue.start();
+
+  const floodAdvertScheduler = new FloodAdvertScheduler({
+    radioManager,
+    airtimeCoordinator,
+    store: metricsStore,
+    logger,
+    intervalHours: config.floodAdvert.intervalHours
+  });
+  floodAdvertScheduler.start();
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
   // JWT auth seam, kept separate from generic MQTT connection code per
@@ -189,8 +201,8 @@ async function main() {
   });
   radioManager.on('radio.packet', (rawPush) => packetPipeline.handleRawPacket(rawPush));
   // Any heard RF packet occupies the shared channel, regardless of which
-  // logical MeshCore channel it's on - feeds the reply queue's quiet-
-  // window detection (see reply-queue.js).
+  // logical MeshCore channel it's on. Replies and scheduled adverts share
+  // this quiet-window clock and outbound reservation.
   radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
   const bots = config.bots.map((botConfig) => {
@@ -287,11 +299,12 @@ async function main() {
 
     // Stop accepting bot work first (docs/project_plan.spec.md Section 22):
     // unsubscribe every bot from radio events so no new trigger can be
-    // matched, then stop the shared reply queue so nothing already queued
-    // sends later while MQTT/radio are closing below.
+    // matched, then stop both outbound schedulers so queued work cannot
+    // start while MQTT/radio are closing below.
     for (const { bot } of bots) {
       bot.stop();
     }
+    await floodAdvertScheduler.stop();
     await replyQueue.stop();
 
     clearInterval(healthLogTimer);

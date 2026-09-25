@@ -224,6 +224,27 @@ const MIGRATIONS = [
       'ALTER TABLE bot_replies ADD COLUMN node_prefix TEXT',
       'ALTER TABLE bot_replies ADD COLUMN repeater_count INTEGER'
     ]
+  },
+  {
+    // One durable slot is enough for the observer's periodic self-advert:
+    // missed intervals coalesce, while a startup can resume an advert that
+    // was still waiting for quiet air. An attempt left in `sending` at a
+    // process restart is ambiguous (the radio may already have accepted it)
+    // and is recovered using its attempt timestamp rather than immediately
+    // issued a second time.
+    version: 7,
+    statements: [
+      `CREATE TABLE flood_advert_state (
+        id                  INTEGER PRIMARY KEY CHECK (id = 1),
+        status              TEXT NOT NULL CHECK (status IN ('idle', 'pending', 'sending')),
+        requested_at        INTEGER,
+        attempt_started_at  INTEGER,
+        last_attempt_at     INTEGER,
+        last_sent_at        INTEGER,
+        next_due_at         INTEGER
+      )`,
+      "INSERT INTO flood_advert_state (id, status) VALUES (1, 'idle')"
+    ]
   }
 ];
 
@@ -311,6 +332,11 @@ export class MetricsStore {
   #expireBotRepliesStmt;
   #peekOldestPendingBotReplyStmt;
   #resolveBotReplyStmt;
+  #selectFloodAdvertStateStmt;
+  #requestFloodAdvertStmt;
+  #startFloodAdvertAttemptStmt;
+  #resolveFloodAdvertAttemptStmt;
+  #recoverFloodAdvertAttemptStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -363,6 +389,32 @@ export class MetricsStore {
       `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' ORDER BY enqueued_at ASC LIMIT 1`
     );
     this.#resolveBotReplyStmt = this.#db.prepare('UPDATE bot_replies SET status = ?, resolved_at = ?, queued_ms = ? WHERE id = ?');
+    this.#selectFloodAdvertStateStmt = this.#db.prepare(`
+      SELECT status, requested_at AS requestedAt, attempt_started_at AS attemptStartedAt,
+             last_attempt_at AS lastAttemptAt, last_sent_at AS lastSentAt, next_due_at AS nextDueAt
+      FROM flood_advert_state WHERE id = 1
+    `);
+    this.#requestFloodAdvertStmt = this.#db.prepare(`
+      UPDATE flood_advert_state SET status = 'pending', requested_at = ?
+      WHERE id = 1 AND status = 'idle'
+    `);
+    this.#startFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state SET status = 'sending', attempt_started_at = ?, last_attempt_at = ?
+      WHERE id = 1 AND status = 'pending'
+    `);
+    this.#resolveFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state
+      SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
+          last_attempt_at = ?, last_sent_at = CASE WHEN ? = 1 THEN ? ELSE last_sent_at END,
+          next_due_at = ?
+      WHERE id = 1 AND status = 'sending'
+    `);
+    this.#recoverFloodAdvertAttemptStmt = this.#db.prepare(`
+      UPDATE flood_advert_state
+      SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
+          last_attempt_at = ?, next_due_at = ?
+      WHERE id = 1 AND status = 'sending'
+    `);
   }
 
   #runMigrations() {
@@ -680,6 +732,54 @@ export class MetricsStore {
       .prepare('SELECT COUNT(*) AS total FROM nodes WHERE (? = \'\' OR type = ?)')
       .get(type, type);
     return Number(total);
+  }
+
+  /** Returns the single durable flood-advert scheduler state row. */
+  getFloodAdvertState() {
+    const row = this.#selectFloodAdvertStateStmt.get();
+    if (!row) {
+      throw new Error('flood advert state row is missing');
+    }
+    return {
+      status: row.status,
+      requestedAt: toNumberOrNull(row.requestedAt),
+      attemptStartedAt: toNumberOrNull(row.attemptStartedAt),
+      lastAttemptAt: toNumberOrNull(row.lastAttemptAt),
+      lastSentAt: toNumberOrNull(row.lastSentAt),
+      nextDueAt: toNumberOrNull(row.nextDueAt)
+    };
+  }
+
+  /** Creates a pending request only when the durable slot is idle. */
+  requestFloodAdvert(requestedAt) {
+    this.#requestFloodAdvertStmt.run(requestedAt);
+    return this.getFloodAdvertState();
+  }
+
+  /** Atomically claims the pending request before invoking the device. */
+  startFloodAdvertAttempt(attemptStartedAt) {
+    return Number(this.#startFloodAdvertAttemptStmt.run(attemptStartedAt, attemptStartedAt).changes) === 1;
+  }
+
+  /** Resolves an attempt and establishes the next allowed attempt time. */
+  resolveFloodAdvertAttempt({ resolvedAt, intervalMs, sent }) {
+    return Number(
+      this.#resolveFloodAdvertAttemptStmt.run(resolvedAt, sent ? 1 : 0, resolvedAt, resolvedAt + intervalMs).changes
+    ) === 1;
+  }
+
+  /**
+   * Recovers a command interrupted by process exit. Since the radio may
+   * already have accepted it, do not make the slot immediately runnable.
+   */
+  recoverFloodAdvertAttempt({ intervalMs, uncertainAttemptIntervalMs = intervalMs }) {
+    const state = this.getFloodAdvertState();
+    if (state.status !== 'sending' || state.attemptStartedAt === null) {
+      return false;
+    }
+    const retryAfterMs = Math.max(intervalMs, uncertainAttemptIntervalMs);
+    const nextDueAt = state.attemptStartedAt + retryAfterMs;
+    return Number(this.#recoverFloodAdvertAttemptStmt.run(state.attemptStartedAt, nextDueAt).changes) === 1;
   }
 
   /**
