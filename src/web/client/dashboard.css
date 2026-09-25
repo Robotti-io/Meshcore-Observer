@@ -112,6 +112,9 @@ td.count { text-align: right; font-variant-numeric: tabular-nums; }
 .pie-wrap { position: relative; width: 200px; height: 200px; flex: 0 0 auto; }
 @media (max-width: 560px) {
   .pie-wrap { width: 160px; height: 160px; }
+  .range-custom.visible { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); width: 100%; max-width: 100%; min-width: 0; }
+  .range-custom input[type="date"] { box-sizing: border-box; min-width: 0; max-width: 100%; width: 100%; }
+  .range-custom button, .range-error { grid-column: 1 / -1; justify-self: start; }
 }
 .bot-command-block { margin-bottom: 1.5rem; }
 .bot-command-block h3 { font-size: 0.85rem; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
