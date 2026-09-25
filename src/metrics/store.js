@@ -612,6 +612,31 @@ export class MetricsStore {
   }
 
   /**
+   * Per-trigger sent reply counts for every bot over [start, end), grouped
+   * in one database query for dashboard views. Configured bots with no
+   * rows are intentionally omitted here; the caller applies the validated
+   * bot configuration to preserve configured order and zero-fill.
+   *
+   * @param {{start: number, end: number}} options
+   * @returns {{botName: string, trigger: string, count: number}[]}
+   */
+  queryBotCommandCountsByBot({ start, end }) {
+    const rows = this.#db
+      .prepare(
+        `
+        SELECT bot_name AS botName, trigger, COUNT(*) AS total
+        FROM bot_replies
+        WHERE status = 'sent' AND resolved_at >= ? AND resolved_at < ?
+        GROUP BY bot_name, trigger
+        ORDER BY bot_name, trigger
+      `
+      )
+      .all(start, end);
+
+    return rows.map((row) => ({ botName: row.botName, trigger: row.trigger, count: Number(row.total) }));
+  }
+
+  /**
    * Reply-lifecycle outcome totals over [start, end), summed across every
    * bot - backs the dashboard's reply-queue tiles (see metrics-server.js),
    * which - like every other historical chart on the dashboard - are

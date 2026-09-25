@@ -63,7 +63,7 @@ export const configSchema = {
       properties: {
         intervalHours: {
           type: 'integer',
-          anyOf: [{ const: 0 }, { minimum: 3, maximum: 168 }]
+          anyOf: [{ const: 0 }, { minimum: 47, maximum: 168 }]
         }
       }
     },

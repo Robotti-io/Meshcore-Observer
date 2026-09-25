@@ -11,7 +11,6 @@
 // MetricsServer, exactly as authored, no build step.
 import { PACKET_TYPE_BUCKETS } from './packet-type-buckets.js';
 import {
-  formatDuration,
   formatTimestamp,
   buildQueryString,
   resolveRangeQuery,
@@ -42,16 +41,46 @@ const RANGE_PRESETS = [
   { value: 'all', label: 'All' }
 ];
 const DEFAULT_RANGE = '24h';
+const DASHBOARD_VIEWS = ['overview', 'packets', 'brokers', 'bots', 'repeaters'];
+const VIEW_LABELS = {
+  overview: 'overview',
+  packets: 'packet activity',
+  brokers: 'broker deliveries',
+  bots: 'bot replies',
+  repeaters: 'repeater activity'
+};
+const UPDATED_AT_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  dateStyle: 'short',
+  timeStyle: 'medium'
+});
 
 let chart = null;
 let pieChart = null;
+let packetChartsInitialized = false;
+let lastHistorySignature = null;
+let lastPacketTypesSignature = null;
+let lastBrokerDeliveriesSignature = null;
+let lastBrokerStatusSignature = null;
+let lastNodesRenderSignature = null;
+let botChartObserver = null;
+let currentView = 'overview';
 let currentRange = DEFAULT_RANGE; // a RANGE_PRESETS value, or 'custom'
 let customStartMs = null;
 let customEndMs = null;
+let activeRangeRefresh = null;
+let activeRangeController = null;
+let rangeRefreshQueued = false;
+let rangeRefreshGeneration = 0;
+let lastLiveSuccessAt = null;
+let lastLiveAnnouncementState = null;
+let uptimeHasRendered = false;
+const lastRangeSuccessByView = new Map();
+let lastNodesSuccessAt = null;
 // Per-bot operational status (enabled/ready) - live, not range-aware, so
 // it's kept separately from the range-queried command data and folded
 // into each bot's card by applyBotStatusBadges().
 const latestBotStatusByName = new Map();
+const botEntryByBlock = new WeakMap();
 // Search/pagination state for the node table - independent of the page's
 // range selector (the table is live current state, not history), so it
 // isn't part of refreshRangeData()'s Promise.all batch.
@@ -63,8 +92,42 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+function pulseTimeSegment(element) {
+  element.classList.remove('heartbeat');
+  void element.offsetWidth;
+  element.classList.add('heartbeat');
+}
+
+function renderUptime(startedAt) {
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const segments = [
+    { id: 'uptime-days', value: days, suffix: 'd', visible: days > 0 },
+    { id: 'uptime-hours', value: hours, suffix: 'h', visible: days > 0 || hours > 0 },
+    { id: 'uptime-minutes', value: minutes, suffix: 'm', visible: days > 0 || hours > 0 || minutes > 0 },
+    { id: 'uptime-seconds', value: seconds, suffix: 's', visible: true }
+  ];
+
+  for (const segment of segments) {
+    const element = document.getElementById(segment.id);
+    const nextText = segment.value + segment.suffix;
+    const changed = element.textContent !== nextText || element.hidden === segment.visible;
+    if (element.textContent !== nextText) {
+      element.textContent = nextText;
+    }
+    element.hidden = !segment.visible;
+    if (uptimeHasRendered && changed && segment.visible) {
+      pulseTimeSegment(element);
+    }
+  }
+  uptimeHasRendered = true;
+}
+
 function renderSnapshot(snapshot) {
-  document.getElementById('uptime').textContent = formatDuration(Date.now() - new Date(snapshot.startedAt).getTime());
+  renderUptime(snapshot.startedAt);
 
   const radioStatus = document.getElementById('radio-status');
   radioStatus.textContent = snapshot.radioConnected ? 'Connected' : 'Disconnected';
@@ -72,18 +135,26 @@ function renderSnapshot(snapshot) {
   document.getElementById('radio-detail').textContent =
     'Last connected: ' + formatTimestamp(snapshot.radioLastConnectedAt) + ' · Reconnects: ' + snapshot.radioReconnectCount;
 
-  document.getElementById('packets-received').textContent = snapshot.packetsReceived;
-  document.getElementById('packets-decoded').textContent = snapshot.packetsDecoded;
-
-  const brokersBody = document.querySelector('#brokers-table tbody');
-  brokersBody.innerHTML = '';
-  for (const [brokerId, state] of Object.entries(snapshot.mqtt)) {
-    const row = brokersBody.insertRow();
-    row.insertCell().textContent = brokerId;
-    const statusCell = row.insertCell();
-    statusCell.textContent = state.connected ? 'Connected' : 'Disconnected';
-    statusCell.className = state.connected ? 'ok' : 'bad';
-    row.insertCell().textContent = formatTimestamp(state.lastConnectedAt);
+  const brokerStatusSignature = JSON.stringify(snapshot.mqtt);
+  if (brokerStatusSignature !== lastBrokerStatusSignature) {
+    lastBrokerStatusSignature = brokerStatusSignature;
+    const brokersBody = document.querySelector('#brokers-table tbody');
+    brokersBody.innerHTML = '';
+    const brokerEntries = Object.entries(snapshot.mqtt);
+    if (brokerEntries.length === 0) {
+      const row = brokersBody.insertRow();
+      const emptyCell = row.insertCell();
+      emptyCell.colSpan = 3;
+      emptyCell.textContent = 'No MQTT brokers are configured.';
+    }
+    for (const [brokerId, state] of brokerEntries) {
+      const row = brokersBody.insertRow();
+      row.insertCell().textContent = brokerId;
+      const statusCell = row.insertCell();
+      statusCell.textContent = state.connected ? 'Connected' : 'Disconnected';
+      statusCell.className = state.connected ? 'ok' : 'bad';
+      row.insertCell().textContent = formatTimestamp(state.lastConnectedAt);
+    }
   }
 
   // Enabled/ready is per-bot operational status, not a range-aware
@@ -155,6 +226,9 @@ function initChart() {
       }
     }
   });
+  const historyCanvas = document.getElementById('chart');
+  historyCanvas.setAttribute('role', 'img');
+  historyCanvas.setAttribute('aria-label', 'Packet activity over the selected reporting range');
 
   pieChart = new Chart(document.getElementById('packet-types-pie').getContext('2d'), {
     type: 'doughnut',
@@ -169,6 +243,9 @@ function initChart() {
       plugins: { legend: { display: false }, tooltip: { enabled: true } }
     }
   });
+  const packetTypesCanvas = document.getElementById('packet-types-pie');
+  packetTypesCanvas.setAttribute('role', 'img');
+  packetTypesCanvas.setAttribute('aria-label', 'Packet totals by type for the selected reporting range');
 
   // The charts are drawn once with resolved colors; if the OS theme
   // flips while the page is open, re-resolve the CSS variables and
@@ -193,12 +270,23 @@ function initChart() {
   });
 }
 
+function ensurePacketChartsInitialized() {
+  if (packetChartsInitialized) return;
+  packetChartsInitialized = true;
+  initChart();
+}
+
 // Renders the backend-computed buckets from GET /api/metrics/history
 // wholesale, replacing the chart's data each refresh - no client-side
 // bucketing or point-count capping, the server already bounded both.
 function renderChart(historyResponse) {
   if (!chart) return;
   const buckets = historyResponse.buckets;
+  const signature = JSON.stringify(buckets);
+  if (signature === lastHistorySignature) return;
+  lastHistorySignature = signature;
+  const receivedTotal = buckets.reduce((sum, bucket) => sum + bucket.packetsReceived, 0);
+  const decodedTotal = buckets.reduce((sum, bucket) => sum + bucket.packetsDecoded, 0);
   const { labels, receivedData, typeSeriesData } = buildHistoryChartData(buckets, PACKET_TYPE_BUCKETS);
 
   chart.data.labels = labels;
@@ -209,9 +297,15 @@ function renderChart(historyResponse) {
   chart.update('none');
 
   document.getElementById('chart-note').textContent = chartNoteForBuckets(buckets);
+  document.getElementById('chart-summary').textContent =
+    'Packets received: ' + receivedTotal + '; packets decoded: ' + decodedTotal +
+    '. Exact packet-type totals are listed in the table below.';
 }
 
 function renderPacketTypes(packetTypesResponse) {
+  const signature = JSON.stringify(packetTypesResponse.totals);
+  if (signature === lastPacketTypesSignature) return;
+  lastPacketTypesSignature = signature;
   const counts = buildPacketTypeTotals(packetTypesResponse.totals, PACKET_TYPE_BUCKETS);
 
   const body = document.querySelector('#packet-types-table tbody');
@@ -225,6 +319,10 @@ function renderPacketTypes(packetTypesResponse) {
     countCell.className = 'count';
     countCell.textContent = counts[idx];
   });
+  document.getElementById('packet-types-chart-summary').textContent =
+    'Packet type distribution across ' + counts.length + ' categories; ' +
+    counts.reduce((sum, count) => sum + count, 0) +
+    ' decoded packets. Exact per-type counts are listed in the adjacent table.';
 
   if (pieChart) {
     pieChart.data.datasets[0].data = counts;
@@ -233,8 +331,18 @@ function renderPacketTypes(packetTypesResponse) {
 }
 
 function renderBrokerDeliveries(brokerDeliveriesResponse) {
+  const signature = JSON.stringify(brokerDeliveriesResponse.brokers);
+  if (signature === lastBrokerDeliveriesSignature) return;
+  lastBrokerDeliveriesSignature = signature;
   const body = document.querySelector('#broker-deliveries-table tbody');
   body.innerHTML = '';
+  if (brokerDeliveriesResponse.brokers.length === 0) {
+    const row = body.insertRow();
+    const emptyCell = row.insertCell();
+    emptyCell.colSpan = 4;
+    emptyCell.textContent = 'No MQTT broker delivery data is configured.';
+    return;
+  }
   for (const broker of brokerDeliveriesResponse.brokers) {
     const row = body.insertRow();
     row.insertCell().textContent = broker.brokerId;
@@ -249,6 +357,150 @@ function renderNodeTotals(nodeTotalsResponse) {
   document.getElementById('nodes-updated').textContent = nodeTotalsResponse.totals.updated;
 }
 
+function renderMetricTrend(elementId, delta) {
+  const element = document.getElementById(elementId);
+  if (typeof delta !== 'number') {
+    element.className = 'metric-trend unchanged';
+    element.textContent = '—';
+    element.setAttribute('aria-label', 'No previous period comparison available');
+    return;
+  }
+
+  if (delta > 0) {
+    element.className = 'metric-trend increase';
+    element.textContent = '↑ +' + delta.toLocaleString();
+    element.setAttribute('aria-label', 'Increased by ' + delta.toLocaleString() + ' compared with previous period');
+  } else if (delta < 0) {
+    const decrease = Math.abs(delta).toLocaleString();
+    element.className = 'metric-trend decrease';
+    element.textContent = '↓ -' + decrease;
+    element.setAttribute('aria-label', 'Decreased by ' + decrease + ' compared with previous period');
+  } else {
+    element.className = 'metric-trend unchanged';
+    element.textContent = '—';
+    element.setAttribute('aria-label', 'No change from previous period');
+  }
+}
+
+function renderOverview(summary) {
+  document.getElementById('packets-received').textContent = summary.packets.received;
+  document.getElementById('packets-decoded').textContent = summary.packets.decoded;
+  document.getElementById('overview-replies-sent').textContent = summary.replies.outcomes.sent;
+  document.getElementById('overview-replies-expired').textContent = summary.replies.outcomes.expired;
+  document.getElementById('overview-replies-failed').textContent = summary.replies.outcomes.failed;
+
+  const brokerTotals = summary.brokers.reduce(
+    (totals, broker) => ({ sent: totals.sent + broker.sent, failed: totals.failed + broker.failed }),
+    { sent: 0, failed: 0 }
+  );
+  document.getElementById('overview-broker-sent').textContent = brokerTotals.sent;
+  document.getElementById('overview-broker-failed').textContent = brokerTotals.failed;
+  document.getElementById('overview-repeaters-added').textContent = summary.repeaters.added;
+  document.getElementById('overview-repeaters-updated').textContent = summary.repeaters.updated;
+
+  const trendValues = summary.trends ?? {};
+  renderMetricTrend('packets-received-trend', trendValues.packetsReceived);
+  renderMetricTrend('packets-decoded-trend', trendValues.packetsDecoded);
+  renderMetricTrend('overview-replies-sent-trend', trendValues.repliesSent);
+  renderMetricTrend('overview-replies-expired-trend', trendValues.repliesExpired);
+  renderMetricTrend('overview-replies-failed-trend', trendValues.repliesFailed);
+  renderMetricTrend('overview-broker-sent-trend', trendValues.brokerSent);
+  renderMetricTrend('overview-broker-failed-trend', trendValues.brokerFailed);
+  renderMetricTrend('overview-repeaters-added-trend', trendValues.repeatersAdded);
+  renderMetricTrend('overview-repeaters-updated-trend', trendValues.repeatersUpdated);
+
+  const comparisonNote = document.getElementById('overview-comparison-note');
+  if (!summary.comparison) {
+    comparisonNote.textContent = currentRange === 'all'
+      ? 'Trend comparison is unavailable for the All time range.'
+      : 'Trend comparison will appear after a complete previous period is available.';
+  } else if (currentRange === 'custom') {
+    comparisonNote.textContent = 'Compared with the immediately preceding period of the same duration.';
+  } else {
+    const rangeLabel = RANGE_PRESETS.find((preset) => preset.value === currentRange)?.label ?? currentRange;
+    comparisonNote.textContent = 'Compared with the previous ' + rangeLabel + ' period.';
+  }
+}
+
+function renderDashboardView(view, data) {
+  if (view === 'overview') {
+    renderOverview(data);
+    return;
+  }
+  if (view === 'packets') {
+    renderChart(data.history);
+    renderPacketTypes(data.packetTypes);
+    return;
+  }
+  if (view === 'brokers') {
+    renderBrokerDeliveries(data);
+    return;
+  }
+  if (view === 'bots') {
+    renderReplyQueueTotals({ totals: data.replyOutcomes });
+    renderBotCommands(data);
+    return;
+  }
+  if (view === 'repeaters') {
+    renderNodeTotals(data);
+  }
+}
+
+function renderUpdatedRangeStatus(view, viewLabel, timestamp) {
+  const status = document.getElementById('range-data-status');
+  let timeElement = status.querySelector('time');
+  if (!timeElement || timeElement.dataset.view !== view) {
+    status.replaceChildren(document.createTextNode('Updated ' + viewLabel + ': '));
+    timeElement = document.createElement('time');
+    timeElement.dataset.view = view;
+    status.appendChild(timeElement);
+  }
+  status.className = 'data-status ready';
+
+  const date = new Date(timestamp);
+  const parts = UPDATED_AT_FORMATTER.formatToParts(date);
+  const signature = parts.map((part) => part.type).join('|');
+  if (timeElement.dataset.parts !== signature) {
+    timeElement.replaceChildren(
+      ...parts.map((part) => {
+        if (part.type === 'literal') return document.createTextNode(part.value);
+        const segment = document.createElement('span');
+        segment.className = 'heartbeat-segment';
+        segment.dataset.timePart = part.type;
+        segment.textContent = part.value;
+        return segment;
+      })
+    );
+    timeElement.dataset.parts = signature;
+  } else {
+    for (const part of parts) {
+      if (part.type === 'literal') continue;
+      const segment = timeElement.querySelector('[data-time-part="' + part.type + '"]');
+      if (segment.textContent !== part.value) {
+        segment.textContent = part.value;
+        pulseTimeSegment(segment);
+      }
+    }
+  }
+  timeElement.dateTime = date.toISOString();
+}
+
+function setRangeLoadingStatus(view, viewLabel, lastSuccessAt) {
+  const status = document.getElementById('range-data-status');
+  const existingTime = status.querySelector('time');
+  if (lastSuccessAt === null || existingTime?.dataset.view !== view) {
+    setDataStatus(
+      'range-data-status',
+      'loading',
+      lastSuccessAt === null
+        ? 'Loading selected-range ' + viewLabel + '…'
+        : 'Refreshing selected-range ' + viewLabel + '. ' + formatLastSuccess(lastSuccessAt)
+    );
+  } else {
+    status.className = 'data-status loading';
+  }
+}
+
 // Truncated to a readable prefix for the table cell; the full key is still
 // available via the cell's title attribute (hover/long-press) and is what
 // the search box itself matches against in full - see queryNodes() in
@@ -258,16 +510,20 @@ function formatPublicKeyCell(publicKeyHex) {
 }
 
 function renderNodesList(nodesResponse) {
-  const body = document.querySelector('#nodes-table tbody');
-  body.innerHTML = '';
-  for (const node of nodesResponse.nodes) {
-    const row = body.insertRow();
-    row.insertCell().textContent = node.name;
-    const keyCell = row.insertCell();
-    keyCell.textContent = formatPublicKeyCell(node.publicKeyHex);
-    keyCell.title = node.publicKeyHex;
-    row.insertCell().textContent = formatTimestamp(node.firstHeardAt);
-    row.insertCell().textContent = formatTimestamp(node.lastHeardAt);
+  const signature = JSON.stringify({ nodes: nodesResponse.nodes, total: nodesResponse.total, offset: nodesOffset });
+  if (signature !== lastNodesRenderSignature) {
+    lastNodesRenderSignature = signature;
+    const body = document.querySelector('#nodes-table tbody');
+    body.innerHTML = '';
+    for (const node of nodesResponse.nodes) {
+      const row = body.insertRow();
+      row.insertCell().textContent = node.name;
+      const keyCell = row.insertCell();
+      keyCell.textContent = formatPublicKeyCell(node.publicKeyHex);
+      keyCell.title = node.publicKeyHex;
+      row.insertCell().textContent = formatTimestamp(node.firstHeardAt);
+      row.insertCell().textContent = formatTimestamp(node.lastHeardAt);
+    }
   }
 
   document.getElementById('nodes-page-note').textContent = formatNodePageRange(nodesOffset, NODES_PAGE_SIZE, nodesResponse.total);
@@ -281,6 +537,11 @@ function renderNodesList(nodesResponse) {
 // history window, and isn't re-fetched on every SSE tick either (that
 // would reset pagination/clobber an in-progress search every few seconds).
 async function refreshNodesList() {
+  setDataStatus(
+    'nodes-data-status',
+    'loading',
+    lastNodesSuccessAt === null ? 'Loading current repeater list…' : 'Refreshing current repeater list.'
+  );
   try {
     const params = { type: NODE_TYPE, limit: NODES_PAGE_SIZE, offset: nodesOffset };
     if (nodesSearchQuery) {
@@ -291,8 +552,15 @@ async function refreshNodesList() {
       throw new Error('nodes query failed (' + res.status + ')');
     }
     renderNodesList(await res.json());
+    lastNodesSuccessAt = Date.now();
+    setDataStatus('nodes-data-status', 'ready', 'Updated: ' + formatTimestamp(lastNodesSuccessAt));
   } catch (err) {
     console.error('failed to refresh the repeaters table', err);
+    setDataStatus(
+      'nodes-data-status',
+      'error',
+      'Unable to load current repeater list. ' + formatLastSuccess(lastNodesSuccessAt)
+    );
   }
 }
 
@@ -315,10 +583,9 @@ function initNodesSearch() {
   });
 }
 
-// Per-bot DOM/chart state, keyed by bot name. The configured bot set is
-// fixed for the life of a running server, so each bot's block/chart is
-// built once on first sight and only its data is updated on later
-// refreshes (no per-refresh chart teardown/rebuild, no layout jump).
+// Per-bot DOM/chart state, keyed by bot name. Cards are built once on first
+// sight; charts are created only as their cards approach the viewport, then
+// updated only when the range data changes.
 const botCommandBlocks = new Map();
 
 function botCommandColor(idx) {
@@ -338,37 +605,81 @@ function buildBotCommandBlock(botName) {
     '<h3><span class="bot-name"></span><span class="status-badge"></span></h3>' +
     '<p class="empty-note" hidden></p>' +
     '<div class="split-layout">' +
-    '<table><thead><tr><th></th><th>Command</th><th>Count</th></tr></thead><tbody></tbody></table>' +
-    '<div class="pie-wrap"><canvas></canvas></div>' +
+    '<div class="table-scroll" role="region" aria-label="Bot command reply counts" tabindex="0">' +
+    '<table><thead><tr><th></th><th>Command</th><th>Count</th></tr></thead><tbody></tbody></table></div>' +
+    '<div><div class="pie-wrap"><canvas aria-hidden="true"></canvas></div>' +
+    '<p class="chart-summary">Command reply distribution; exact counts are in the adjacent table.</p></div>' +
     '</div>' +
     '<p class="total-replies"></p>';
   block.querySelector('.bot-name').textContent = botName;
+  block.querySelector('.table-scroll').setAttribute('aria-label', botName + ' command reply counts');
   container.appendChild(block);
-
-  let entryChart = null;
-  if (typeof Chart !== 'undefined') {
-    entryChart = new Chart(block.querySelector('canvas').getContext('2d'), {
-      type: 'doughnut',
-      data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        plugins: { legend: { display: false }, tooltip: { enabled: true } }
-      }
-    });
-  }
 
   const entry = {
     block,
-    chart: entryChart,
+    chart: null,
+    chartData: [],
+    dataSignature: null,
+    canvas: block.querySelector('canvas'),
+    chartSummary: block.querySelector('.chart-summary'),
     statusBadge: block.querySelector('.status-badge'),
     tbody: block.querySelector('tbody'),
     emptyNote: block.querySelector('.empty-note'),
     totalEl: block.querySelector('.total-replies')
   };
   botCommandBlocks.set(botName, entry);
+  botEntryByBlock.set(block, entry);
   return entry;
+}
+
+function ensureBotChartObserver() {
+  if (botChartObserver || typeof window.IntersectionObserver === 'undefined' || typeof Chart === 'undefined') return;
+  botChartObserver = new window.IntersectionObserver((observedEntries) => {
+    for (const observed of observedEntries) {
+      if (!observed.isIntersecting) continue;
+      const entry = botEntryByBlock.get(observed.target);
+      if (entry) initializeBotChart(entry);
+      botChartObserver.unobserve(observed.target);
+    }
+  }, { rootMargin: '100px' });
+}
+
+function observeBotChart(entry) {
+  if (entry.chart) return;
+  ensureBotChartObserver();
+  if (botChartObserver) {
+    botChartObserver.observe(entry.block);
+  } else if (typeof window.IntersectionObserver === 'undefined' && currentView === 'bots') {
+    // Keep charts usable in browsers without IntersectionObserver. This
+    // fallback runs only when the bot detail view is active.
+    initializeBotChart(entry);
+  }
+}
+
+function initializeBotChart(entry) {
+  if (entry.chart || typeof Chart === 'undefined') return;
+  entry.chart = new Chart(entry.canvas.getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels: entry.chartData.map((row) => row.trigger),
+      datasets: [{
+        data: entry.chartData.map((row) => row.count),
+        backgroundColor: entry.chartData.map((_, idx) => botCommandColor(idx))
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: true } }
+    }
+  });
+  entry.canvas.setAttribute('role', 'img');
+  entry.canvas.setAttribute(
+    'aria-label',
+    'Command reply counts for ' + entry.block.querySelector('.bot-name').textContent + ' in the selected reporting range'
+  );
+  entry.canvas.removeAttribute('aria-hidden');
 }
 
 // Re-applies latestBotStatusByName to every bot card currently in the
@@ -385,8 +696,12 @@ function applyBotStatusBadges() {
 }
 
 function renderBotCommands(botCommandsResponse) {
+  document.getElementById('bots-empty-state').hidden = botCommandsResponse.bots.length > 0;
   for (const bot of botCommandsResponse.bots) {
     const entry = botCommandBlocks.get(bot.botName) ?? buildBotCommandBlock(bot.botName);
+    const signature = JSON.stringify({ commands: bot.commands, totalReplies: bot.totalReplies });
+    if (signature === entry.dataSignature) continue;
+    entry.dataSignature = signature;
 
     entry.tbody.innerHTML = '';
     bot.commands.forEach((row, idx) => {
@@ -402,15 +717,45 @@ function renderBotCommands(botCommandsResponse) {
     entry.totalEl.textContent = 'Total replies: ' + bot.totalReplies;
     entry.emptyNote.hidden = bot.totalReplies !== 0;
     entry.emptyNote.textContent = 'No commands recorded in this range.';
+    entry.chartData = bot.commands;
+    entry.chartSummary.textContent =
+      bot.totalReplies === 0
+        ? 'No command replies in this range; exact counts are in the adjacent table.'
+        : 'Total replies: ' + bot.totalReplies + ' across ' + bot.commands.filter((row) => row.count > 0).length +
+          ' commands; exact counts are in the adjacent table.';
 
     if (entry.chart) {
-      entry.chart.data.labels = bot.commands.map((row) => row.trigger);
-      entry.chart.data.datasets[0].data = bot.commands.map((row) => row.count);
-      entry.chart.data.datasets[0].backgroundColor = bot.commands.map((row, idx) => botCommandColor(idx));
+      entry.chart.data.labels = entry.chartData.map((row) => row.trigger);
+      entry.chart.data.datasets[0].data = entry.chartData.map((row) => row.count);
+      entry.chart.data.datasets[0].backgroundColor = entry.chartData.map((row, idx) => botCommandColor(idx));
       entry.chart.update('none');
     }
+    observeBotChart(entry);
   }
   applyBotStatusBadges();
+}
+
+function setDataStatus(elementId, state, message) {
+  const status = document.getElementById(elementId);
+  status.className = 'data-status ' + state;
+  status.textContent = message;
+}
+
+function formatLastSuccess(timestamp) {
+  return timestamp === null
+    ? 'No successful update yet.'
+    : 'Last successful update: ' + formatTimestamp(timestamp);
+}
+
+function setLiveFreshness(state, message) {
+  const freshness = document.getElementById('live-freshness');
+  freshness.className = 'freshness ' + state;
+  freshness.textContent = message;
+  if (state !== lastLiveAnnouncementState) {
+    document.getElementById('live-announcement').textContent =
+      state === 'ready' ? 'Live metrics updates are current.' : 'Live metrics updates are unavailable or stale.';
+    lastLiveAnnouncementState = state;
+  }
 }
 
 function setConnectionState(state) {
@@ -419,42 +764,74 @@ function setConnectionState(state) {
   indicator.textContent = state === 'live' ? 'live' : state === 'down' ? 'disconnected' : 'connecting…';
 }
 
-async function refreshRangeData() {
+function refreshRangeData({ supersede = false } = {}) {
   const params = resolveRangeQuery({ range: currentRange, customStartMs, customEndMs });
   if (!params) return; // custom range selected but not yet applied
+  const view = currentView;
+  const viewLabel = VIEW_LABELS[view];
+  const lastSuccessAt = lastRangeSuccessByView.get(view) ?? null;
 
-  try {
-    const qs = buildQueryString(params);
-    const nodesTotalsQs = buildQueryString({ ...params, type: NODE_TYPE });
-    const [historyRes, packetTypesRes, replyQueueRes, botCommandsRes, brokersRes, nodeTotalsRes] = await Promise.all([
-      fetch('/api/metrics/history?' + qs),
-      fetch('/api/metrics/packet-types?' + qs),
-      fetch('/api/metrics/reply-queue?' + qs),
-      fetch('/api/metrics/bots/commands?' + qs),
-      fetch('/api/metrics/brokers?' + qs),
-      fetch('/api/metrics/nodes?' + nodesTotalsQs)
-    ]);
-    if (!historyRes.ok || !packetTypesRes.ok || !replyQueueRes.ok || !botCommandsRes.ok || !brokersRes.ok || !nodeTotalsRes.ok) {
-      throw new Error(
-        'range query failed (history ' + historyRes.status + ', packet-types ' + packetTypesRes.status +
-          ', reply-queue ' + replyQueueRes.status + ', bots/commands ' + botCommandsRes.status +
-          ', brokers ' + brokersRes.status + ', nodes ' + nodeTotalsRes.status + ')'
-      );
+  if (activeRangeRefresh) {
+    if (!supersede) {
+      // SSE ticks during a slow refresh collapse into one follow-up refresh,
+      // so the newest sample is picked up without building an unbounded queue.
+      rangeRefreshQueued = true;
+      return activeRangeRefresh;
     }
-    renderChart(await historyRes.json());
-    renderPacketTypes(await packetTypesRes.json());
-    renderReplyQueueTotals(await replyQueueRes.json());
-    renderBotCommands(await botCommandsRes.json());
-    renderBrokerDeliveries(await brokersRes.json());
-    renderNodeTotals(await nodeTotalsRes.json());
-  } catch (err) {
-    console.error('failed to refresh range-aware metrics', err);
+    activeRangeController?.abort();
   }
+
+  const generation = ++rangeRefreshGeneration;
+  const controller = new AbortController();
+  activeRangeController = controller;
+
+  const request = (async () => {
+    try {
+      setRangeLoadingStatus(view, viewLabel, lastSuccessAt);
+      const qs = buildQueryString({ ...params, view });
+      const response = await fetch('/api/metrics/dashboard?' + qs, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error('dashboard ' + view + ' query failed (' + response.status + ')');
+      }
+      const result = await response.json();
+      if (result.view !== view || !result.data) {
+        throw new Error('dashboard response did not match requested view');
+      }
+      if (controller.signal.aborted || generation !== rangeRefreshGeneration) return;
+
+      renderDashboardView(view, result.data);
+      const updatedAt = Date.now();
+      lastRangeSuccessByView.set(view, updatedAt);
+      renderUpdatedRangeStatus(view, viewLabel, updatedAt);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        console.error('failed to refresh range-aware metrics', err);
+        setDataStatus(
+          'range-data-status',
+          'error',
+          'Unable to load selected-range ' + viewLabel + '. ' + formatLastSuccess(lastSuccessAt)
+        );
+      }
+    } finally {
+      if (activeRangeController === controller) {
+        activeRangeController = null;
+        activeRangeRefresh = null;
+        if (rangeRefreshQueued) {
+          rangeRefreshQueued = false;
+          void refreshRangeData();
+        }
+      }
+    }
+  })();
+  activeRangeRefresh = request;
+  return request;
 }
 
 function setActiveRangeButton() {
   document.querySelectorAll('.range-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.range === currentRange);
+    const selected = btn.dataset.range === currentRange;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-pressed', String(selected));
   });
   document.getElementById('range-custom').classList.toggle('visible', currentRange === 'custom');
 }
@@ -463,7 +840,7 @@ function selectPresetRange(value) {
   currentRange = value;
   document.getElementById('range-error').textContent = '';
   setActiveRangeButton();
-  refreshRangeData();
+  refreshRangeData({ supersede: true });
 }
 
 function applyCustomRange() {
@@ -482,7 +859,65 @@ function applyCustomRange() {
   customEndMs = result.end;
   currentRange = 'custom';
   setActiveRangeButton();
-  refreshRangeData();
+  refreshRangeData({ supersede: true });
+}
+
+function viewFromLocation() {
+  const requestedView = new URL(window.location.href).searchParams.get('view');
+  return DASHBOARD_VIEWS.includes(requestedView) ? requestedView : 'overview';
+}
+
+function showDashboardView(view, { focus = false } = {}) {
+  currentView = view;
+  document.querySelectorAll('.dashboard-view').forEach((section) => {
+    section.hidden = section.dataset.view !== view;
+  });
+  document.querySelectorAll('[data-view-link]').forEach((link) => {
+    if (link.dataset.viewLink === view) {
+      link.setAttribute('aria-current', 'page');
+    } else {
+      link.removeAttribute('aria-current');
+    }
+  });
+  if (focus) {
+    document.querySelector('#view-' + view + ' h2')?.focus();
+  }
+
+  if (view === 'packets') {
+    ensurePacketChartsInitialized();
+  }
+  if (view === 'bots' && typeof window.IntersectionObserver === 'undefined') {
+    botCommandBlocks.forEach((entry) => initializeBotChart(entry));
+  }
+  if (view === 'repeaters') {
+    void refreshNodesList();
+  }
+  void refreshRangeData({ supersede: true });
+}
+
+function navigateDashboardView(view, { pushHistory = true, focus = pushHistory } = {}) {
+  if (!DASHBOARD_VIEWS.includes(view)) return;
+  if (pushHistory && view === currentView) return;
+
+  if (pushHistory) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', view);
+    window.history.pushState({ view }, '', url);
+  }
+  showDashboardView(view, { focus });
+}
+
+function initDashboardNavigation() {
+  document.querySelectorAll('[data-view-link]').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      navigateDashboardView(link.dataset.viewLink);
+    });
+  });
+  window.addEventListener('popstate', () => {
+    navigateDashboardView(viewFromLocation(), { pushHistory: false, focus: true });
+  });
 }
 
 function initRangeSelector() {
@@ -504,35 +939,53 @@ function initRangeSelector() {
   setActiveRangeButton();
 }
 
-async function bootstrap() {
-  initChart();
+function bootstrap() {
   initRangeSelector();
   initNodesSearch();
-
-  try {
-    const metricsRes = await fetch('/api/metrics');
-    renderSnapshot(await metricsRes.json());
-  } catch (err) {
-    console.error('failed to load initial metrics', err);
-  }
-  await refreshRangeData();
-  // Not part of refreshRangeData()'s range-aware batch (the table is live
-  // current state, not history - see refreshNodesList()'s own doc
-  // comment) and not re-fetched on every SSE tick either, so typing in the
-  // search box or paging through results doesn't get clobbered by the
-  // next live update a few seconds later.
-  await refreshNodesList();
+  initDashboardNavigation();
 
   const source = new EventSource('/api/metrics/stream');
   source.onopen = () => setConnectionState('live');
-  source.onerror = () => setConnectionState('down');
+  source.onerror = () => {
+    setConnectionState('down');
+    setLiveFreshness(
+      'error',
+      'Connection lost. Last valid live snapshot: ' + (lastLiveSuccessAt === null ? 'none' : formatTimestamp(lastLiveSuccessAt))
+    );
+  };
   source.onmessage = (event) => {
-    renderSnapshot(JSON.parse(event.data));
-    // Refetch the range-aware views on the same cadence the server
-    // samples at, so the chart/table/pie stay live for "now"-anchored
-    // ranges without the client re-deriving anything itself.
+    try {
+      const snapshot = JSON.parse(event.data);
+      if (
+        !snapshot ||
+        typeof snapshot !== 'object' ||
+        Array.isArray(snapshot) ||
+        !Array.isArray(snapshot.bots) ||
+        !snapshot.mqtt ||
+        typeof snapshot.mqtt !== 'object' ||
+        Array.isArray(snapshot.mqtt)
+      ) {
+        throw new Error('invalid metrics snapshot shape');
+      }
+      renderSnapshot(snapshot);
+      lastLiveSuccessAt = Date.now();
+      setLiveFreshness('ready', 'Last live snapshot: ' + formatTimestamp(lastLiveSuccessAt));
+    } catch (err) {
+      console.error('failed to process a live metrics update', err);
+      setLiveFreshness(
+        'error',
+        'Invalid live update. Last valid snapshot: ' + (lastLiveSuccessAt === null ? 'none' : formatTimestamp(lastLiveSuccessAt))
+      );
+    }
+    // Refresh the active range view on the sample cadence so "now"-anchored
+    // ranges stay current without querying hidden pages.
     refreshRangeData();
   };
+
+  // The stream sends the initial operational snapshot on connect. Activate
+  // the requested page after opening it so the live connection is not held
+  // up by the page's range or repeater queries.
+  navigateDashboardView(viewFromLocation(), { pushHistory: false });
 }
 
 bootstrap();

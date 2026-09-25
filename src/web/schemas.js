@@ -65,9 +65,26 @@ export const nodeTotalsQuerySchema = {
   oneOf: RANGE_ONE_OF
 };
 
+// Dashboard overview and detail data share one selected range. `view`
+// keeps each response focused so the client can request only the active
+// page rather than refreshing every dashboard section on every sample.
+export const dashboardQuerySchema = {
+  $id: 'meshcore-observer/web/dashboard-query',
+  type: 'object',
+  additionalProperties: false,
+  required: ['view'],
+  properties: {
+    ...rangeProperties(),
+    view: { enum: ['overview', 'packets', 'brokers', 'bots', 'repeaters'] },
+    maxBuckets: { type: 'integer', minimum: 10, maximum: 1000 }
+  },
+  oneOf: RANGE_ONE_OF
+};
+
 export const validateMetricsHistoryQuery = compileSchema(metricsHistoryQuerySchema);
 export const validateRangeOnlyQuery = compileSchema(rangeOnlyQuerySchema);
 export const validateNodeTotalsQuery = compileSchema(nodeTotalsQuerySchema);
+export const validateDashboardQuery = compileSchema(dashboardQuerySchema);
 
 // GET /api/nodes: the node ("!lookup" repeater registry) search/browse
 // table - not range-aware (it's current state, not history - see

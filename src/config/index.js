@@ -111,7 +111,7 @@ function readBotReplyQueue(env) {
 }
 
 function readFloodAdvert(env) {
-  return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 3) };
+  return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 47) };
 }
 
 function readMetricsUi(env) {

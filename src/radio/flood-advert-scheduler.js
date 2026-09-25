@@ -55,7 +55,7 @@ export class FloodAdvertScheduler {
     this.#running = true;
     const recovered = this.#store.recoverFloodAdvertAttempt({
       intervalMs: this.#intervalMs,
-      uncertainAttemptIntervalMs: Math.max(this.#intervalMs, 3 * HOUR_MS)
+      uncertainAttemptIntervalMs: Math.max(this.#intervalMs, 47 * HOUR_MS)
     });
     if (recovered) {
       this.#logger.warn('services.floodAdvert', 'recovered an interrupted flood advert attempt; retry deferred');

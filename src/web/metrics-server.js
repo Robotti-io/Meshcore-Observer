@@ -9,6 +9,7 @@ import {
   validateMetricsHistoryQuery,
   validateRangeOnlyQuery,
   validateNodeTotalsQuery,
+  validateDashboardQuery,
   parseNodesListQuery,
   validateNodesListQuery
 } from './schemas.js';
@@ -20,6 +21,18 @@ const DEFAULT_NODES_LIMIT = 50;
 
 const WEB_DIR = dirname(fileURLToPath(import.meta.url));
 const TEXT_JS = 'text/javascript; charset=utf-8';
+
+function packetTypeTotalsFromHistory(buckets) {
+  const counts = new Map();
+  for (const bucket of buckets) {
+    for (const [packetTypeBucket, total] of Object.entries(bucket.countsByType ?? {})) {
+      counts.set(packetTypeBucket, (counts.get(packetTypeBucket) ?? 0) + total);
+    }
+  }
+  return [...counts.entries()]
+    .map(([packetTypeBucket, total]) => ({ packetTypeBucket, total }))
+    .sort((a, b) => b.total - a.total);
+}
 
 /**
  * The dashboard's browser-side files, served as-is (no bundling/transform)
@@ -255,6 +268,11 @@ export class MetricsServer {
       return;
     }
 
+    if (pathname === '/api/metrics/dashboard') {
+      this.#handleDashboard(res, searchParams);
+      return;
+    }
+
     if (pathname === '/api/metrics/history') {
       this.#handleHistory(res, searchParams);
       return;
@@ -300,10 +318,10 @@ export class MetricsServer {
 
   /**
    * Resolves a request's `range` (or `start`+`end`) query into a concrete
-   * window against the given AJV validator, shared by both range-aware
-   * endpoints below. Returns null (having already sent a 400 response)
-   * when the query is invalid, so callers can just check for that and
-   * return.
+   * window against the given AJV validator, shared by range-aware
+   * endpoints and the dashboard aggregate route. Returns null (having
+   * already sent a 400 response) when the query is invalid, so callers can
+   * just check for that and return.
    */
   #resolveWindowOrRespondError(res, searchParams, validate) {
     const query = parseRangeQuery(searchParams);
@@ -327,6 +345,161 @@ export class MetricsServer {
       }
       throw err;
     }
+  }
+
+  #handleDashboard(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateDashboardQuery);
+    if (!resolved) {
+      return;
+    }
+    const { query, window } = resolved;
+    let comparisonWindow = null;
+    if (query.view === 'overview' && query.range !== 'all') {
+      const comparisonStart = window.start - (window.end - window.start);
+      const earliestSampleAt = this.#metricsStore.getEarliestSampleAt();
+      if (earliestSampleAt !== null && comparisonStart >= earliestSampleAt) {
+        comparisonWindow = { start: comparisonStart, end: window.start };
+      }
+    }
+    const data = this.#queryDashboardView(
+      query.view,
+      window,
+      query.maxBuckets ?? this.#maxChartBuckets,
+      comparisonWindow
+    );
+    this.#sendJson(res, 200, { start: window.start, end: window.end, view: query.view, data });
+  }
+
+  #queryDashboardView(view, window, maxBuckets, comparisonWindow = null) {
+    if (view === 'overview') {
+      const buckets = this.#metricsStore.queryPacketHistory({
+        ...window,
+        maxBuckets,
+        sampleIntervalMs: this.#sampleIntervalMs
+      });
+      const packetTypes = packetTypeTotalsFromHistory(buckets);
+      const replies = this.#metricsStore.queryReplyOutcomeTotals(window);
+      const brokers = this.#queryDashboardBrokers(window);
+      const repeaters = this.#metricsStore.queryNodeTotals({ ...window, type: 'REPEATER' });
+      const packets = {
+        received: buckets.reduce((sum, bucket) => sum + bucket.packetsReceived, 0),
+        decoded: buckets.reduce((sum, bucket) => sum + bucket.packetsDecoded, 0)
+      };
+      let trends = null;
+
+      if (comparisonWindow) {
+        const previousBuckets = this.#metricsStore.queryPacketHistory({
+          ...comparisonWindow,
+          maxBuckets,
+          sampleIntervalMs: this.#sampleIntervalMs
+        });
+        const previousPackets = {
+          received: previousBuckets.reduce((sum, bucket) => sum + bucket.packetsReceived, 0),
+          decoded: previousBuckets.reduce((sum, bucket) => sum + bucket.packetsDecoded, 0)
+        };
+        const previousReplies = this.#metricsStore.queryReplyOutcomeTotals(comparisonWindow);
+        const currentBrokerIds = new Set(brokers.map((broker) => broker.brokerId));
+        const previousBrokerTotals = this.#metricsStore.queryBrokerDeliveryTotals(comparisonWindow).reduce(
+          (totals, row) => {
+            if (currentBrokerIds.has(row.brokerId)) totals[row.outcome] += row.total;
+            return totals;
+          },
+          { sent: 0, skipped: 0, failed: 0 }
+        );
+        const previousRepeaters = this.#metricsStore.queryNodeTotals({
+          ...comparisonWindow,
+          type: 'REPEATER'
+        });
+        const currentBrokerTotals = brokers.reduce(
+          (totals, broker) => ({ sent: totals.sent + broker.sent, failed: totals.failed + broker.failed }),
+          { sent: 0, failed: 0 }
+        );
+
+        trends = {
+          packetsReceived: packets.received - previousPackets.received,
+          packetsDecoded: packets.decoded - previousPackets.decoded,
+          repliesSent: replies.sent - previousReplies.sent,
+          repliesExpired: replies.expired - previousReplies.expired,
+          repliesFailed: replies.failed - previousReplies.failed,
+          brokerSent: currentBrokerTotals.sent - previousBrokerTotals.sent,
+          brokerFailed: currentBrokerTotals.failed - previousBrokerTotals.failed,
+          repeatersAdded: repeaters.added - previousRepeaters.added,
+          repeatersUpdated: repeaters.updated - previousRepeaters.updated
+        };
+      }
+
+      return {
+        packets: { ...packets, byType: packetTypes },
+        replies: { outcomes: replies },
+        brokers,
+        repeaters,
+        comparison: comparisonWindow
+          ? { start: comparisonWindow.start, end: comparisonWindow.end, durationMs: window.end - window.start }
+          : null,
+        trends
+      };
+    }
+
+    if (view === 'packets') {
+      const buckets = this.#metricsStore.queryPacketHistory({
+        ...window,
+        maxBuckets,
+        sampleIntervalMs: this.#sampleIntervalMs
+      });
+      return {
+        history: { buckets },
+        packetTypes: { totals: packetTypeTotalsFromHistory(buckets), buckets: PACKET_TYPE_BUCKETS }
+      };
+    }
+
+    if (view === 'brokers') {
+      return { brokers: this.#queryDashboardBrokers(window) };
+    }
+
+    if (view === 'bots') {
+      return {
+        replyOutcomes: this.#metricsStore.queryReplyOutcomeTotals(window),
+        bots: this.#queryDashboardBotCommands(window)
+      };
+    }
+
+    if (view === 'repeaters') {
+      return { totals: this.#metricsStore.queryNodeTotals({ ...window, type: 'REPEATER' }) };
+    }
+
+    throw new Error(`unsupported dashboard view: ${view}`);
+  }
+
+  #queryDashboardBotCommands(window) {
+    const countsByBot = new Map();
+    for (const row of this.#metricsStore.queryBotCommandCountsByBot(window)) {
+      const counts = countsByBot.get(row.botName) ?? [];
+      counts.push({ trigger: row.trigger, count: row.count });
+      countsByBot.set(row.botName, counts);
+    }
+
+    return this.#botsConfig.map((botConfig) => {
+      const commands = bucketBotCommandCounts(botConfig.commands, countsByBot.get(botConfig.name) ?? []);
+      return {
+        botName: botConfig.name,
+        commands,
+        totalReplies: commands.reduce((sum, row) => sum + row.count, 0)
+      };
+    });
+  }
+
+  #queryDashboardBrokers(window) {
+    const countsByBroker = new Map();
+    for (const { brokerId, outcome, total } of this.#metricsStore.queryBrokerDeliveryTotals(window)) {
+      const counts = countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 };
+      counts[outcome] = total;
+      countsByBroker.set(brokerId, counts);
+    }
+
+    return Object.keys(this.#serviceHealth.snapshot().mqtt).map((brokerId) => ({
+      brokerId,
+      ...(countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 })
+    }));
   }
 
   #handleHistory(res, searchParams) {
@@ -421,21 +594,7 @@ export class MetricsServer {
     }
     const { window } = resolved;
 
-    const totals = this.#metricsStore.queryBrokerDeliveryTotals(window);
-    const countsByBroker = new Map();
-    for (const { brokerId, outcome, total } of totals) {
-      const counts = countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 };
-      counts[outcome] = total;
-      countsByBroker.set(brokerId, counts);
-    }
-
-    const brokerIds = Object.keys(this.#serviceHealth.snapshot().mqtt);
-    const brokers = brokerIds.map((brokerId) => ({
-      brokerId,
-      ...(countsByBroker.get(brokerId) ?? { sent: 0, skipped: 0, failed: 0 })
-    }));
-
-    this.#sendJson(res, 200, { start: window.start, end: window.end, brokers });
+    this.#sendJson(res, 200, { start: window.start, end: window.end, brokers: this.#queryDashboardBrokers(window) });
   }
 
   /**

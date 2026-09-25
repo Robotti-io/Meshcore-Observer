@@ -65,7 +65,7 @@ test('resumes one persisted pending request without creating a duplicate startup
 test('requests the next advert from the prior accepted-send time', async () => {
   let nowMs = 1_000;
   let sent = 0;
-  const rig = makeRig({ intervalHours: 3, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } });
+  const rig = makeRig({ intervalHours: 47, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } });
   rig.scheduler.start();
   rig.radioManager.emit('radio.connected');
   await waitFor(() => sent === 1);

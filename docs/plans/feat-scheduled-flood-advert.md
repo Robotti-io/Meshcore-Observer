@@ -3,7 +3,7 @@
 ## Goals
 
 - Send the Companion device's own flood advert once after the observer starts and the radio connects.
-- Send another flood advert at a configurable interval, defaulting to three hours, with no periodic interval shorter than three hours.
+- Send another flood advert at a configurable interval, defaulting to 47 hours, with no periodic interval shorter than 47 hours.
 - Wait for the same observed quiet-air window used by channel replies before sending. Incoming packets and this observer's own transmissions must keep the shared radio quiet-window state accurate.
 - Use the Companion device to create and sign its own advert; the observer must not construct or sign an advert packet itself.
 
@@ -13,7 +13,7 @@
 
 Add a lifecycle-managed scheduler that requests an initial flood advert after the first successful radio connection, then requests one at each configured interval. Requests must wait until no RF packet has been observed for the configured bot reply quiet window. While disconnected or busy, repeated periodic triggers are coalesced into at most one pending advert rather than accumulating a backlog.
 
-The default interval is three hours. `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS=0` disables periodic adverts while retaining the one startup advert; otherwise accepted values are whole hours from 3 through 168. The interval is measured from one accepted send to the next, not aligned to wall-clock hour boundaries.
+The default interval is 47 hours, following local mesh community guidance for flood adverts. `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS=0` disables periodic adverts while retaining the one startup advert; otherwise accepted values are whole hours from 47 through 168. One-hour zero-hop adverts are a separate mode and are not scheduled by this feature. The interval is measured from one accepted send to the next, not aligned to wall-clock hour boundaries.
 
 ### 2. Relevant Existing Architecture
 
@@ -30,7 +30,7 @@ The default interval is three hours. `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS=
 - Add a one-slot/coalescing `FloodAdvertScheduler`. On the first `radio.connected` event it requests the startup advert; while disconnected or awaiting quiet air, any periodic due events coalesce into one pending request. Once radio and air are available, it calls `radioManager.runCommand((connection) => connection.sendFloodAdvert())` under the shared reservation.
 - Reset shared activity when an outbound send is initiated, following the existing reply queue's self-activity behavior. Do not queue a separate advert for every missed interval and do not send multiple startup adverts on reconnect.
 - Persist a singleton flood-advert job state in `MetricsStore`, separate from `bot_replies`. Startup must resume an existing pending job instead of creating another. Record when an attempt starts and when the device accepts a send so a restart during an uncertain in-flight command does not immediately retransmit it; defer that uncertain retry until the configured interval has elapsed.
-- Add `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`, default `3`, validated as either `0` or an integer from `3` through `168`. Zero means startup-only; values 3 through 168 set the recurring interval. This value controls observer scheduling and does not modify device firmware settings.
+- Add `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`, default `47`, validated as either `0` or an integer from `47` through `168`. Zero means startup-only; values 47 through 168 set the recurring interval. This value controls observer scheduling and does not modify device firmware settings.
 - Start and stop the scheduler explicitly in `src/index.js`. Stop it before the radio manager closes, and wait for an in-flight command to settle as part of bounded shutdown.
 - Log standalone scheduler outcomes with stable sources and no request ID. Log success, skipped/coalesced/reconnected behavior only when operationally useful, and never log packet contents or secrets.
 
@@ -68,27 +68,27 @@ This approach shares one source of truth for observed quiet air without mixing r
 #### T3: Add and validate the advert interval configuration
 
 - **Objective:** Make the recurring schedule operator-configurable with a safe default.
-- **Specific changes:** Parse `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` centrally with default `3`; validate `0` or integer values from `3` to `168` through AJV; document that `0` keeps the startup advert and disables recurrence.
-- **Definition of done:** Invalid, fractional, negative, 1-hour, 2-hour, and above-168 values fail configuration before hardware/network side effects; omitted value resolves to three hours.
+- **Specific changes:** Parse `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` centrally with default `47`; validate `0` or integer values from `47` to `168` through AJV; document that `0` keeps the startup advert and disables recurrence.
+- **Definition of done:** Invalid, fractional, negative, below-47-hour, and above-168 values fail configuration before hardware/network side effects; omitted value resolves to 47 hours.
 - **Expected tests / validation:** Config tests for default, valid boundaries, and rejection cases; verify `.env.example` and README agree; run `npm test` and `npm run lint`.
 
 #### T4: Implement startup and periodic flood advert scheduling
 
 - **Objective:** Send one startup advert and recurring adverts without bypassing quiet-air or radio-command serialization.
 - **Specific changes:** Add `FloodAdvertScheduler`. Trigger startup once on the first `radio.connected`, resuming an existing persisted pending job if present; then schedule from the previous accepted send using the configured interval. Use one coalesced pending state while busy or disconnected. Call `sendFloodAdvert()` through `RadioManager.runCommand()` and the shared airtime coordinator. Log outcomes and handle errors without crashing packet ingest.
-- **Definition of done:** Startup waits for connection and quiet air; periodic requests run at intervals of at least three hours; reconnect does not create duplicate startup sends; multiple overdue intervals do not create a burst; a restored pending advert is not duplicated; sends are serialized with all existing Companion commands; `stop()` clears timers and waits safely for an active send.
-- **Expected tests / validation:** Scheduler tests for startup, first-send timing, 3-hour default, configured interval, zero interval, busy-air delay, disconnect/reconnect coalescing, restart recovery, failures, and shutdown with an in-flight operation; run `npm test` and `npm run lint`.
+- **Definition of done:** Startup waits for connection and quiet air; periodic requests run at intervals of at least 47 hours; reconnect does not create duplicate startup sends; multiple overdue intervals do not create a burst; a restored pending advert is not duplicated; sends are serialized with all existing Companion commands; `stop()` clears timers and waits safely for an active send.
+- **Expected tests / validation:** Scheduler tests for startup, first-send timing, 47-hour default, configured interval, zero interval, busy-air delay, disconnect/reconnect coalescing, restart recovery, failures, and shutdown with an in-flight operation; run `npm test` and `npm run lint`.
 
 #### T5: Wire lifecycle, document operation, and validate on the scoped device
 
 - **Objective:** Integrate the service into application startup/shutdown and explain its RF behavior to operators.
-- **Specific changes:** Construct and wire the coordinator and scheduler in `src/index.js`, start after dependencies are ready, and stop before `radioManager.stop()`. Update README and `.env.example` with the 3-hour default, minimum interval, startup-only setting, restart recovery, and the fact that flood adverts are retransmitted by repeaters. Perform manual Companion command validation only on COM4; leave the active COM3 instance untouched.
+- **Specific changes:** Construct and wire the coordinator and scheduler in `src/index.js`, start after dependencies are ready, and stop before `radioManager.stop()`. Update README and `.env.example` with the 47-hour default and minimum interval, startup-only setting, restart recovery, and the fact that flood adverts are retransmitted by repeaters. Perform manual Companion command validation only on COM4; leave the active COM3 instance untouched.
 - **Definition of done:** The feature starts and stops with the observer, reports failures through the structured logger, documentation describes the configured behavior accurately, and the hardware check confirms the advert command and response on COM4 only.
 - **Expected tests / validation:** Bootstrap/lifecycle tests or focused wiring tests as supported by the existing suite; full `npm test` and `npm run lint`; manual test checklist records device/port COM4 and does not connect to COM3.
 
 ### 6. Risks and Edge Cases
 
-- Flood adverts are network-wide transmissions that repeaters may rebroadcast. At the three-hour default this can mean up to 8 periodic adverts per day, plus one startup advert each time the process starts. This honors the stated community recommendation of at least three hours; operators can use longer intervals or set zero for startup-only. See [MeshCore FAQ](https://github.com/meshcore-dev/MeshCore/blob/main/docs/faq.md).
+- Flood adverts are network-wide transmissions that repeaters may rebroadcast. At the 47-hour default this is about one periodic advert every two days, plus one startup advert each time the process starts. This follows local community guidance for flood adverts; zero-hop adverts have a separate one-hour cadence and are outside this scheduler. Operators can use longer intervals or set zero for startup-only. See [MeshCore FAQ](https://github.com/meshcore-dev/MeshCore/blob/main/docs/faq.md).
 - The quiet-window mechanism is inferred from received packets, not a physical channel-activity/CAD measurement. It cannot detect transmissions that the Companion did not report to the app.
 - Startup means after the first successful radio connection in each process lifetime, then after the quiet window and configured minimum cadence. A restart resumes a pending job rather than duplicating it; a recent successful or uncertain attempt delays the next send until the cadence permits it.
 - When disconnected or busy, coalesce missed periodic triggers to one durable pending send; never replay every missed interval after reconnect.
@@ -100,12 +100,12 @@ This approach shares one source of truth for observed quiet air without mixing r
 
 ### 7. Resolved Decisions and Execution Checks
 
-- **Resolved:** The interval is configured in hours. If unset, it defaults to three hours and this default will be shown in `.env.example`.
-- **Resolved:** Zero means startup-only; valid periodic settings range from 3 through 168 hours. One- and two-hour intervals are invalid.
+- **Resolved:** The interval is configured in hours. If unset, it defaults to 47 hours and this default will be shown in `.env.example`.
+- **Resolved:** Zero means startup-only; valid periodic settings range from 47 through 168 hours.
 - **Resolved:** The next interval starts after the device accepts the previous advert, so quiet-air delays do not cause catch-up bursts or intervals shorter than configured.
 - **Resolved:** Reconnect does not count as a second startup. A pending overdue periodic request is coalesced and may run after reconnect.
 - **Resolved:** Persist pending advert state separately from bot replies so startup resumes/coalesces an existing job rather than duplicating it. If a crash leaves the command in an uncertain in-flight state, defer a retry for at least the configured interval.
-- **Resolved:** The community recommendation is a minimum three-hour flood interval.
+- **Updated guidance:** Local mesh community guidance recommends a 47-hour flood interval. One-hour zero-hop adverts are a separate behavior and are not configured by this scheduler.
 - **Resolved:** Manual device testing is restricted to COM4. Do not connect to or disrupt the active COM3 instance.
 - **Execution check:** Confirm target Companion firmware supports `sendFloodAdvert()` and returns its response reliably enough for the serialized command queue, using COM4 only.
 
@@ -113,6 +113,6 @@ This approach shares one source of truth for observed quiet air without mixing r
 
 1. **T1** — establish one shared airtime reservation before adding a second class of radio transmission.
 2. **T2** — persist/coalesce the single pending advert so restarts cannot enqueue duplicates.
-3. **T3** — add strict configuration and validate the three-hour minimum.
+3. **T3** — add strict configuration and validate the 47-hour minimum.
 4. **T4** — implement the scheduler on the stable coordination, persistence, and config seams.
 5. **T5** — wire lifecycle, document RF behavior, then validate hardware only on COM4.
