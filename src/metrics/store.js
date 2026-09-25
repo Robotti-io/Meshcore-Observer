@@ -405,7 +405,7 @@ export class MetricsStore {
     this.#resolveFloodAdvertAttemptStmt = this.#db.prepare(`
       UPDATE flood_advert_state
       SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
-          last_attempt_at = ?, last_sent_at = CASE WHEN ? = 1 THEN ? ELSE last_sent_at END,
+          last_sent_at = CASE WHEN ? = 1 THEN ? ELSE last_sent_at END,
           next_due_at = ?
       WHERE id = 1 AND status = 'sending'
     `);
@@ -789,7 +789,7 @@ export class MetricsStore {
   /** Resolves an attempt and establishes the next allowed attempt time. */
   resolveFloodAdvertAttempt({ resolvedAt, intervalMs, sent }) {
     return Number(
-      this.#resolveFloodAdvertAttemptStmt.run(resolvedAt, sent ? 1 : 0, resolvedAt, resolvedAt + intervalMs).changes
+      this.#resolveFloodAdvertAttemptStmt.run(sent ? 1 : 0, resolvedAt, resolvedAt + intervalMs).changes
     ) === 1;
   }
 

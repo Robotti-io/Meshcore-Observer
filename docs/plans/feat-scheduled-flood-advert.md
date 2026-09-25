@@ -82,7 +82,7 @@ This approach shares one source of truth for observed quiet air without mixing r
 #### T5: Wire lifecycle, document operation, and validate on the scoped device
 
 - **Objective:** Integrate the service into application startup/shutdown and explain its RF behavior to operators.
-- **Specific changes:** Construct and wire the coordinator and scheduler in `src/index.js`, start after dependencies are ready, and stop before `radioManager.stop()`. Update README and `.env.example` with the 47-hour default and minimum interval, startup-only setting, restart recovery, and the fact that flood adverts are retransmitted by repeaters. Perform manual Companion command validation only on COM4; leave the active COM3 instance untouched.
+- **Specific changes:** Construct and wire the coordinator and scheduler in `src/index.js`, start after dependencies are ready, and stop before `radioManager.stop()`. Update README and `.env.example` with the 47-hour default, minimum interval, startup-only setting, restart recovery, and the fact that flood adverts are retransmitted by repeaters. Perform manual Companion command validation only on COM4; leave the active COM3 instance untouched.
 - **Definition of done:** The feature starts and stops with the observer, reports failures through the structured logger, documentation describes the configured behavior accurately, and the hardware check confirms the advert command and response on COM4 only.
 - **Expected tests / validation:** Bootstrap/lifecycle tests or focused wiring tests as supported by the existing suite; full `npm test` and `npm run lint`; manual test checklist records device/port COM4 and does not connect to COM3.
 
