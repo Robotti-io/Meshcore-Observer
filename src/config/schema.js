@@ -50,10 +50,11 @@ export const configSchema = {
     botReplyQueue: {
       type: 'object',
       additionalProperties: false,
-      required: ['quietMs', 'ttlMs'],
+      required: ['quietMs', 'ttlMs', 'repeatCheckTimeoutMs'],
       properties: {
         quietMs: { type: 'integer', minimum: 0 },
-        ttlMs: { type: 'integer', minimum: 0 }
+        ttlMs: { type: 'integer', minimum: 0 },
+        repeatCheckTimeoutMs: { type: 'integer', minimum: 0 }
       }
     },
     floodAdvert: {

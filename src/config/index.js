@@ -106,7 +106,13 @@ function readLogging(env) {
 function readBotReplyQueue(env) {
   return {
     quietMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_QUIET_MS', 5000),
-    ttlMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_TTL_MS', 60000)
+    ttlMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_TTL_MS', 60000),
+    // How long a bot waits, after sending a reply, to hear that exact
+    // plaintext echoed back on the same channel (necessarily a rebroadcast
+    // by another node - see channel-bot.js's #checkForRepeat) before giving
+    // up and counting it unconfirmed. GRP_TXT has no protocol ACK to wait on
+    // instead (same reason quietMs exists above).
+    repeatCheckTimeoutMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS', 30000)
   };
 }
 

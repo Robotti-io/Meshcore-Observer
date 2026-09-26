@@ -206,7 +206,14 @@ async function main() {
   radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
   const bots = config.bots.map((botConfig) => {
-    const bot = new ChannelBot({ radioManager, botConfig, logger, replyQueue, nodeRegistry });
+    const bot = new ChannelBot({
+      radioManager,
+      botConfig,
+      logger,
+      replyQueue,
+      nodeRegistry,
+      repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
+    });
     botsByName.set(botConfig.name, bot);
     return { name: botConfig.name, enabled: botConfig.enabled, bot };
   });

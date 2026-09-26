@@ -2,6 +2,7 @@ import { Packet } from '@liamcottle/meshcore.js';
 import { normalizeRawPacketEvent } from '../packets/packet-normalizer.js';
 import { calculatePacketHash } from '../packets/packet-hash.js';
 import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
+import { RepeatCheckTracker } from './repeat-check-tracker.js';
 import { channelHashForKey } from './channel-key.js';
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
@@ -9,6 +10,10 @@ import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.j
 
 const PAYLOAD_TYPE_GRP_TXT = 0x05;
 const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
+// Matches config/index.js's PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS default -
+// only used when a caller (e.g. a test) constructs a bot without threading
+// the configured value through.
+const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 30000;
 
 function formatRelativeAge(timestamp, now) {
   if (timestamp === undefined || timestamp === null) {
@@ -87,11 +92,14 @@ export class ChannelBot {
   #nodeRegistry;
   #logger;
   #deduplicator;
+  #repeatCheckTracker;
   #channelIdx = null;
   #channelSecret = null;
   #channelHash = null;
   #ready = false;
   #repliesSent = 0;
+  #repeatsConfirmed = 0;
+  #repeatsUnconfirmed = 0;
   #replyQueue;
   #now;
   #onRadioConnected = null;
@@ -116,9 +124,11 @@ export class ChannelBot {
     botConfig,
     logger,
     deduplicator = new PacketDeduplicator(),
+    repeatCheckTimeoutMs = DEFAULT_REPEAT_CHECK_TIMEOUT_MS,
+    now = () => Date.now(),
+    repeatCheckTracker = new RepeatCheckTracker({ timeoutMs: repeatCheckTimeoutMs, now }),
     replyQueue,
-    nodeRegistry,
-    now = () => Date.now()
+    nodeRegistry
   }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
@@ -132,6 +142,7 @@ export class ChannelBot {
     this.#now = now;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
+    this.#repeatCheckTracker = repeatCheckTracker;
 
     if (this.#lookupCommands.length > 0 && !nodeRegistry) {
       throw new Error(`bot "${this.#name}" has a lookup command but no nodeRegistry was provided`);
@@ -211,6 +222,16 @@ export class ChannelBot {
     return this.#repliesSent;
   }
 
+  /** Replies confirmed rebroadcast onto the mesh (see #checkForRepeat). */
+  getRepeatsConfirmed() {
+    return this.#repeatsConfirmed;
+  }
+
+  /** Replies whose repeat-check window elapsed with no confirmed rebroadcast heard. */
+  getRepeatsUnconfirmed() {
+    return this.#repeatsUnconfirmed;
+  }
+
   async #setup() {
     this.#ready = false;
     const result = await ensureChannel({
@@ -280,12 +301,27 @@ export class ChannelBot {
     const cipherMac = payload.subarray(1, 3);
     const ciphertext = payload.subarray(3);
     const decrypted = decryptGroupText(ciphertext, cipherMac, this.#channelSecret);
-    if (!decrypted || !decrypted.sender) {
+    if (!decrypted) {
       // Channel hash matched (1-in-256 chance of a coincidental collision
-      // with an unrelated channel) but the MAC didn't verify, or the
-      // plaintext had no "sender: " prefix to parse - never log the
-      // secret/ciphertext itself, just that this happened.
-      this.#logger.debug('bots.channelBot', 'GRP_TXT on this channel failed to decrypt or had no sender prefix', {
+      // with an unrelated channel) but the MAC didn't verify - never log
+      // the secret/ciphertext itself, just that this happened.
+      this.#logger.debug('bots.channelBot', 'GRP_TXT on this channel failed to decrypt', {
+        bot: this.#name,
+        channel: this.#channelName
+      });
+      return;
+    }
+
+    // Checked before the sender-prefix bail below: our own reply templates
+    // never carry a "name: " prefix, so a rebroadcast of our own reply
+    // decrypts with sender: null and would otherwise never reach any check
+    // at all. Any successfully-decrypted plaintext is fair game here -
+    // repeat-confirmation doesn't require a sender to attribute the message
+    // to, unlike trigger-matching below.
+    this.#checkForRepeat(decrypted.text, hopCountFor(packet));
+
+    if (!decrypted.sender) {
+      this.#logger.debug('bots.channelBot', 'GRP_TXT on this channel had no sender prefix', {
         bot: this.#name,
         channel: this.#channelName
       });
@@ -512,6 +548,51 @@ export class ChannelBot {
     await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
+
+    // Registered after the send resolves rather than before: only a
+    // reply that actually went out is worth watching for an echo. See
+    // #checkForRepeat for how a later heard packet resolves this.
+    const expired = this.#repeatCheckTracker.register(message, { sender, trigger, hash });
+    this.#reportExpiredRepeatChecks(expired);
+  }
+
+  /**
+   * Called for every successfully-decrypted GRP_TXT on this channel,
+   * including ones with no sender prefix (see #handleRawPacket). MeshCore
+   * flood relaying leaves a GRP_TXT's encrypted payload unchanged as it
+   * hops, and this device can't hear its own outgoing transmission
+   * (half-duplex), so an exact plaintext match here is necessarily a
+   * rebroadcast of a reply this bot sent, not an echo of our own TX.
+   */
+  #checkForRepeat(text, hopCount) {
+    const { confirmed, expired } = this.#repeatCheckTracker.checkAndConsume(text);
+    this.#reportExpiredRepeatChecks(expired);
+
+    if (!confirmed) {
+      return;
+    }
+
+    this.#repeatsConfirmed += 1;
+    this.#logger.info('bots.channelBot', 'confirmed reply was repeated on the mesh', {
+      bot: this.#name,
+      sender: confirmed.meta.sender,
+      trigger: confirmed.meta.trigger,
+      hash: confirmed.meta.hash,
+      hopCount,
+      elapsedMs: confirmed.elapsedMs
+    });
+  }
+
+  #reportExpiredRepeatChecks(expired) {
+    for (const meta of expired) {
+      this.#repeatsUnconfirmed += 1;
+      this.#logger.debug('bots.channelBot', 'reply repeat not confirmed within timeout', {
+        bot: this.#name,
+        sender: meta.sender,
+        trigger: meta.trigger,
+        hash: meta.hash
+      });
+    }
   }
 
   #lookupResponseTemplate(command, lookupOutcome) {
