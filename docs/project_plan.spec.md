@@ -1,4 +1,4 @@
-# MeshCore Observer JS
+# Robotti MeshCore Observer
 
 ## Implementation Plan and Specification
 
@@ -14,7 +14,7 @@
 
 ## 1. Purpose
 
-Build a maintainable JavaScript MeshCore observer that replaces the current customized Python installation while preserving the behavior that is currently useful:
+Build Robotti MeshCore Observer as a maintainable JavaScript application that replaces the current customized Python installation while preserving the behavior that is currently useful:
 
 * Connect to a Heltec V3 running MeshCore Companion firmware over USB serial.
 * Recover automatically when the radio is unavailable or not ready during Windows startup.

@@ -1,4 +1,6 @@
-# MeshCore Observer
+# Robotti MeshCore Observer
+
+![Robotti MeshCore Observer](assets/branding/robotti-meshcore-observer-hero-wordmark.png)
 
 A Node.js observer for a Heltec V3 (or compatible) radio running MeshCore
 Companion firmware. It connects over USB serial (or TCP, for a
@@ -349,8 +351,8 @@ assets by `MetricsServer`. `dashboard-logic.js` holds every pure,
 DOM-free piece of client logic (range handling, response-to-chart-data
 shaping, formatting) and is unit-tested directly under Node - see
 `test/web/client/dashboard-logic.test.js`. Since nothing here drives an
-actual browser, `docs/dashboard-manual-check.md` is a short checklist to
-run through by hand after changes to the dashboard.
+actual browser, browser layout and interaction behavior is not covered by
+automated tests.
 
 Packet activity (the line chart), the packet-types table, the packet-types
 pie chart, and a "Bot commands" section (one pie chart + table + total

@@ -27,7 +27,7 @@
 - A Chart.js doughnut chart is created for every configured bot. Charts are updated and table bodies are rebuilt on range refreshes, including for offscreen sections.
 - The page presents live gauges and range-scoped reports together. Notes describe their scopes, but there is no persistent selected-range context or last-updated/stale indicator. Range selection state is visual-only; charts have no text alternative. Tables do not have dedicated narrow-screen overflow containers.
 - The dashboard is one long page. An in-page anchor menu would help short-term scanning but would not provide a structure that scales as new features are added.
-- Existing validation lives in `test/web/metrics-server.test.js` and `test/web/client/dashboard-logic.test.js`; manual checks are documented in `docs/dashboard-manual-check.md`.
+- Existing automated validation lives in `test/web/metrics-server.test.js` and `test/web/client/dashboard-logic.test.js`.
 
 ## Proposed Approach
 
@@ -36,7 +36,7 @@
 3. Establish the live connection early and load the initial dashboard sections independently. Show loading, last-updated, and stale states so partial/slower sections do not make the whole page appear unresponsive.
 4. Restructure the UI as a high-level metrics overview with dedicated sub-pages for detailed views. Keep the selected range in shared in-memory application state so in-app navigation preserves it and a full page reload resets it.
 5. Reduce offscreen chart work, retain textual data as a usable fallback, and improve range-control semantics, scope labels, empty states, and mobile table handling.
-6. Validate behavior with focused Node tests plus the existing manual browser checklist, expanded to cover request volume, range races, slow endpoints, cross-view range consistency, accessibility basics, and narrow viewports.
+6. Validate behavior with focused Node tests and browser inspection covering request volume, range races, slow endpoints, cross-view range consistency, accessibility basics, and narrow viewports.
 
 ### Approved API direction
 
@@ -56,7 +56,6 @@ One selected range applies to every historical/aggregated metric across the over
 - `src/metrics/store.js` — grouped bot query and reuse/aggregation methods, using prepared parameterized statements.
 - `test/web/metrics-server.test.js` - summary/detail route validation, response shape, and aggregate correctness.
 - `test/web/client/dashboard-logic.test.js` and any focused client tests - latest-request-wins/coalescing helpers, in-app navigation, and shared range state.
-- `docs/dashboard-manual-check.md` — repeatable checks for refresh behavior, accessibility, and responsive layout.
 
 No configuration, persistence schema, dependency, logging-contract, authentication, or deployment changes are expected.
 
@@ -81,35 +80,35 @@ No configuration, persistence schema, dependency, logging-contract, authenticati
 - **Objective:** Show live connection state promptly and make stale data recognizable.
 - **Specific changes:** Open the EventSource during bootstrap without waiting for historical range or repeater requests; render its initial snapshot as the live source of truth; load range data and repeaters independently; display last successful update time and stale/loading/error states per relevant section; handle malformed SSE data without terminating the rest of the UI.
 - **Definition of done:** A slow range or repeater query does not delay the live connection indicator or snapshot; disconnect and recovery states are understandable; sections can fail independently while other content remains usable.
-- **Expected tests / validation:** Add focused client logic tests where pure helpers are introduced; extend manual checks to simulate a delayed/failing API response and an SSE disconnect/reconnect.
+- **Expected tests / validation:** Add focused client logic tests where pure helpers are introduced; inspect behavior with delayed/failing API responses and an SSE disconnect/reconnect.
 
 ### T4: Create overview and scalable detail sub-pages
 
 - **Objective:** Replace the long single-page layout with an overview landing page and a structure that can accommodate future capabilities.
 - **Specific changes:** Create a high-level overview and dedicated detail sub-pages for packet activity/types, MQTT broker deliveries, bot/reply metrics, and repeaters. Use a small client-side navigation mechanism compatible with the no-build-step architecture. Keep range state in shared in-memory application state and preserve it across sub-page navigation; reset to the default on full document reload. Apply that single range to all historical/aggregated metric views. Label point-in-time connectivity and current inventory explicitly as Live.
 - **Definition of done:** The landing view is a concise overview with clear paths to detail; each detail view has a focused hierarchy; navigating between views retains the current range and all range-aware metrics use it; reloading the page resets to the default range; live state is not presented as a selected-range aggregate.
-- **Expected tests / validation:** Add client logic tests for navigation and range-state behavior. Update `docs/dashboard-manual-check.md` to verify range preservation across views, default reset after full reload, and correct live versus historical labels.
+- **Expected tests / validation:** Add client logic tests for navigation and range-state behavior. Verify range preservation across views, default reset after full reload, and correct live versus historical labels in a browser.
 
 ### T5: Reduce offscreen rendering work and improve chart alternatives
 
 - **Objective:** Keep rendering cost proportional to visible content and preserve readable data without charts.
 - **Specific changes:** Defer creating per-bot charts until their cards are visible, using browser-native visibility observation where suitable; avoid unnecessary chart/table updates when response values are unchanged; give each chart an accessible name and adjacent textual summary; retain tables as the exact-value fallback when Chart.js fails.
 - **Definition of done:** Offscreen bot charts do not all initialize on page load; chart descriptions identify the represented metric and selected range; exact values remain available without Chart.js.
-- **Expected tests / validation:** Manual browser inspection with many configured bots, with Chart.js unavailable, and with keyboard/screen-reader-oriented navigation. Avoid adding dependencies.
+- **Expected tests / validation:** Browser inspection with many configured bots, with Chart.js unavailable, and with keyboard/screen-reader-oriented navigation. Avoid adding dependencies.
 
 ### T6: Improve accessible controls and responsive detail views
 
 - **Objective:** Keep the new views usable with assistive technology and on narrow screens.
 - **Specific changes:** Set `aria-pressed` on range controls, announce connection/freshness changes accessibly, add accessible chart descriptions and textual summaries, show explicit empty states for unconfigured brokers/bots, and wrap wide tables in locally scrollable containers. Review page navigation and focus behavior on view changes.
 - **Definition of done:** Range selection and navigation state are accessible; chart meaning and exact values remain available without Chart.js; empty sections are explained; tables do not force whole-page horizontal scrolling at narrow widths.
-- **Expected tests / validation:** Update the manual checklist with keyboard-only, screen-reader-oriented, empty-state, and narrow viewport checks; inspect light and dark color schemes.
+- **Expected tests / validation:** Inspect keyboard-only and screen-reader-oriented navigation, empty states, narrow viewports, and light and dark color schemes in a browser.
 
 ### T7: Measure and document the improvement
 
 - **Objective:** Verify the request and rendering improvements against the current behavior.
-- **Specific changes:** Extend the manual checklist with a repeatable baseline/comparison for range requests per SSE tick, refresh overlap behavior, and representative chart rendering with multiple bots. Document the observed environment and counts rather than adding permanent telemetry or a new benchmark dependency.
-- **Definition of done:** The checklist records the request reduction for the overview and active detail view, confirms bounded refresh behavior under delayed responses and range consistency across navigation, and includes browser checks at desktop and mobile viewport sizes.
-- **Expected tests / validation:** Run the repository's existing test and lint scripts during implementation; complete the updated manual browser checklist. These are planned implementation validations and are not run as part of this planning task.
+- **Specific changes:** Compare range requests per SSE tick, refresh overlap behavior, and representative chart rendering with multiple bots. Record the observed environment and counts in the feature review rather than adding permanent telemetry or a benchmark dependency.
+- **Definition of done:** The feature review records the request reduction for the overview and active detail view, confirms bounded refresh behavior under delayed responses and range consistency across navigation, and includes browser observations at desktop and mobile viewport sizes.
+- **Expected tests / validation:** Run the repository's existing test and lint scripts during implementation, then inspect the implemented dashboard in a browser. These are planned implementation validations and are not run as part of this planning task.
 
 ## Risks and Edge Cases
 
@@ -142,4 +141,4 @@ No configuration, persistence schema, dependency, logging-contract, authenticati
 4. **T4** — create the scalable overview/detail navigation and shared range state.
 5. **T5** - reduce hidden chart work after the detail views are established.
 6. **T6** - improve accessible controls, empty states, focus behavior, and responsive tables.
-7. **T7** - verify request, responsiveness, navigation, and usability outcomes and update the manual checklist.
+7. **T7** - verify request, responsiveness, navigation, and usability outcomes and record the review results.
