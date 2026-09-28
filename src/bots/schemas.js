@@ -16,6 +16,13 @@
 // rather than a second hand-copied one.
 export const LOOKUP_RESPONSE_FIELDS = ['foundResponse', 'notFoundResponse', 'ambiguousResponse', 'invalidResponse'];
 
+// The two templates a 'stats'-kind command requires - deliberately named
+// apart from LOOKUP_RESPONSE_FIELDS's invalidResponse (a distinct name,
+// not reused) so bots-config-loader.js's per-field forbid-lists for each
+// kind never overlap. Exported for the same reason LOOKUP_RESPONSE_FIELDS
+// is - one shared list, not a second hand-copied one.
+export const STATS_RESPONSE_FIELDS = ['response', 'usageResponse'];
+
 export const botConfigSchema = {
   type: 'object',
   additionalProperties: false,
@@ -38,20 +45,24 @@ export const botConfigSchema = {
           // Defaults to 'exact' (today's only behavior - a plain trigger
           // -> single response template). 'lookup' opts a command into
           // argument parsing (see channel-bot.js) and requires the four
-          // outcome-specific templates below instead. Which fields are
+          // outcome-specific templates below instead. 'stats' also opts
+          // into argument parsing (a range token - see stats-range.js)
+          // but only needs `response` (the success case) plus
+          // `usageResponse` (missing/unrecognized range). Which fields are
           // actually required/forbidden per `kind` is enforced in
           // bots-config-loader.js, not here - AJV's strict mode (see
           // src/validation/ajv.js) can't express an if/kind-then-required
           // conditional without also duplicating every field's type
           // schema into each branch, which was worse than one plain JS
           // check.
-          kind: { enum: ['exact', 'lookup'] },
+          kind: { enum: ['exact', 'lookup', 'stats'] },
           response: { type: 'string', minLength: 1 },
           overflowResponse: { type: 'string', minLength: 1 },
           foundResponse: { type: 'string', minLength: 1 },
           notFoundResponse: { type: 'string', minLength: 1 },
           ambiguousResponse: { type: 'string', minLength: 1 },
-          invalidResponse: { type: 'string', minLength: 1 }
+          invalidResponse: { type: 'string', minLength: 1 },
+          usageResponse: { type: 'string', minLength: 1 }
         }
       }
     }

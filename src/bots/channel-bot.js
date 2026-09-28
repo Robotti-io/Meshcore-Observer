@@ -3,6 +3,7 @@ import { normalizeRawPacketEvent } from '../packets/packet-normalizer.js';
 import { calculatePacketHash } from '../packets/packet-hash.js';
 import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
 import { RepeatCheckTracker } from './repeat-check-tracker.js';
+import { resolveStatsRange } from './stats-range.js';
 import { channelHashForKey } from './channel-key.js';
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
@@ -89,7 +90,9 @@ export class ChannelBot {
   #maxMessageBytes;
   #commands;
   #lookupCommands;
+  #statsCommands;
   #nodeRegistry;
+  #statsReporter;
   #logger;
   #deduplicator;
   #repeatCheckTracker;
@@ -128,7 +131,8 @@ export class ChannelBot {
     now = () => Date.now(),
     repeatCheckTracker = new RepeatCheckTracker({ timeoutMs: repeatCheckTimeoutMs, now }),
     replyQueue,
-    nodeRegistry
+    nodeRegistry,
+    statsReporter
   }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
@@ -138,7 +142,9 @@ export class ChannelBot {
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
     this.#lookupCommands = botConfig.commands.filter((command) => command.kind === 'lookup');
+    this.#statsCommands = botConfig.commands.filter((command) => command.kind === 'stats');
     this.#nodeRegistry = nodeRegistry;
+    this.#statsReporter = statsReporter;
     this.#now = now;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
@@ -146,6 +152,9 @@ export class ChannelBot {
 
     if (this.#lookupCommands.length > 0 && !nodeRegistry) {
       throw new Error(`bot "${this.#name}" has a lookup command but no nodeRegistry was provided`);
+    }
+    if (this.#statsCommands.length > 0 && !statsReporter) {
+      throw new Error(`bot "${this.#name}" has a stats command but no statsReporter was provided`);
     }
     // sendQueuedReply() intentionally lets a send failure propagate (see
     // its own doc comment) for a real ReplyQueue to catch/count/log - this
@@ -350,6 +359,17 @@ export class ChannelBot {
       }
     }
 
+    // A 'stats' command's argument (its range token, e.g. "1h") rides
+    // along in this same `query` field a 'lookup' command's argument
+    // already uses - sendQueuedReply knows which interpretation applies
+    // from command.kind, so no separate field/DB column is needed.
+    if (!command) {
+      const statsMatch = this.#matchStatsCommand(decrypted.text);
+      if (statsMatch) {
+        ({ command, query } = statsMatch);
+      }
+    }
+
     if (!command) {
       this.#logger.debug('bots.channelBot', 'decrypted message did not match any configured trigger', {
         bot: this.#name,
@@ -481,6 +501,29 @@ export class ChannelBot {
   }
 
   /**
+   * Checks `text` against every configured 'stats' command's trigger.
+   * Unlike #matchLookupCommand, this does no store work at all - it just
+   * captures the raw range token (e.g. "1h"), possibly empty/unrecognized.
+   * Validity is resolved later, in sendQueuedReply, at actual send time:
+   * a queued item is re-read from MetricsStore at dispatch (see
+   * reply-queue.js), not kept as this object, so there's nothing to gain
+   * by resolving the range here, and resolving it fresh at send time means
+   * the numbers reflect "now" rather than several-seconds-stale match time.
+   */
+  #matchStatsCommand(text) {
+    for (const command of this.#statsCommands) {
+      const { trigger } = command;
+      if (text === trigger) {
+        return { command, query: '' };
+      }
+      if (text.startsWith(`${trigger} `)) {
+        return { command, query: text.slice(trigger.length + 1).trim() };
+      }
+    }
+    return null;
+  }
+
+  /**
    * Renders and sends the reply for one queued item, then records its
    * own bookkeeping (counters, logging) - reply-lifecycle metrics
    * persistence lives in the shared ReplyQueue instead (see reply-queue.js),
@@ -518,12 +561,30 @@ export class ChannelBot {
     // time (see #matchLookupCommand) and travels with the queued item as
     // `lookupOutcome` (named apart from ReplyQueue's own `outcome` - see
     // #handleRawPacket - so the two never get confused for each other).
-    // Only that one outcome's template is ever rendered, so an 'exact'
-    // command's overflow-degradation behavior (see response-template.js)
-    // is the only kind that ever gets an `overflowTemplate`.
-    const template =
-      command.kind === 'lookup' ? this.#lookupResponseTemplate(command, lookupOutcome) : command.response;
-    const overflowTemplate = command.kind === 'lookup' ? undefined : command.overflowResponse;
+    // A 'stats' command instead resolves its argument (`query`, the range
+    // token) here, at actual send time - see #matchStatsCommand's doc
+    // comment for why. Only one outcome's template is ever rendered for
+    // either kind, so an 'exact' command's overflow-degradation behavior
+    // (see response-template.js) is the only kind that always gets an
+    // `overflowTemplate`.
+    let template;
+    let overflowTemplate;
+    let statsValues;
+    if (command.kind === 'lookup') {
+      template = this.#lookupResponseTemplate(command, lookupOutcome);
+    } else if (command.kind === 'stats') {
+      const resolved = resolveStatsRange(query, { now: this.#now(), earliestSampleAt: this.#statsReporter.earliestSampleAt() });
+      if (resolved) {
+        statsValues = { range: query, ...this.#statsReporter.summarize(resolved) };
+        template = command.response;
+        overflowTemplate = command.overflowResponse;
+      } else {
+        template = command.usageResponse;
+      }
+    } else {
+      template = command.response;
+      overflowTemplate = command.overflowResponse;
+    }
 
     const { message, degraded } = renderResponse({
       template,
@@ -540,7 +601,8 @@ export class ChannelBot {
         lastHeard: formatRelativeAge(lastHeardAt, this.#now()),
         nodePrefix: nodePrefix ?? query,
         repeaterCount:
-          repeaterCount ?? (lookupOutcome === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined)
+          repeaterCount ?? (lookupOutcome === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined),
+        ...statsValues
       },
       maxBytes: this.#maxMessageBytes
     });

@@ -583,6 +583,51 @@ export class MetricsStore {
   }
 
   /**
+   * Total received/decoded packet volume over [start, end) - the same
+   * per-interval-delta samples queryPacketTypeTotals() sums from, just
+   * without the per-type breakdown. Backs the !stats bot command (see
+   * StatsReporter) rather than any dashboard chart.
+   *
+   * @param {{start: number, end: number}} options
+   * @returns {{received: number, decoded: number}}
+   */
+  queryPacketTotals({ start, end }) {
+    const row = this.#db
+      .prepare('SELECT SUM(packets_received) AS received, SUM(packets_decoded) AS decoded FROM metrics_samples WHERE sample_at >= ? AND sample_at < ?')
+      .get(start, end);
+    return { received: Number(row.received ?? 0), decoded: Number(row.decoded ?? 0) };
+  }
+
+  /**
+   * Distinct count of nodes with any recorded activity in [start, end) -
+   * either first heard or (re-)heard in the window. Deliberately not
+   * `queryNodeTotals()`'s `added + updated`: a node that is both newly
+   * discovered *and* re-heard again later in the same window would count
+   * twice under that sum (worse, for `all` this double-counts almost every
+   * repeater ever heard more than once). This query counts each such node
+   * once via OR rather than summing two separate conditions.
+   *
+   * @param {{start: number, end: number, type?: string}} options
+   * @returns {number}
+   */
+  countActiveNodesInRange({ start, end, type = '' }) {
+    const { total } = this.#db
+      .prepare(
+        `
+        SELECT COUNT(*) AS total
+        FROM nodes
+        WHERE (? = '' OR type = ?)
+          AND (
+            (first_heard_at >= ? AND first_heard_at < ?)
+            OR (last_heard_at >= ? AND last_heard_at < ?)
+          )
+      `
+      )
+      .get(type, type, start, end, start, end);
+    return Number(total);
+  }
+
+  /**
    * Per-trigger *sent* reply counts for one bot over [start, end) - for
    * that bot's command pie chart and table. A thin filtered view over
    * bot_replies (status = 'sent'); see queryBotReplyOutcomeTotals() for the

@@ -14,6 +14,7 @@ import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
 import { NodeRegistry } from './nodes/node-registry.js';
+import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import { MetricsSampler } from './metrics/sampler.js';
@@ -97,6 +98,7 @@ async function main() {
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
   const nodeRegistry = new NodeRegistry({ logger, store: metricsStore });
+  const statsReporter = new StatsReporter({ store: metricsStore });
   const airtimeCoordinator = new AirtimeCoordinator({ quietMs: config.botReplyQueue.quietMs });
   const replyQueue = new ReplyQueue({
     ttlMs: config.botReplyQueue.ttlMs,
@@ -212,6 +214,7 @@ async function main() {
       logger,
       replyQueue,
       nodeRegistry,
+      statsReporter,
       repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
     });
     botsByName.set(botConfig.name, bot);
