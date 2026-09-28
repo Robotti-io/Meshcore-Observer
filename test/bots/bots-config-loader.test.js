@@ -147,3 +147,52 @@ test('rejects an exact (non-lookup) command that carries a lookup-only field', (
     /has foundResponse/
   );
 });
+
+const VALID_STATS_COMMAND = {
+  trigger: '!stats',
+  kind: 'stats',
+  response: '📊 {range}: {packetsReceived} pkts, {packetsDecoded} decoded, {repliesSent} replies, {repeatersHeard} repeaters',
+  usageResponse: '⚠️ usage: !stats <1h|6h|1d|3d|all>'
+};
+
+test('loads a well-formed kind: "stats" command', () => {
+  const bot = { ...VALID_BOT, commands: [VALID_STATS_COMMAND] };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].commands[0].kind, 'stats');
+});
+
+test('rejects a kind: "stats" command missing usageResponse', () => {
+  const withoutUsage = { ...VALID_STATS_COMMAND };
+  delete withoutUsage.usageResponse;
+  const bot = { ...VALID_BOT, commands: [withoutUsage] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /missing usageResponse/
+  );
+});
+
+test('rejects a kind: "stats" command missing response', () => {
+  const withoutResponse = { ...VALID_STATS_COMMAND };
+  delete withoutResponse.response;
+  const bot = { ...VALID_BOT, commands: [withoutResponse] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /missing response/
+  );
+});
+
+test('rejects a kind: "stats" command that carries a lookup-only field', () => {
+  const bot = { ...VALID_BOT, commands: [{ ...VALID_STATS_COMMAND, foundResponse: 'not allowed here' }] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /must not have foundResponse/
+  );
+});
+
+test('rejects an exact (non-stats) command that carries usageResponse', () => {
+  const bot = { ...VALID_BOT, commands: [{ trigger: '!echo', response: 'hi', usageResponse: 'not allowed here' }] };
+  assert.throws(
+    () => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)),
+    /has usageResponse/
+  );
+});

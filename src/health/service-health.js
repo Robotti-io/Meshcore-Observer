@@ -127,7 +127,9 @@ export class ServiceHealth {
         name,
         enabled,
         ready: bot.isReady(),
-        repliesSent: bot.getRepliesSent()
+        repliesSent: bot.getRepliesSent(),
+        repeatsConfirmed: bot.getRepeatsConfirmed(),
+        repeatsUnconfirmed: bot.getRepeatsUnconfirmed()
       })),
       replyQueue: this.#replyQueue.getStats()
     };

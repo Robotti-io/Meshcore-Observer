@@ -113,6 +113,22 @@ test('queryPacketTypeTotals excludes samples outside the requested window', () =
   store.close();
 });
 
+test('queryPacketTotals sums received/decoded volume across samples in the window, ignoring per-type breakdown', () => {
+  const store = openStore();
+  store.recordPacketSample(baseSample({ sampleAt: 1_000, packetsReceived: 5, packetsDecoded: 4, packetsByType: { advert: 3 } }));
+  store.recordPacketSample(baseSample({ sampleAt: 2_000, packetsReceived: 7, packetsDecoded: 2, packetsByType: { txtMsg: 2 } }));
+  store.recordPacketSample(baseSample({ sampleAt: 500_000, packetsReceived: 100, packetsDecoded: 100 }));
+
+  assert.deepEqual(store.queryPacketTotals({ start: 0, end: 100_000 }), { received: 12, decoded: 6 });
+  store.close();
+});
+
+test('queryPacketTotals returns zeroes for a window with no samples', () => {
+  const store = openStore();
+  assert.deepEqual(store.queryPacketTotals({ start: 0, end: 100_000 }), { received: 0, decoded: 0 });
+  store.close();
+});
+
 test('queryPacketHistory groups samples into backend-computed buckets bounded by maxBuckets', () => {
   const store = openStore();
   const sampleIntervalMs = 10_000;
@@ -320,6 +336,47 @@ test('queryNodeTotals excludes nodes whose first/last heard falls outside the wi
   store.upsertNode(baseNode({ heardAt: 999_999 }));
 
   assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000 }), { added: 0, updated: 0 });
+  store.close();
+});
+
+test('countActiveNodesInRange counts a node first heard in the window once', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 5_000 }));
+
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000 }), 1);
+  store.close();
+});
+
+test('countActiveNodesInRange counts a node both newly discovered and re-heard again in the same window only once, unlike naively summing queryNodeTotals\' added+updated', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 1_000 })); // first heard inside the window
+  store.upsertNode(baseNode({ heardAt: 5_000 })); // re-heard, still inside the same window
+
+  // Both conditions (first_heard_at in range, last_heard_at in range) are
+  // true for this one node - queryNodeTotals would report added:1,
+  // updated:1 for it (summing to 2, double-counting one physical node).
+  assert.deepEqual(store.queryNodeTotals({ start: 0, end: 10_000 }), { added: 1, updated: 1 });
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000 }), 1);
+  store.close();
+});
+
+test('countActiveNodesInRange counts a node re-heard in the window even though it was first heard long before', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: -1_000_000 }));
+  store.upsertNode(baseNode({ heardAt: 5_000 }));
+
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000 }), 1);
+  store.close();
+});
+
+test('countActiveNodesInRange excludes a node with no activity in the window, and respects a type filter', () => {
+  const store = openStore();
+  store.upsertNode(baseNode({ heardAt: 999_999 }));
+  store.upsertNode(baseNode({ publicKeyHex: 'AA'.repeat(32), heardAt: 5_000, type: 'CHAT' }));
+
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000 }), 1);
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000, type: 'REPEATER' }), 0);
+  assert.equal(store.countActiveNodesInRange({ start: 0, end: 10_000, type: 'CHAT' }), 1);
   store.close();
 });
 

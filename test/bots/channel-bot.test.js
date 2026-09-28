@@ -835,6 +835,86 @@ test('!lookup still respects the configured minimum hop count', async () => {
   assert.equal(radioManager.commandCalls.length, 0);
 });
 
+// --- Repeat-check (did our own reply get rebroadcast?) ----------------
+
+test('confirms a repeat when the exact sent reply is heard again on the same channel', async () => {
+  const radioManager = fakeRadioManager();
+  const logger = silentLogger();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  const sentMessage = radioManager.commandCalls[0].message;
+  assert.equal(bot.getRepeatsConfirmed(), 0);
+
+  // A rebroadcast leaves the encrypted payload (and so the decrypted
+  // plaintext) unchanged as it hops - simulate a repeater echoing our own
+  // reply back, with no "name: " prefix, same as this bot actually sends.
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['bb'], text: sentMessage, timestamp: 1700000002 }));
+  await flush();
+
+  assert.equal(bot.getRepeatsConfirmed(), 1);
+  assert.equal(bot.getRepeatsUnconfirmed(), 0);
+  const confirmation = logger.calls.info.find((call) => call.message.includes('confirmed reply was repeated'));
+  assert.ok(confirmation, 'expected an info log confirming the repeat');
+  assert.equal(confirmation.meta.trigger, '!echo');
+  assert.equal(confirmation.meta.hopCount, 1);
+});
+
+test('a repeat is only consumed once, and an unrelated later message never confirms', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+  const sentMessage = radioManager.commandCalls[0].message;
+
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['bb'], text: sentMessage, timestamp: 1700000002 }));
+  await flush();
+  assert.equal(bot.getRepeatsConfirmed(), 1);
+
+  // A second, later echo of the same text must not double-count.
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['cc'], text: sentMessage, timestamp: 1700000003 }));
+  await flush();
+  assert.equal(bot.getRepeatsConfirmed(), 1);
+});
+
+test('reports a reply unconfirmed once its repeat-check timeout elapses with nothing heard', async () => {
+  const radioManager = fakeRadioManager();
+  const logger = silentLogger();
+  let clock = 1_000_000;
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger,
+    now: () => clock,
+    repeatCheckTimeoutMs: 5000
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+  assert.equal(bot.getRepeatsUnconfirmed(), 0);
+
+  clock += 5001;
+  // Lazy eviction only runs on the next tracker activity - any further
+  // heard packet on this channel is enough to trigger it.
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['bb'], text: 'Jeymz: !test' }));
+  await flush();
+
+  assert.equal(bot.getRepeatsUnconfirmed(), 1);
+  assert.equal(bot.getRepeatsConfirmed(), 0);
+  const timeout = logger.calls.debug.find((call) => call.message.includes('not confirmed within timeout'));
+  assert.ok(timeout, 'expected a debug log reporting the unconfirmed timeout');
+  assert.equal(timeout.meta.trigger, '!echo');
+});
+
 test('an exact-match command on the same bot is unaffected by a configured lookup command', async () => {
   const radioManager = fakeRadioManager();
   const nodeRegistry = fakeNodeRegistry(() => ({ status: 'not_found', query: 'x' }));
@@ -852,4 +932,144 @@ test('an exact-match command on the same bot is unaffected by a configured looku
 
   assert.equal(radioManager.commandCalls[0].message, 'pong Jeymz');
   assert.equal(nodeRegistry.calls.length, 0);
+});
+
+// --- !stats <range> (kind: 'stats') commands ---------------------------
+
+function fakeStatsReporter(summary = {}, { earliestSampleAt = 0 } = {}) {
+  const summarizeCalls = [];
+  return {
+    summarizeCalls,
+    summarize: (range) => {
+      summarizeCalls.push(range);
+      return { packetsReceived: 0, packetsDecoded: 0, repliesSent: 0, repeatersHeard: 0, ...summary };
+    },
+    earliestSampleAt: () => earliestSampleAt
+  };
+}
+
+function statsCommand(overrides = {}) {
+  return {
+    trigger: '!stats',
+    kind: 'stats',
+    response: '📊 {range}: {packetsReceived} pkts, {packetsDecoded} decoded, {repliesSent} replies, {repeatersHeard} repeaters',
+    usageResponse: '⚠️ usage: !stats <1h|6h|1d|3d|all>',
+    ...overrides
+  };
+}
+
+test('constructor throws if a stats command is configured without a statsReporter', () => {
+  const radioManager = fakeRadioManager();
+  assert.throws(
+    () =>
+      new ChannelBot({
+        radioManager,
+        botConfig: baseBotConfig({ commands: [statsCommand()] }),
+        logger: silentLogger()
+      }),
+    /statsReporter/
+  );
+});
+
+test('!stats <range> replies with the summarized numbers for the resolved window', async () => {
+  const radioManager = fakeRadioManager();
+  const now = 1_700_000_000_000;
+  const statsReporter = fakeStatsReporter({ packetsReceived: 142, packetsDecoded: 98, repliesSent: 3, repeatersHeard: 2 });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [statsCommand()] }),
+    logger: silentLogger(),
+    statsReporter,
+    now: () => now
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !stats 1h' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls.length, 1);
+  assert.equal(radioManager.commandCalls[0].message, '📊 1h: 142 pkts, 98 decoded, 3 replies, 2 repeaters');
+  assert.equal(statsReporter.summarizeCalls.length, 1);
+  assert.equal(statsReporter.summarizeCalls[0].end, now);
+  assert.equal(statsReporter.summarizeCalls[0].start, now - 60 * 60 * 1000);
+});
+
+test('!stats all resolves its window against the store\'s earliest sample, not process start', async () => {
+  const radioManager = fakeRadioManager();
+  const now = 1_700_000_000_000;
+  const earliestSampleAt = now - 30 * 24 * 60 * 60 * 1000;
+  const statsReporter = fakeStatsReporter({}, { earliestSampleAt });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [statsCommand()] }),
+    logger: silentLogger(),
+    statsReporter,
+    now: () => now
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !stats all' }));
+  await flush();
+
+  assert.equal(statsReporter.summarizeCalls[0].start, earliestSampleAt);
+  assert.equal(statsReporter.summarizeCalls[0].end, now);
+});
+
+test('a bare !stats with no range replies with usageResponse and never calls the reporter', async () => {
+  const radioManager = fakeRadioManager();
+  const statsReporter = fakeStatsReporter();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [statsCommand()] }),
+    logger: silentLogger(),
+    statsReporter
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !stats' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls[0].message, '⚠️ usage: !stats <1h|6h|1d|3d|all>');
+  assert.equal(statsReporter.summarizeCalls.length, 0);
+});
+
+test('an unrecognized !stats range replies with usageResponse and never calls the reporter', async () => {
+  const radioManager = fakeRadioManager();
+  const statsReporter = fakeStatsReporter();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [statsCommand()] }),
+    logger: silentLogger(),
+    statsReporter
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !stats 5h' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls[0].message, '⚠️ usage: !stats <1h|6h|1d|3d|all>');
+  assert.equal(statsReporter.summarizeCalls.length, 0);
+});
+
+test('a !stats command on one bot does not affect an unrelated exact command on the same bot', async () => {
+  const radioManager = fakeRadioManager();
+  const statsReporter = fakeStatsReporter({ packetsReceived: 1, packetsDecoded: 1, repliesSent: 1, repeatersHeard: 1 });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [{ trigger: '!echo', response: 'pong {sender}' }, statsCommand()] }),
+    logger: silentLogger(),
+    statsReporter
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls[0].message, 'pong Jeymz');
+  assert.equal(statsReporter.summarizeCalls.length, 0);
 });

@@ -37,10 +37,12 @@ function fakePacketPipeline() {
   };
 }
 
-function fakeBot({ ready = false, repliesSent = 0 } = {}) {
+function fakeBot({ ready = false, repliesSent = 0, repeatsConfirmed = 0, repeatsUnconfirmed = 0 } = {}) {
   return {
     isReady: () => ready,
-    getRepliesSent: () => repliesSent
+    getRepliesSent: () => repliesSent,
+    getRepeatsConfirmed: () => repeatsConfirmed,
+    getRepeatsUnconfirmed: () => repeatsUnconfirmed
   };
 }
 
@@ -68,7 +70,9 @@ test('reports a sensible initial snapshot before anything has happened', () => {
   assert.deepEqual(snapshot.mqtt, {
     okimesh: { connected: false, lastConnectedAt: null, deliveries: { sent: 0, skipped: 0, failed: 0 } }
   });
-  assert.deepEqual(snapshot.bots, [{ name: 'echo', enabled: true, ready: false, repliesSent: 0 }]);
+  assert.deepEqual(snapshot.bots, [
+    { name: 'echo', enabled: true, ready: false, repliesSent: 0, repeatsConfirmed: 0, repeatsUnconfirmed: 0 }
+  ]);
 });
 
 test('the first radio.connected does not count as a reconnect; subsequent ones do', () => {
@@ -257,8 +261,22 @@ test('reports multiple independent bots, including a disabled one', () => {
 
   const snapshot = health.snapshot();
   assert.equal(snapshot.bots.length, 2);
-  assert.deepEqual(snapshot.bots[0], { name: 'echo', enabled: true, ready: true, repliesSent: 2 });
-  assert.deepEqual(snapshot.bots[1], { name: 'weather', enabled: false, ready: false, repliesSent: 0 });
+  assert.deepEqual(snapshot.bots[0], {
+    name: 'echo',
+    enabled: true,
+    ready: true,
+    repliesSent: 2,
+    repeatsConfirmed: 0,
+    repeatsUnconfirmed: 0
+  });
+  assert.deepEqual(snapshot.bots[1], {
+    name: 'weather',
+    enabled: false,
+    ready: false,
+    repliesSent: 0,
+    repeatsConfirmed: 0,
+    repeatsUnconfirmed: 0
+  });
 });
 
 test('defaults replyQueue to a zero size when none is provided', () => {

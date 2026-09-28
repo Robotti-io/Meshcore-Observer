@@ -131,7 +131,7 @@ response-template commands:
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup" },
+      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup, !stats" },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
       { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
       {
@@ -141,6 +141,12 @@ response-template commands:
         "notFoundResponse": "❓ @[{sender}]! no repeater with prefix {query} heard in our list of {repeaterCount} repeaters.",
         "ambiguousResponse": "⚠️ @[{sender}]! {matchCount} repeaters match {query}, most recent: {name} - use more hex digits",
         "invalidResponse": "⚠️ @[{sender}]! give at least 1 byte in hex, e.g. !lookup E8"
+      },
+      {
+        "trigger": "!stats",
+        "kind": "stats",
+        "response": "📊 {range}: {packetsReceived} pkts, {packetsDecoded} decoded, {repliesSent} replies, {repeatersHeard} repeaters",
+        "usageResponse": "⚠️ usage: !stats <1h|6h|1d|3d|all>"
       }
     ]
   }
@@ -202,6 +208,39 @@ A `"lookup"` command needs four response templates instead of one -
 
 A query longer than 1 byte doesn't need to stay byte-aligned - `!lookup
 E85` (2.5 bytes) works the same as `!lookup E85C`.
+
+#### Observer stats overview (`kind: "stats"`)
+
+A command can opt into range-argument parsing instead of exact matching by
+setting `"kind": "stats"`. A `!stats <range>` command reports packet
+volume, replies sent, and distinct repeaters heard over a requested
+window, drawn from this observer's own persisted metrics history (the same
+data the dashboard's charts read from) - not anything published elsewhere
+on the mesh:
+
+```text
+!stats 1h    -> the last hour
+!stats 6h    -> the last 6 hours
+!stats 1d    -> the last day
+!stats 3d    -> the last 3 days
+!stats all   -> since the earliest data still in the store (bounded by
+                PACKETCAPTURE_METRICS_UI_RETENTION_DAYS pruning, not since
+                this process started)
+```
+
+A `"stats"` command needs `response` (the success case) plus
+`usageResponse` (missing or unrecognized range - see the `!stats` example
+above), and must not set any `"lookup"`-only field. `response` can use
+`{range}` (the token as given), `{packetsReceived}`, `{packetsDecoded}`,
+`{repliesSent}`, and `{repeatersHeard}`, alongside the placeholders every
+command has.
+
+Numbers are computed fresh at the moment the reply actually sends (after
+its own turn in the reply queue below), not when the trigger was heard -
+so they reflect "now," not a several-seconds-stale snapshot. This command
+intentionally does not report the mesh repeat-check counters (see the
+dashboard/logs) - those are process-lifetime counters, not
+range-filterable history, so they'd be misleading in a windowed summary.
 
 #### Reply queue (mesh congestion)
 
