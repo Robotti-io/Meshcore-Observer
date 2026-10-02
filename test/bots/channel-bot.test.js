@@ -5,6 +5,7 @@ import { createCipheriv, createHash, createHmac } from 'node:crypto';
 import { Packet } from '@liamcottle/meshcore.js';
 import { ChannelBot } from '../../src/bots/channel-bot.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
+import { RepeatCheckTracker } from '../../src/bots/repeat-check-tracker.js';
 import { calculatePacketHash } from '../../src/packets/packet-hash.js';
 import { buildRawFrame, RouteType, PayloadType } from '../fixtures/packet-frames.js';
 
@@ -884,7 +885,7 @@ test('a repeat is only consumed once, and an unrelated later message never confi
   assert.equal(bot.getRepeatsConfirmed(), 1);
 });
 
-test('reports a reply unconfirmed once its repeat-check timeout elapses with nothing heard', async () => {
+test('reports a reply unconfirmed after its timeout on a quiet channel without another packet', async () => {
   const radioManager = fakeRadioManager();
   const logger = silentLogger();
   let clock = 1_000_000;
@@ -903,16 +904,51 @@ test('reports a reply unconfirmed once its repeat-check timeout elapses with not
   assert.equal(bot.getRepeatsUnconfirmed(), 0);
 
   clock += 5001;
-  // Lazy eviction only runs on the next tracker activity - any further
-  // heard packet on this channel is enough to trigger it.
-  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['bb'], text: 'Jeymz: !test' }));
-  await flush();
-
+  assert.equal(bot.sweepRepeatChecks(), 1);
+  assert.equal(bot.sweepRepeatChecks(), 0);
   assert.equal(bot.getRepeatsUnconfirmed(), 1);
   assert.equal(bot.getRepeatsConfirmed(), 0);
   const timeout = logger.calls.debug.find((call) => call.message.includes('not confirmed within timeout'));
   assert.ok(timeout, 'expected a debug log reporting the unconfirmed timeout');
   assert.equal(timeout.meta.trigger, '!echo');
+});
+
+test('reports capacity-evicted checks separately from timed-out checks', async () => {
+  const radioManager = fakeRadioManager();
+  const logger = silentLogger();
+  let clock = 1_000_000;
+  const repeatCheckTracker = new RepeatCheckTracker({
+    timeoutMs: 5000,
+    maxEntries: 1,
+    now: () => clock
+  });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig(),
+    logger,
+    now: () => clock,
+    repeatCheckTimeoutMs: 5000,
+    repeatCheckTracker
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(
+    buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo', timestamp: 1700000000 })
+  );
+  await flush();
+  radioManager.emitPacket(
+    buildGrpTxtFrame({ channelKey, hops: ['bb'], text: 'Jeymz: !test', timestamp: 1700000001 })
+  );
+  await flush();
+
+  assert.equal(bot.getRepeatsUnconfirmed(), 0);
+  assert.ok(logger.calls.warn.some((call) => call.message.includes('tracker reached capacity')));
+
+  clock += 5000;
+  assert.equal(bot.sweepRepeatChecks(), 1);
+  assert.equal(bot.getRepeatsUnconfirmed(), 1);
+  assert.equal(bot.getRepeatsConfirmed(), 0);
 });
 
 test('an exact-match command on the same bot is unaffected by a configured lookup command', async () => {

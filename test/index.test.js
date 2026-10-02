@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { RepeatCheckSweeper } from '../src/bots/repeat-check-sweeper.js';
 
 // Windows delivers process termination very differently from POSIX (no real
 // signals), so this exercises the shutdown handler's own logic directly by
@@ -14,6 +15,7 @@ test('logs a clean shutdown when SIGINT is received', async () => {
   process.env.PACKETCAPTURE_TCP_HOST = '127.0.0.1';
   process.env.PACKETCAPTURE_TCP_PORT = '1';
   process.env.PACKETCAPTURE_IATA = 'CVG';
+  process.env.PACKETCAPTURE_BOTS_CONFIG_FILE = 'bots.config.example.json';
   // The persisted data store now opens unconditionally at startup (see
   // src/index.js) - :memory: keeps this test from touching a real file on
   // disk regardless of PACKETCAPTURE_METRICS_UI_ENABLED.
@@ -21,6 +23,18 @@ test('logs a clean shutdown when SIGINT is received', async () => {
 
   const lines = [];
   const originalLog = console.log;
+  const originalStart = RepeatCheckSweeper.prototype.start;
+  const originalStop = RepeatCheckSweeper.prototype.stop;
+  let sweeperStartCalls = 0;
+  let sweeperStopCalls = 0;
+  RepeatCheckSweeper.prototype.start = function () {
+    sweeperStartCalls += 1;
+    return originalStart.call(this);
+  };
+  RepeatCheckSweeper.prototype.stop = function () {
+    sweeperStopCalls += 1;
+    return originalStop.call(this);
+  };
   console.log = (line) => lines.push(line);
 
   try {
@@ -46,11 +60,15 @@ test('logs a clean shutdown when SIGINT is received', async () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
   } finally {
     console.log = originalLog;
+    RepeatCheckSweeper.prototype.start = originalStart;
+    RepeatCheckSweeper.prototype.stop = originalStop;
   }
 
   const messages = lines.map((line) => JSON.parse(line).message);
   assert.ok(messages.includes('meshcore-observer starting'));
   assert.ok(messages.includes('shutdown signal received'));
   assert.ok(messages.includes('meshcore-observer stopped'));
+  assert.equal(sweeperStartCalls, 1, 'the enabled bot starts the repeat-check sweeper');
+  assert.equal(sweeperStopCalls, 1, 'application shutdown stops the repeat-check sweeper');
   assert.equal(process.exitCode, 0);
 });

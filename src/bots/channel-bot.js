@@ -241,6 +241,20 @@ export class ChannelBot {
     return this.#repeatsUnconfirmed;
   }
 
+  /**
+   * Reports repeat checks whose configured confirmation window has elapsed.
+   * Called by the application-wide repeat-check sweeper, independently of
+   * incoming radio traffic.
+   */
+  sweepRepeatChecks() {
+    if (!this.#enabled) {
+      return 0;
+    }
+    const expired = this.#repeatCheckTracker.sweepExpired();
+    this.#reportExpiredRepeatChecks(expired);
+    return expired.length;
+  }
+
   async #setup() {
     this.#ready = false;
     const result = await ensureChannel({
@@ -614,8 +628,9 @@ export class ChannelBot {
     // Registered after the send resolves rather than before: only a
     // reply that actually went out is worth watching for an echo. See
     // #checkForRepeat for how a later heard packet resolves this.
-    const expired = this.#repeatCheckTracker.register(message, { sender, trigger, hash });
+    const { expired, evicted } = this.#repeatCheckTracker.register(message, { sender, trigger, hash });
     this.#reportExpiredRepeatChecks(expired);
+    this.#reportCapacityEvictions(evicted);
   }
 
   /**
@@ -651,6 +666,16 @@ export class ChannelBot {
       this.#logger.debug('bots.channelBot', 'reply repeat not confirmed within timeout', {
         bot: this.#name,
         sender: meta.sender,
+        trigger: meta.trigger,
+        hash: meta.hash
+      });
+    }
+  }
+
+  #reportCapacityEvictions(evicted) {
+    for (const meta of evicted) {
+      this.#logger.warn('bots.channelBot', 'repeat check evicted before timeout because tracker reached capacity', {
+        bot: this.#name,
         trigger: meta.trigger,
         hash: meta.hash
       });
