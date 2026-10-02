@@ -245,6 +245,61 @@ const MIGRATIONS = [
       )`,
       "INSERT INTO flood_advert_state (id, status) VALUES (1, 'idle')"
     ]
+  },
+  {
+    // Replaces lookup-specific reply columns with one versioned, validated
+    // command context. The lifecycle/metrics columns and row IDs remain
+    // unchanged, so dashboards and reply history keep their existing shape.
+    // Existing rows are converted in place: lookup markers take precedence,
+    // query-only rows represent stats, and rows with neither marker use the
+    // empty exact-command context. This migration is transactional through
+    // #runMigrations(), including the user_version update.
+    version: 8,
+    statements: [
+      `CREATE TABLE bot_replies_new (
+        id                  INTEGER PRIMARY KEY,
+        bot_name            TEXT NOT NULL,
+        channel             TEXT,
+        trigger             TEXT NOT NULL,
+        sender              TEXT,
+        hop_count           INTEGER,
+        path                TEXT,
+        hash                TEXT,
+        handler_state_json  TEXT NOT NULL CHECK (json_valid(handler_state_json)),
+        enqueued_at         INTEGER,
+        expires_at          INTEGER,
+        status              TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'expired', 'cancelled')),
+        resolved_at         INTEGER,
+        queued_ms           INTEGER
+      )`,
+      `INSERT INTO bot_replies_new (
+         id, bot_name, channel, trigger, sender, hop_count, path, hash,
+         handler_state_json, enqueued_at, expires_at, status, resolved_at, queued_ms
+       )
+       SELECT id, bot_name, channel, trigger, sender, hop_count, path, hash,
+         CASE
+           WHEN lookup_outcome IS NOT NULL THEN json_object(
+             'kind', 'lookup', 'version', 1,
+             'data', json_object(
+               'query', COALESCE(query, ''), 'outcome', lookup_outcome,
+               'name', name, 'matchCount', match_count, 'lastHeardAt', last_heard_at,
+               'nodePrefix', node_prefix, 'repeaterCount', repeater_count
+             )
+           )
+           WHEN query IS NOT NULL THEN json_object(
+             'kind', 'stats', 'version', 1,
+             'data', json_object('query', query)
+           )
+           ELSE json_object('kind', 'exact', 'version', 1, 'data', json_object())
+         END,
+         enqueued_at, expires_at, status, resolved_at, queued_ms
+       FROM bot_replies`,
+      'DROP TABLE bot_replies',
+      'ALTER TABLE bot_replies_new RENAME TO bot_replies',
+      'CREATE INDEX idx_bot_replies_status_enqueued ON bot_replies(status, enqueued_at)',
+      'CREATE INDEX idx_bot_replies_status_resolved ON bot_replies(status, resolved_at)',
+      'CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at)'
+    ]
   }
 ];
 
@@ -257,8 +312,7 @@ const MIGRATIONS = [
 // channel/hop_count/path/enqueued_at/expires_at to begin with.
 const BOT_REPLY_COLUMNS = `
   id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
-  query, lookup_outcome AS lookupOutcome, name, match_count AS matchCount,
-  last_heard_at AS lastHeardAt, node_prefix AS nodePrefix, repeater_count AS repeaterCount,
+  handler_state_json AS handlerStateJson,
   enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
   resolved_at AS resolvedAt, queued_ms AS queuedMs
 `;
@@ -272,9 +326,6 @@ function mapBotReplyRow(row) {
     ...row,
     id: Number(row.id),
     hopCount: toNumberOrNull(row.hopCount),
-    matchCount: toNumberOrNull(row.matchCount),
-    lastHeardAt: toNumberOrNull(row.lastHeardAt),
-    repeaterCount: toNumberOrNull(row.repeaterCount),
     enqueuedAt: toNumberOrNull(row.enqueuedAt),
     expiresAt: toNumberOrNull(row.expiresAt),
     resolvedAt: toNumberOrNull(row.resolvedAt),
@@ -374,9 +425,9 @@ export class MetricsStore {
     this.#insertBotReplyStmt = this.#db.prepare(`
       INSERT INTO bot_replies (
         bot_name, channel, trigger, sender, hop_count, path, hash,
-        query, lookup_outcome, name, match_count, last_heard_at, node_prefix, repeater_count,
+        handler_state_json,
         enqueued_at, expires_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
     `);
     this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
@@ -931,7 +982,7 @@ export class MetricsStore {
    * it later with no extra lookups - see the v5 migration's doc comment for
    * why this and every resolved reply live in the same table now.
    *
-   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, lastHeardAt?: number, nodePrefix?: string, repeaterCount?: number, enqueuedAt: number, expiresAt: number}} item
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
     this.#insertBotReplyStmt.run(
@@ -942,13 +993,7 @@ export class MetricsStore {
       item.hopCount,
       item.path,
       item.hash,
-      item.query ?? null,
-      item.lookupOutcome ?? null,
-      item.name ?? null,
-      item.matchCount ?? null,
-      item.lastHeardAt ?? null,
-      item.nodePrefix ?? null,
-      item.repeaterCount ?? null,
+      item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
       item.enqueuedAt,
       item.expiresAt
     );

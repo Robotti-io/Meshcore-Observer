@@ -272,7 +272,9 @@ PACKETCAPTURE_IATA
 PACKETCAPTURE_OWNER_EMAIL
 
 PACKETCAPTURE_BROKERS_CONFIG_FILE
-PACKETCAPTURE_MQTT1_PASSWORD (etc - see src/config/index.js's readBrokers)
+MQTT1_EXAMPLE_PASSWORD / MQTT2_EXAMPLE_PASSWORD (named password examples;
+  referenced separately by the two password-auth entries in brokers.config.example.json)
+PACKETCAPTURE_MQTT1_PASSWORD (legacy positional fallback; see src/config/index.js's readBrokers)
 
 PACKETCAPTURE_TEST_BOT_ENABLED
 PACKETCAPTURE_TEST_BOT_CHANNEL

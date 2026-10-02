@@ -18,7 +18,8 @@ import {
   buildHistoryChartData,
   chartNoteForBuckets,
   buildPacketTypeTotals,
-  formatNodePageRange
+  formatNodePageRange,
+  categoryColor
 } from './dashboard-logic.js';
 
 // The dashboard's "Repeaters" section is deliberately scoped to REPEATER
@@ -589,12 +590,14 @@ function initNodesSearch() {
 const botCommandBlocks = new Map();
 
 function botCommandColor(idx) {
-  // Same 8-slot validated palette as PACKET_TYPE_BUCKETS, applied by
-  // stable array position (the server already places each bot's
-  // configured commands in config order, with any overflow folded into
-  // a trailing "Other" row) - never re-ranked by usage, so a trigger's
-  // color never reshuffles between refreshes.
-  return cssVar('--cat-' + (idx + 1));
+  // Keep configured commands in stable config order. The established
+  // palette covers the first eight; additional commands get deterministic
+  // hues so every configured trigger remains an individual chart series.
+  const palette = Array.from({ length: 8 }, (_, colorIdx) => cssVar('--cat-' + (colorIdx + 1)));
+  return categoryColor(idx, palette, {
+    saturation: cssVar('--bot-command-generated-saturation'),
+    lightness: cssVar('--bot-command-generated-lightness')
+  });
 }
 
 function buildBotCommandBlock(botName) {

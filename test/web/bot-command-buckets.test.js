@@ -1,6 +1,6 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bucketBotCommandCounts, OTHER_TRIGGER_LABEL } from '../../src/web/bot-command-buckets.js';
+import { bucketBotCommandCounts } from '../../src/web/bot-command-buckets.js';
 
 test('zero-fills every configured trigger that has no counts in range, in config order', () => {
   const commands = [{ trigger: '!echo' }, { trigger: '!test' }];
@@ -11,14 +11,14 @@ test('zero-fills every configured trigger that has no counts in range, in config
   ]);
 });
 
-test('does not add an "Other" row when the bot has 7 or fewer configured commands', () => {
+test('retains each configured command individually when the bot has 7 or fewer commands', () => {
   const commands = Array.from({ length: 7 }, (_, i) => ({ trigger: `!cmd${i}` }));
   const rows = bucketBotCommandCounts(commands, []);
   assert.equal(rows.length, 7);
-  assert.ok(!rows.some((r) => r.trigger === OTHER_TRIGGER_LABEL));
+  assert.deepEqual(rows.map((row) => row.trigger), commands.map((command) => command.trigger));
 });
 
-test('folds the 8th-and-later configured commands into a single "Other" row, summing their counts', () => {
+test('retains every configured command and its exact count beyond the former seven-command limit', () => {
   const commands = Array.from({ length: 10 }, (_, i) => ({ trigger: `!cmd${i}` }));
   const counts = [
     { trigger: '!cmd0', count: 1 },
@@ -27,12 +27,10 @@ test('folds the 8th-and-later configured commands into a single "Other" row, sum
   ];
   const rows = bucketBotCommandCounts(commands, counts);
 
-  assert.equal(rows.length, 8); // 7 primary + 1 Other
-  assert.deepEqual(
-    rows.slice(0, 7).map((r) => r.trigger),
-    ['!cmd0', '!cmd1', '!cmd2', '!cmd3', '!cmd4', '!cmd5', '!cmd6']
-  );
-  assert.deepEqual(rows[7], { trigger: OTHER_TRIGGER_LABEL, count: 7 }); // cmd7(5) + cmd9(2), cmd8 unused
+  assert.equal(rows.length, commands.length);
+  assert.deepEqual(rows[7], { trigger: '!cmd7', count: 5 });
+  assert.deepEqual(rows[8], { trigger: '!cmd8', count: 0 });
+  assert.deepEqual(rows[9], { trigger: '!cmd9', count: 2 });
 });
 
 test('row order is stable regardless of the counts array order (never sorted by usage rank)', () => {

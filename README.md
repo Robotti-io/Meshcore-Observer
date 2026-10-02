@@ -83,16 +83,35 @@ the others.
 
 - **`none`** - anonymous (e.g. OKI Mesh)
 - **`password`** - a static `auth.username` (in the file) and password. The
-  password itself is never stored in the file - set it as
-  `PACKETCAPTURE_MQTT<n>_PASSWORD`, where `<n>` is that broker's **1-based
-  position in the array** (the first entry is `MQTT1`, the second `MQTT2`,
-  and so on - reordering the array changes which entry a given
-  `..._PASSWORD` variable belongs to).
-- **`token`** - a JWT signed **on the radio itself** (the private key never
-  leaves the device) and refreshed automatically before it expires. Used
-  for LetsMesh. Set `auth.audience` (required) and optionally
-  `auth.tokenTtlSeconds` (default 24h) in the file - no environment
-  variable needed, since there's no static secret to keep out of it.
+  password itself is never stored in the file. For a stable mapping, set
+  `auth.passwordEnv` to the uppercase environment-variable name containing
+  the password:
+
+  The broker example includes two password-auth placeholders,
+  `mqtt1.example.com` and `mqtt2.example.com`. Their `passwordEnv` selectors
+  map to `MQTT1_EXAMPLE_PASSWORD` and `MQTT2_EXAMPLE_PASSWORD` in
+  `.env.example`, respectively. Replace the placeholder hosts and usernames
+  with your broker's settings and provide real password values through the
+  process environment or `.env.local`. The example keeps the passwords out
+  of JSON and uses TLS for these password-auth connections. The OKIMesh
+  entries are anonymous; MeshMapper and LetsMesh use device-signed tokens.
+  If `passwordEnv` is configured, that variable is used exclusively; a
+  missing or empty value is a startup error, even if the legacy positional
+  variable is set. Multiple brokers may intentionally share one named
+  variable. For backward compatibility, `PACKETCAPTURE_MQTT<n>_PASSWORD`
+  remains supported when `passwordEnv` is absent, where `<n>` is the
+  broker's **1-based position in the array**. This positional mapping is
+  legacy and reordering the array changes which broker it applies to; new
+  configurations should use `passwordEnv`.
+- **`token`** - a MeshCore auth JWT signed **on the radio itself** (the
+  private key never leaves the device) and refreshed automatically before
+  it expires. The example includes MeshMapper at `mqtt.meshmapper.net` and
+  LetsMesh at `mqtt-us-v1.letsmesh.net`, both using device-signed token auth.
+  See the [MeshCore-HA setup](https://wiki.meshmapper.net/mqtt-ha/) for the
+  MeshMapper connection settings and the [broker overview](https://wiki.meshmapper.net/mqtt-main/)
+  for both broker endpoints. Set `auth.audience` (required) and optionally
+  `auth.tokenTtlSeconds` (default 24h) in the file. Token auth does not use
+  a static password environment variable.
 
 Published topics (compatible with the existing MeshCore MQTT convention):
 
@@ -160,7 +179,10 @@ dashboard: `https://map.okimesh.org/#/packets/{hash}`).
 
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
-times the mesh relays it to you.
+times the mesh relays it to you. Decrypted command messages must include a
+valid `sender: ` prefix; messages without one are not matched, even by
+commands whose templates do not use `{sender}`. The bot's own senderless
+reply rebroadcasts are still checked for repeat confirmation.
 
 A command's `overflowResponse` is optional. When the rendered `response`
 doesn't fit `maxMessageBytes` (the hop-path listing is the field most
@@ -208,6 +230,11 @@ A `"lookup"` command needs four response templates instead of one -
 
 A query longer than 1 byte doesn't need to stay byte-aligned - `!lookup
 E85` (2.5 bytes) works the same as `!lookup E85C`.
+
+The lookup action runs when the queued reply is dispatched, after hop and
+duplicate checks. The registry result therefore reflects the data available
+when the reply is sent, including after a pending reply is recovered on
+restart.
 
 #### Observer stats overview (`kind: "stats"`)
 
@@ -257,6 +284,11 @@ seeing that quiet window:
 | --- | --- |
 | `PACKETCAPTURE_BOT_REPLY_QUIET_MS` | Required silence before a queued reply is sent; default `5000` |
 | `PACKETCAPTURE_BOT_REPLY_TTL_MS` | Drop a queued reply unsent after waiting this long; default `60000` |
+| `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS` | After a reply is sent, wait this long for its rebroadcast before counting it unconfirmed; default `10000` |
+
+The repeat-check window starts after a reply is sent, separately from the
+queue TTL above. Set `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS=0` for an
+immediate timeout, which is counted on the next tracker sweep or operation.
 
 There's deliberately no size cap on the queue - sending a reply also
 counts as channel activity, so the next queued item always needs its own
@@ -441,9 +473,58 @@ store and its sampling loop), regardless of `PACKETCAPTURE_METRICS_UI_ENABLED`.
 ```sh
 npm start       # normal use
 npm run dev     # restarts on file changes
-npm test        # run the test suite
+npm test        # one-shot test run
+npm run test:watch    # watch tests during development
+npm run test:coverage # test suite plus local coverage reports
+npm run test:ci       # CI test and coverage run
 npm run lint    # eslint
 ```
+
+Test runs write JUnit results to `artifacts/junit.xml`. Coverage runs also
+write HTML, LCOV, JSON, and Cobertura reports under `coverage/`.
+
+Coverage runs enforce minimum repository totals of 72% statements, 71%
+branches, 73% functions, and 70% lines. These floors apply to every
+`src/**/*.js` file, including browser code. Do not add coverage exclusions just
+to improve the totals. Any proposed exclusion or threshold change should
+include a code-review rationale grounded in measured coverage and meaningful
+behavior tests.
+
+### GitHub Actions
+
+`.github/workflows/ci.yml` runs for pull requests targeting `main` and pushes
+to `main`. Its independent lint job runs on Ubuntu with Node 24.x. The test
+matrix runs on Ubuntu and Windows with Node 22.x and 24.x; each job runs
+`npm ci` followed by `npm run test:ci`.
+
+Each test-matrix job uploads an artifact named
+`test-reports-<runner>-node-<version>`, containing the reports produced by
+that job:
+
+```text
+artifacts/junit.xml
+coverage/cobertura-coverage.xml
+coverage/lcov.info
+coverage/coverage-final.json
+coverage/index.html
+```
+
+The upload step runs after a failed test or coverage check as well. If setup
+fails before report files are created, that job has no report artifact.
+
+Successful and intentionally failing PR runs have both produced their report
+artifacts. The checks to require for pull requests targeting `main` are:
+
+- `lint`
+- `test (ubuntu-latest, Node 22.x)`
+- `test (ubuntu-latest, Node 24.x)`
+- `test (windows-latest, Node 22.x)`
+- `test (windows-latest, Node 24.x)`
+
+Required-check configuration is still pending. If the runner or Node matrix
+changes, update the workflow and this check list together, then confirm every
+new OS/Node combination passes before changing branch protection.
+This CI workflow validates code; it does not build or deploy containers.
 
 ## Unattended startup on Windows
 

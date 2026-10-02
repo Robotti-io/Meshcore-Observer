@@ -1,6 +1,24 @@
-import { test } from 'node:test';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { startTokenRefreshLoop } from '../../src/mqtt/token-refresh-loop.js';
+
+const stopLoops = new Set();
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  for (const stop of stopLoops) stop();
+  stopLoops.clear();
+  vi.useRealTimers();
+});
+
+function startTrackedLoop(options) {
+  const stop = startTokenRefreshLoop(options);
+  stopLoops.add(stop);
+  return stop;
+}
 
 function silentLogger() {
   const calls = { info: [], warn: [] };
@@ -24,16 +42,12 @@ function fakeBroker() {
   };
 }
 
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 test('does nothing while the current token is far from the renewal threshold', async () => {
   const nowSeconds = 1000;
   const auth = { getExpiration: () => nowSeconds + 10000, refreshIfNeeded: async () => 'token' };
   const broker = fakeBroker();
 
-  const stop = startTokenRefreshLoop({
+  const stop = startTrackedLoop({
     auth,
     broker,
     will: null,
@@ -43,7 +57,7 @@ test('does nothing while the current token is far from the renewal threshold', a
     now: () => nowSeconds * 1000
   });
 
-  await wait(30);
+  await vi.advanceTimersByTimeAsync(30);
   stop();
 
   assert.equal(broker.calls.close, 0);
@@ -54,8 +68,8 @@ test('does nothing while no token has been created yet', async () => {
   const auth = { getExpiration: () => null, refreshIfNeeded: async () => 'token' };
   const broker = fakeBroker();
 
-  const stop = startTokenRefreshLoop({ auth, broker, will: null, logger: silentLogger(), checkIntervalMs: 5 });
-  await wait(30);
+  const stop = startTrackedLoop({ auth, broker, will: null, logger: silentLogger(), checkIntervalMs: 5 });
+  await vi.advanceTimersByTimeAsync(30);
   stop();
 
   assert.equal(broker.calls.close, 0);
@@ -75,7 +89,7 @@ test('refreshes and reconnects the broker once within the renewal threshold', as
   const will = { topic: 't', payload: 'p' };
   const logger = silentLogger();
 
-  const stop = startTokenRefreshLoop({
+  const stop = startTrackedLoop({
     auth,
     broker,
     will,
@@ -85,7 +99,7 @@ test('refreshes and reconnects the broker once within the renewal threshold', as
     now: () => nowSeconds * 1000
   });
 
-  await wait(30);
+  await vi.advanceTimersByTimeAsync(30);
   stop();
 
   assert.ok(refreshCalls >= 1);
@@ -104,7 +118,7 @@ test('logs a warning and keeps running when refresh fails', async () => {
   const broker = fakeBroker();
   const logger = silentLogger();
 
-  const stop = startTokenRefreshLoop({
+  const stop = startTrackedLoop({
     auth,
     broker,
     will: null,
@@ -114,7 +128,7 @@ test('logs a warning and keeps running when refresh fails', async () => {
     now: () => nowSeconds * 1000
   });
 
-  await wait(30);
+  await vi.advanceTimersByTimeAsync(30);
   stop();
 
   assert.ok(logger.calls.warn.length >= 1);
@@ -134,7 +148,7 @@ test('stop() prevents any further checks', async () => {
   };
   const broker = fakeBroker();
 
-  const stop = startTokenRefreshLoop({
+  const stop = startTrackedLoop({
     auth,
     broker,
     will: null,
@@ -143,10 +157,10 @@ test('stop() prevents any further checks', async () => {
     now: () => nowSeconds * 1000
   });
 
-  await wait(20);
+  await vi.advanceTimersByTimeAsync(20);
   stop();
   const checksAtStop = checks;
-  await wait(30);
+  await vi.advanceTimersByTimeAsync(30);
 
   assert.equal(checks, checksAtStop);
 });

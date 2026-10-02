@@ -155,3 +155,21 @@ export function buildPacketTypeTotals(totals, packetTypeBuckets) {
   const totalsByKey = Object.fromEntries(totals.map((t) => [t.packetTypeBucket, t.total]));
   return packetTypeBuckets.map((bucket) => totalsByKey[bucket.key] ?? 0);
 }
+
+/**
+ * Returns a stable color for a categorical series. Use the dashboard's
+ * validated palette first, then spread additional categories around the
+ * hue wheel so configured bot commands remain individually distinguishable.
+ *
+ * @param {number} index - Stable config-order index for this category.
+ * @param {string[]} palette - Theme-aware CSS colors for the first categories.
+ * @param {{saturation: string, lightness: string}} generatedColor - CSS HSL components for overflow categories.
+ * @returns {string}
+ */
+export function categoryColor(index, palette, { saturation, lightness }) {
+  if (index < palette.length) {
+    return palette[index];
+  }
+  const hue = (index * 137.508) % 360;
+  return `hsl(${hue.toFixed(1)} ${saturation} ${lightness})`;
+}

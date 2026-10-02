@@ -15,7 +15,10 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env.local src/index.js",
     "dev": "node --watch --env-file-if-exists=.env.local src/index.js",
-    "test": "node --test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:ci": "vitest run --coverage",
     "lint": "eslint .",
     "task:register": "powershell -ExecutionPolicy Bypass -File scripts/register-scheduled-task.ps1",
     "task:unregister": "powershell -ExecutionPolicy Bypass -File scripts/unregister-scheduled-task.ps1"
@@ -30,6 +33,8 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.10.0"
+    "@vitest/coverage-istanbul": "^5.0.3",
+    "eslint": "^10.10.0",
+    "vitest": "^5.0.3"
   }
 }

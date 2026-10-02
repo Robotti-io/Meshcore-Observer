@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { openTcpConnection } from '../../../src/radio/transports/tcp-transport.js';

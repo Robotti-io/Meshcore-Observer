@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import {
   formatDuration,
@@ -11,7 +11,8 @@ import {
   buildHistoryChartData,
   chartNoteForBuckets,
   buildPacketTypeTotals,
-  formatNodePageRange
+  formatNodePageRange,
+  categoryColor
 } from '../../../src/web/client/dashboard-logic.js';
 
 test('formatDuration renders only as many leading units as needed', () => {
@@ -120,6 +121,17 @@ test('chartNoteForBuckets reports the bucket width and count for a non-empty buc
 test('buildPacketTypeTotals orders totals to match packetTypeBuckets, defaulting an absent bucket to 0', () => {
   const totals = [{ packetTypeBucket: 'txtMsg', total: 4 }];
   assert.deepEqual(buildPacketTypeTotals(totals, PACKET_TYPE_BUCKETS_FIXTURE), [0, 4]);
+});
+
+test('categoryColor uses the existing palette and creates stable colors for additional categories', () => {
+  const palette = ['blue', 'orange'];
+  const generated = { saturation: '72%', lightness: '45%' };
+
+  assert.equal(categoryColor(0, palette, generated), 'blue');
+  assert.equal(categoryColor(1, palette, generated), 'orange');
+  assert.equal(categoryColor(2, palette, generated), 'hsl(275.0 72% 45%)');
+  assert.equal(categoryColor(2, palette, generated), categoryColor(2, palette, generated));
+  assert.notEqual(categoryColor(2, palette, generated), categoryColor(3, palette, generated));
 });
 
 test('buildPacketTypeTotals returns all zeros when totals is empty', () => {

@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,7 +45,7 @@ const emptyBrokersDir = mkdtempSync(join(tmpdir(), 'meshcore-config-empty-broker
 const emptyBrokersFile = join(emptyBrokersDir, 'brokers.config.json');
 writeFileSync(emptyBrokersFile, '[]', 'utf8');
 
-after(() => {
+afterAll(() => {
   rmSync(emptyBotsDir, { recursive: true, force: true });
   rmSync(emptyBrokersDir, { recursive: true, force: true });
 });
@@ -267,6 +267,109 @@ test('reads a password-auth broker password from PACKETCAPTURE_MQTT<n>_PASSWORD 
   });
 });
 
+test('resolves named broker passwords independently of array order and strips selectors from runtime config', () => {
+  const brokers = [
+    {
+      id: 'alpha', enabled: true, host: 'mqtt.example.com', port: 1883,
+      auth: { method: 'password', username: 'alpha-user', passwordEnv: 'MQTT_ALPHA_PASSWORD' }
+    },
+    {
+      id: 'beta', enabled: true, host: 'mqtt2.example.com', port: 1883,
+      auth: { method: 'password', username: 'beta-user', passwordEnv: 'MQTT_BETA_PASSWORD' }
+    }
+  ];
+  const env = {
+    PACKETCAPTURE_MQTT1_PASSWORD: 'wrong-first-position',
+    PACKETCAPTURE_MQTT2_PASSWORD: 'wrong-second-position',
+    MQTT_ALPHA_PASSWORD: 'alpha-secret',
+    MQTT_BETA_PASSWORD: 'beta-secret'
+  };
+
+  for (const orderedBrokers of [brokers, [...brokers].reverse()]) {
+    withTempBrokersFile(JSON.stringify(orderedBrokers), (filePath) => {
+      const config = loadConfig(baseEnv({ ...env, PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath }));
+      assert.equal(config.brokers.find((broker) => broker.id === 'alpha').auth.password, 'alpha-secret');
+      assert.equal(config.brokers.find((broker) => broker.id === 'beta').auth.password, 'beta-secret');
+      assert.equal('passwordEnv' in config.brokers[0].auth, false);
+    });
+  }
+});
+
+test('supports mixed named and legacy password mappings and permits shared named variables', () => {
+  const brokers = [
+    {
+      id: 'named-one', enabled: true, host: 'mqtt.example.com', port: 1883,
+      auth: { method: 'password', username: 'one', passwordEnv: 'MQTT_SHARED_PASSWORD' }
+    },
+    {
+      id: 'named-two', enabled: true, host: 'mqtt2.example.com', port: 1883,
+      auth: { method: 'password', username: 'two', passwordEnv: 'MQTT_SHARED_PASSWORD' }
+    },
+    { id: 'legacy', enabled: true, host: 'mqtt3.example.com', port: 1883, auth: { method: 'password', username: 'old' } }
+  ];
+
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    const config = loadConfig(baseEnv({
+      PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath,
+      MQTT_SHARED_PASSWORD: 'shared-secret',
+      PACKETCAPTURE_MQTT3_PASSWORD: 'legacy-secret'
+    }));
+    assert.equal(config.brokers.find((broker) => broker.id === 'named-one').auth.password, 'shared-secret');
+    assert.equal(config.brokers.find((broker) => broker.id === 'named-two').auth.password, 'shared-secret');
+    assert.equal(config.brokers.find((broker) => broker.id === 'legacy').auth.password, 'legacy-secret');
+  });
+});
+
+test('does not fall back to a positional password when the named variable is missing or empty', () => {
+  const brokers = [{
+    id: 'private', enabled: true, host: 'mqtt.example.com', port: 1883,
+    auth: { method: 'password', username: 'bot', passwordEnv: 'MQTT_PRIVATE_PASSWORD' }
+  }];
+
+  for (const namedValue of [undefined, '']) {
+    const secretInLegacyVariable = 'legacy-secret-must-not-be-used-or-reported';
+    withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+      assert.throws(
+        () => loadConfig(baseEnv({
+          PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath,
+          PACKETCAPTURE_MQTT1_PASSWORD: secretInLegacyVariable,
+          ...(namedValue === undefined ? {} : { MQTT_PRIVATE_PASSWORD: namedValue })
+        })),
+        (error) => {
+          assert.ok(error instanceof ConfigError);
+          assert.match(error.message, /MQTT_PRIVATE_PASSWORD/);
+          assert.doesNotMatch(error.message, new RegExp(secretInLegacyVariable));
+          return true;
+        }
+      );
+    });
+  }
+});
+
+test('requires a named password for disabled password-auth brokers as before', () => {
+  const brokers = [{
+    id: 'private', enabled: false, host: 'mqtt.example.com', port: 1883,
+    auth: { method: 'password', username: 'bot', passwordEnv: 'MQTT_PRIVATE_PASSWORD' }
+  }];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath })), /MQTT_PRIVATE_PASSWORD/);
+  });
+});
+
+test('preserves password whitespace exactly instead of trimming the secret', () => {
+  const brokers = [{
+    id: 'private', enabled: true, host: 'mqtt.example.com', port: 1883,
+    auth: { method: 'password', username: 'bot', passwordEnv: 'MQTT_PRIVATE_PASSWORD' }
+  }];
+  withTempBrokersFile(JSON.stringify(brokers), (filePath) => {
+    const config = loadConfig(baseEnv({
+      PACKETCAPTURE_BROKERS_CONFIG_FILE: filePath,
+      MQTT_PRIVATE_PASSWORD: '  literal password  '
+    }));
+    assert.equal(config.brokers[0].auth.password, '  literal password  ');
+  });
+});
+
 test('loads bots from an explicitly configured bots config file', () => {
   const bots = [
     {
@@ -378,9 +481,9 @@ test('rejects a metricsUi max chart bucket count below the schema minimum', () =
   );
 });
 
-test('defaults botReplyQueue to a 5s quiet window, 60s TTL, and a 30s repeat-check timeout', () => {
+test('defaults botReplyQueue to a 5s quiet window, 60s TTL, and a 10s repeat-check timeout', () => {
   const config = loadConfig(baseEnv());
-  assert.deepEqual(config.botReplyQueue, { quietMs: 5000, ttlMs: 60000, repeatCheckTimeoutMs: 30000 });
+  assert.deepEqual(config.botReplyQueue, { quietMs: 5000, ttlMs: 60000, repeatCheckTimeoutMs: 10000 });
 });
 
 test('reads botReplyQueue overrides from the environment, including disabling the quiet requirement with 0', () => {
@@ -392,6 +495,11 @@ test('reads botReplyQueue overrides from the environment, including disabling th
     })
   );
   assert.deepEqual(config.botReplyQueue, { quietMs: 0, ttlMs: 10000, repeatCheckTimeoutMs: 15000 });
+});
+
+test('accepts a zero repeat-check timeout', () => {
+  const config = loadConfig(baseEnv({ PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS: '0' }));
+  assert.equal(config.botReplyQueue.repeatCheckTimeoutMs, 0);
 });
 
 test('rejects a botReplyQueue TTL shorter than its quiet window', () => {

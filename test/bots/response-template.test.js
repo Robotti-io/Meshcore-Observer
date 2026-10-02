@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { renderTemplate, truncateToUtf8Bytes, renderResponse } from '../../src/bots/response-template.js';
 

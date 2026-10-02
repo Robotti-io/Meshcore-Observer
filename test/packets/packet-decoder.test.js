@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { decodePacket, PacketDecodeError } from '../../src/packets/packet-decoder.js';
 import { calculatePacketHash } from '../../src/packets/packet-hash.js';

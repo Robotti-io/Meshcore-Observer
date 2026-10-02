@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { PacketPipeline } from '../../src/packets/packet-pipeline.js';
 import { buildRawFrame, RouteType, PayloadType } from '../fixtures/packet-frames.js';

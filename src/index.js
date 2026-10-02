@@ -9,6 +9,8 @@ import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
 import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
+import { createDefaultCommandHandlers } from './bots/command-handlers/index.js';
+import { RepeatCheckSweeper } from './bots/repeat-check-sweeper.js';
 import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
@@ -215,6 +217,7 @@ async function main() {
       replyQueue,
       nodeRegistry,
       statsReporter,
+      commandHandlers: createDefaultCommandHandlers({ nodeRegistry, statsReporter }),
       repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
     });
     botsByName.set(botConfig.name, bot);
@@ -223,6 +226,8 @@ async function main() {
   for (const { bot } of bots) {
     bot.start();
   }
+  const repeatCheckSweeper = new RepeatCheckSweeper({ bots, logger });
+  repeatCheckSweeper.start();
 
   const serviceHealth = new ServiceHealth({
     radioManager,
@@ -311,6 +316,7 @@ async function main() {
     // unsubscribe every bot from radio events so no new trigger can be
     // matched, then stop both outbound schedulers so queued work cannot
     // start while MQTT/radio are closing below.
+    repeatCheckSweeper.stop();
     for (const { bot } of bots) {
       bot.stop();
     }
