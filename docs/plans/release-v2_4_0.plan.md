@@ -86,29 +86,38 @@ Implementation updates are in place. The affected tests and lint still need to b
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/9](https://github.com/Robotti-io/Meshcore-Observer/issues/9)
 
-Blocked by
-
-- [https://github.com/Robotti-io/Meshcore-Observer/issues/10](https://github.com/Robotti-io/Meshcore-Observer/issues/10)
+The Issue #10 test/coverage tooling dependency is complete. Issue #9 will use its `npm run test:ci` script and enforced thresholds.
 
 The repository already has substantial automated test coverage. v2.4.0 should make those checks an enforced part of normal development.
 
-### 3.1 Proposed GitHub Actions workflow
+### 3.1 GitHub Actions workflow
 
-For pushes and pull requests:
+The CI platform and policy are resolved:
 
-- [ ] Install the supported Node.js runtime.
-- [ ] Run `npm ci`.
-- [ ] Run `npm run lint`.
-- [ ] Run `npm test`.
-- [ ] Run the coverage suite.
-- [ ] Preserve or publish the generated coverage report where useful.
+- [x] Use GitHub Actions for CI validation; the user explicitly overrode the conflicting GitLab-template instruction for this repository.
+- [x] Trigger on pull requests targeting `main` and pushes to `main` only.
+- [x] Use GitHub-hosted Ubuntu and Windows runners with Node 22.x and 24.x in the test matrix.
+- [x] Make the checks required for pull requests to `main` after the matrix and failure-artifact path are validated.
+
+Implement separate lint and coverage-test jobs so a lint failure does not prevent test reports from being generated. Keep deployment, image builds, and publishing out of this validation workflow.
+
+For the agreed triggers (workflow implementation added in `.github/workflows/ci.yml`; GitHub execution validation remains pending):
+
+- [x] Define the lint job on Ubuntu with Node 24.x: install the selected Node line, run `npm ci`, then `npm run lint`.
+- [x] Define the test job as a four-entry matrix: `ubuntu-latest` and `windows-latest`, each on Node 22.x and 24.x; each entry runs `npm ci` and `npm run test:ci` (tests plus threshold-enforced coverage).
+- [x] Set workflow permissions to `contents: read`; the tests require no secrets or external service credentials.
+- [ ] Validate the lint job and all four matrix entries on a pull request targeting `main` and a push to `main`.
+- [ ] Upload JUnit, Cobertura, LCOV, JSON, and HTML reports from each matrix entry with an unconditional step and a distinct artifact name.
+- [ ] Use GitHub's configured artifact retention unless a maintainer specifies another duration.
 
 ### 3.2 Platform coverage
 
-Because Windows is currently the primary supported runtime while much of the application is portable Node.js:
+The test matrix covers both supported operating systems and both selected Node lines:
 
 - [ ] Run the core test suite on Windows.
 - [ ] Run the core test suite on Linux.
+- [ ] Run the core test suite on Node 22.x.
+- [ ] Run the core test suite on Node 24.x.
 - [ ] Identify tests that are genuinely platform-specific rather than weakening the entire test matrix.
 - [ ] Confirm `node:sqlite` behavior under both CI environments.
 
@@ -116,12 +125,11 @@ Optional:
 
 - [ ] Add dependency caching if it provides a meaningful CI speed improvement.
 - [ ] Add a visible build/test status badge to the README after the workflow is stable.
-- [ ] Publish an LCOV report as a CI artifact.
 - [ ] Integrate an external coverage-reporting service later only if it provides useful history or pull-request feedback beyond the repository's own CI.
 
 ### 3.3 Acceptance criteria
 
-Every pull request receives automated lint, test, and coverage status before merge.
+Every pull request targeting `main` receives automated lint, test, and coverage status. After successful full-matrix and failure-artifact validation, configure those stable checks as required branch-protection statuses for `main`.
 
 ---
 
@@ -156,7 +164,7 @@ The Vitest migration and both development dependencies are explicitly approved f
 
 **Issue #10 progress (2026-10-02):** The suite now runs under Vitest with Istanbul. `npm test`, `npm run test:watch`, `npm run test:coverage`, and `npm run test:ci` are configured and documented in the README. Windows T2 validation on Node v24.18.0 passed twice at 47 test files / 470 tests, with matching results: 69.74% statement, 69.22% branch, 71.09% function, and 70.23% line coverage. JUnit, HTML, LCOV, JSON, and Cobertura artifacts were generated; coverage includes all 56 source files, including the unimported dashboard entry point at zero coverage. Lint passed. T3 recorded the initial baseline against base commit `c5e5d88a141b959633c11aedae416930e8e5b845` before risk-driven test additions, then added regression tests for SQLite startup failure ordering and failed flood-advert handling. The entrypoint test runs in a child process for isolation, so the parent Vitest coverage counters do not include its startup lines even though the behavior is asserted. The post-improvement Windows run passed 47 files / 472 tests at 69.82% statement, 69.31% branch, 71.09% function, and 70.31% line coverage. The working tree was dirty for both baselines; the recorded SHA identifies the base commit, not a commit containing the T2/T3 work. Linux validation remains for the issue #9 CI matrix. **Pre-T4 web review and T3.5 result:** `dashboard-logic.js` is fully covered, while browser-side `dashboard.js` remains at 0% because no browser interaction harness runs in the Node suite; it remains included in measurement pending a separate harness decision. Added seeded-data HTTP tests for aggregate overview data and comparison trends, no-comparison all-time behavior, and each of the packets, brokers, bots, and repeaters views. Added coverage for sampler-driven SSE updates. The server-response `error` callback could not be triggered deterministically through the public HTTP seam without adding a production test hook; abrupt disconnect cleanup remains covered. `metrics-server.js` increased from 68.7% statements / 62.4% branches / 56.3% functions to 95.2% / 88.9% / 93.8%. The full Windows suite and lint pass: 47 test files / 475 tests; repository coverage is 72.67% statements, 72.04% branches, 74.08% functions, and 73.17% lines. Linux validation remains with the issue #9 CI matrix.
 
-**T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 73% lines, just below the T3.5 result. The floors cover all `src/**/*.js` files, and README documents the review rationale required for future exclusions or threshold changes. A normal `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. CI artifact upload is deferred: issue #9 T1 leaves the CI platform and branch policy unresolved, and no workflow exists in this checkout. The `test:ci` script enforces the thresholds whenever invoked; add artifact upload after issue #9 resolves its platform decision.
+**T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 73% lines, just below the T3.5 result. The floors cover all `src/**/*.js` files, and README documents the review rationale required for future exclusions or threshold changes. A normal `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. CI artifact upload remains unimplemented and is assigned to Issue #9's workflow tasks; GitHub Actions, triggers, matrix, and gating sequence are now resolved. The `test:ci` script enforces the thresholds whenever invoked.
 
 **Issue #10 task status:**
 
@@ -167,13 +175,7 @@ The Vitest migration and both development dependencies are explicitly approved f
 - [x] T4 — enforce the measured coverage floors and verify report generation after threshold failure.
 - [ ] Validate coverage on Linux and upload reports from CI after issue #9 resolves the CI platform and branch policy.
 
-Initial development dependencies are expected to include:
-
-```sh
-npm install --save-dev vitest @vitest/coverage-istanbul
-```
-
-The existing `node:test` suite should be migrated deliberately rather than rewritten unnecessarily. Where practical, preserve existing test behavior and assertions while changing the runner.
+The approved `vitest` and `@vitest/coverage-istanbul` development dependencies are installed, and the existing suite has been migrated while preserving its test names and behavioral assertions. Issue #9 should reuse these scripts and should not add another test framework or coverage dependency.
 
 ### 4.2 Standard test artifacts
 
@@ -406,7 +408,7 @@ These artifacts provide different views of the same test execution:
 
 The CI workflow should upload reports even when coverage thresholds or tests fail where technically possible, so failed builds remain diagnosable.
 
-**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. This repository has no CI workflow, while issue #9 T1 has not resolved GitHub Actions versus the GitLab shared-template model. Uploading these files from CI is therefore deferred to issue #9 after that platform decision; no pipeline was introduced as part of T4.
+**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. The user has selected GitHub Actions with pull-request-to-`main` and push-to-`main` triggers, an Ubuntu/Windows matrix on Node 22.x/24.x, and required checks after validation. Workflow and CI artifact upload implementation is pending in Issue #9; no workflow exists yet.
 
 ### 4.10 Pull-request reporting
 
