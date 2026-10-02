@@ -64,21 +64,21 @@ The issue #7 implementation now adds `sweepExpired()` and one application-wide, 
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/8](https://github.com/Robotti-io/Meshcore-Observer/issues/8)
 
-The documented/example repeat-check value should match the application's actual default behavior.
-
-Current values should be reviewed because `.env.example` and the runtime fallback may not currently agree.
+The documented/example repeat-check value matches the application's 10-second default. The timeout starts after a reply is sent; it is separate from the 60-second TTL for replies waiting unsent in the queue. A configured value of `0` is valid and means immediate timeout, reported on the next tracker sweep or operation.
 
 ### 2.1 Proposed changes
 
-- [ ] Establish one canonical default for `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS`.
-- [ ] Update `.env.example`, runtime configuration, comments, tests, and README to agree.
-- [ ] Document what the timeout represents operationally.
-- [ ] Confirm whether `0` should be valid and, if so, define its exact semantics.
-- [ ] Add a configuration test asserting the default value.
+- [x] Establish one canonical default for `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS`: 10000 ms.
+- [x] Update `.env.example`, runtime and `ChannelBot` fallbacks, tests, and README to agree.
+- [x] Document that the timeout starts after a reply is sent and what zero means.
+- [x] Confirm `0` remains valid and means immediate timeout.
+- [x] Add configuration coverage for the default and zero; add tracker coverage for immediate expiration.
 
 ### 2.2 Acceptance criteria
 
 Running with no explicit environment variable and running from a freshly copied `.env.example` should produce intentionally equivalent repeat-check behavior unless explicitly documented otherwise.
+
+Implementation updates are in place. The affected tests and lint still need to be run before this item is fully validated.
 
 ---
 

@@ -14,7 +14,7 @@ const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
 // Matches config/index.js's PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS default -
 // only used when a caller (e.g. a test) constructs a bot without threading
 // the configured value through.
-const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 30000;
+const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 10000;
 
 function formatRelativeAge(timestamp, now) {
   if (timestamp === undefined || timestamp === null) {

@@ -111,8 +111,9 @@ function readBotReplyQueue(env) {
     // plaintext echoed back on the same channel (necessarily a rebroadcast
     // by another node - see channel-bot.js's #checkForRepeat) before giving
     // up and counting it unconfirmed. GRP_TXT has no protocol ACK to wait on
-    // instead (same reason quietMs exists above).
-    repeatCheckTimeoutMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS', 30000)
+    // instead (same reason quietMs exists above). Zero means the entry expires
+    // immediately; the next tracker sweep or operation counts it unconfirmed.
+    repeatCheckTimeoutMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS', 10000)
   };
 }
 

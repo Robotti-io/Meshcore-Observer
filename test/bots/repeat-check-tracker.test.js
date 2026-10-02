@@ -17,6 +17,15 @@ test('a matching text within the timeout is a confirmed repeat, consumed only on
   assert.equal(second.confirmed, null);
 });
 
+test('a zero timeout expires on the next sweep and cannot be confirmed', () => {
+  const tracker = new RepeatCheckTracker({ timeoutMs: 0, now: () => 100 });
+  tracker.register('hello', { trigger: '!echo' });
+
+  assert.deepEqual(tracker.sweepExpired(), [{ trigger: '!echo' }]);
+  assert.equal(tracker.size, 0);
+  assert.equal(tracker.checkAndConsume('hello').confirmed, null);
+});
+
 test('unrelated text never matches a pending registration', () => {
   const tracker = new RepeatCheckTracker({ timeoutMs: 1000 });
   tracker.register('hello', { trigger: '!echo' });

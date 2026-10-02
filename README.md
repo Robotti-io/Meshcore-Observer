@@ -257,6 +257,11 @@ seeing that quiet window:
 | --- | --- |
 | `PACKETCAPTURE_BOT_REPLY_QUIET_MS` | Required silence before a queued reply is sent; default `5000` |
 | `PACKETCAPTURE_BOT_REPLY_TTL_MS` | Drop a queued reply unsent after waiting this long; default `60000` |
+| `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS` | After a reply is sent, wait this long for its rebroadcast before counting it unconfirmed; default `10000` |
+
+The repeat-check window starts after a reply is sent, separately from the
+queue TTL above. Set `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS=0` for an
+immediate timeout, which is counted on the next tracker sweep or operation.
 
 There's deliberately no size cap on the queue - sending a reply also
 counts as channel activity, so the next queued item always needs its own

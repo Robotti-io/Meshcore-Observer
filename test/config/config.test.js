@@ -378,9 +378,9 @@ test('rejects a metricsUi max chart bucket count below the schema minimum', () =
   );
 });
 
-test('defaults botReplyQueue to a 5s quiet window, 60s TTL, and a 30s repeat-check timeout', () => {
+test('defaults botReplyQueue to a 5s quiet window, 60s TTL, and a 10s repeat-check timeout', () => {
   const config = loadConfig(baseEnv());
-  assert.deepEqual(config.botReplyQueue, { quietMs: 5000, ttlMs: 60000, repeatCheckTimeoutMs: 30000 });
+  assert.deepEqual(config.botReplyQueue, { quietMs: 5000, ttlMs: 60000, repeatCheckTimeoutMs: 10000 });
 });
 
 test('reads botReplyQueue overrides from the environment, including disabling the quiet requirement with 0', () => {
@@ -392,6 +392,11 @@ test('reads botReplyQueue overrides from the environment, including disabling th
     })
   );
   assert.deepEqual(config.botReplyQueue, { quietMs: 0, ttlMs: 10000, repeatCheckTimeoutMs: 15000 });
+});
+
+test('accepts a zero repeat-check timeout', () => {
+  const config = loadConfig(baseEnv({ PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS: '0' }));
+  assert.equal(config.botReplyQueue.repeatCheckTimeoutMs, 0);
 });
 
 test('rejects a botReplyQueue TTL shorter than its quiet window', () => {
