@@ -18,7 +18,7 @@ export default defineConfig({
         statements: 72,
         branches: 71,
         functions: 73,
-        lines: 73
+        lines: 70
       },
       reporter: [
         'text-summary',

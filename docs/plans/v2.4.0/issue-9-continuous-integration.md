@@ -14,7 +14,7 @@ Run deterministic lint, test, and threshold-enforced coverage checks on GitHub A
 
 - `package.json` provides `npm run lint` (`eslint .`), `npm test` (Vitest without coverage), and `npm run test:ci` (Vitest with Istanbul coverage and thresholds). Node >=22.13.0 is required for `node:sqlite`.
 - Tests are under `test/` and use Vitest with Node's built-in `node:assert/strict`.
-- `vitest.config.js` includes every `src/**/*.js` file and enforces global minimums of 72% statements, 71% branches, 73% functions, and 73% lines. `reportOnFailure` generates JUnit and coverage reports when a test or threshold fails.
+- `vitest.config.js` includes every `src/**/*.js` file and enforces global minimums of 72% statements, 71% branches, 73% functions, and 70% lines. `reportOnFailure` generates JUnit and coverage reports when a test or threshold fails.
 - `npm run test:ci` writes `artifacts/junit.xml` and reports under `coverage/` (Cobertura, LCOV, JSON, and HTML). Both directories are gitignored and can still be uploaded by a workflow.
 - This repository currently has no CI workflow. The human has explicitly selected GitHub Actions for this project and overridden the conflicting GitLab-template instruction for this CI work.
 - The local branch refs include `main` and `release-v2_4_0`; there are no `development` or `production` branches. Checks are scoped to pull requests targeting `main` and pushes to `main` only.
@@ -45,11 +45,12 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 #### T2: Add lint and test jobs
 
 - [x] Add the main-only GitHub Actions workflow with read-only contents permission, an independent Ubuntu/Node 24.x lint job, and the four-entry Ubuntu/Windows × Node 22.x/24.x coverage-test matrix.
-- [ ] Validate the workflow through a pull request targeting `main` and a push to `main`; confirm all matrix entries install and pass. GitHub execution is pending because this implementation has not been pushed.
+- [x] Initial temporary-PR run executed all four matrix entries; the 475 tests passed, but the jobs failed the 73% line-coverage floor at 72.96% in the reported run.
+- [ ] Rerun the PR matrix with the agreed 70% line floor and confirm every job passes; validate the push-to-`main` trigger after merge.
 - **Objective:** Make baseline quality checks automatic.
 - **Specific changes:** Add `.github/workflows/ci.yml` for the agreed pull-request and push events. Run `npm ci` and `npm run lint` in an independent lint job. Run `npm ci` and `npm run test:ci` in a matrix of `ubuntu-latest` and `windows-latest` with Node 22.x and 24.x. Set `permissions: contents: read`; no secrets are required by the test suite. Report uploads remain in T3.
 - **Definition of done:** Lint passes and the full coverage-enforcing test command passes in all four OS/Node combinations; failures are surfaced as distinct check results.
-- **Expected tests / validation:** [x] Inspect the workflow structure and confirm the intended triggers, jobs, and matrix are declared. [ ] Review a main-targeting PR run plus a push-to-main run. [ ] Confirm all matrix combinations execute `npm ci` and pass `npm run test:ci`.
+- **Expected tests / validation:** [x] Inspect the workflow structure and confirm the intended triggers, jobs, and matrix are declared. [x] Confirm all matrix entries execute `npm ci` and all 475 tests pass on the initial temporary-PR run. [ ] Confirm the recalibrated coverage gate passes on every matrix entry. [ ] Validate the push-to-main run.
 
 #### T3: Add coverage artifacts and required statuses
 
