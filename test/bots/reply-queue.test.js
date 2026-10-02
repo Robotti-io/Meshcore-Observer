@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
@@ -148,6 +148,7 @@ test('sends queued replies in FIFO order, one quiet window at a time', async () 
 });
 
 test('sending an item resets the quiet clock, so the next item still needs its own fresh quiet window', async () => {
+  vi.useFakeTimers({ now: 0 });
   const sendTimestamps = [];
   const { dispatch } = testDispatcher({
     '!first': () => sendTimestamps.push(Date.now()),
@@ -155,12 +156,22 @@ test('sending an item resets the quiet clock, so the next item still needs its o
   });
   const queue = newQueue({ dispatch });
 
-  queue.enqueue(baseItem({ trigger: '!first' }));
-  queue.enqueue(baseItem({ trigger: '!second' }));
+  try {
+    queue.enqueue(baseItem({ trigger: '!first' }));
+    queue.enqueue(baseItem({ trigger: '!second' }));
 
-  await waitFor(() => sendTimestamps.length === 2, { timeoutMs: 3000 });
-  const gapMs = sendTimestamps[1] - sendTimestamps[0];
-  assert.ok(gapMs >= QUIET_MS, `expected at least ${QUIET_MS}ms between sends, got ${gapMs}ms`);
+    await vi.advanceTimersByTimeAsync(QUIET_MS);
+    assert.deepEqual(sendTimestamps, [QUIET_MS]);
+
+    await vi.advanceTimersByTimeAsync(QUIET_MS - 1);
+    assert.deepEqual(sendTimestamps, [QUIET_MS], 'the next item must wait for its own complete quiet window');
+
+    await vi.advanceTimersByTimeAsync(1);
+    assert.deepEqual(sendTimestamps, [QUIET_MS, QUIET_MS * 2]);
+  } finally {
+    await queue.stop();
+    vi.useRealTimers();
+  }
 });
 
 test('drops an item that expires before a quiet window is observed, and logs a warning with its channel/sender', async () => {

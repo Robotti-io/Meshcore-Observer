@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -63,6 +63,54 @@ function seedResolvedReply(store, { botName, trigger, status, occurredAt }) {
   store.resolveReplyItem(item.id, { status, resolvedAt: occurredAt, queuedMs: 0 });
 }
 
+function recordDashboardSample(store, { sampleAt, packetsReceived, packetsDecoded, packetsByType, brokerDeliveries = {} }) {
+  store.recordPacketSample({
+    sampleAt,
+    intervalMs: 1000,
+    packetsReceived,
+    packetsDecoded,
+    radioConnected: true,
+    brokersConnected: 1,
+    brokersTotal: 1,
+    botsReady: 1,
+    botsTotal: 1,
+    replyQueueSize: 0,
+    packetsByType,
+    brokerDeliveries
+  });
+}
+
+function seedDashboardData() {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  recordDashboardSample(metricsStore, {
+    sampleAt: 11000,
+    packetsReceived: 5,
+    packetsDecoded: 4,
+    packetsByType: { advert: 3, txtMsg: 1 },
+    brokerDeliveries: { okimesh: { sent: 4, skipped: 1, failed: 2 } }
+  });
+  recordDashboardSample(metricsStore, {
+    sampleAt: 21000,
+    packetsReceived: 8,
+    packetsDecoded: 6,
+    packetsByType: { advert: 4, txtMsg: 2 },
+    brokerDeliveries: { okimesh: { sent: 7, skipped: 2, failed: 1 } }
+  });
+
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 12000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!test', status: 'failed', occurredAt: 13000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'sent', occurredAt: 22000 });
+  seedResolvedReply(metricsStore, { botName: 'echo', trigger: '!echo', status: 'expired', occurredAt: 23000 });
+
+  metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'Earlier Repeater', type: 'REPEATER', heardAt: 11000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Updated Repeater', type: 'REPEATER', heardAt: 5000 });
+  metricsStore.upsertNode({ publicKeyHex: 'BB'.repeat(32), name: 'Updated Repeater', type: 'REPEATER', heardAt: 22000 });
+  metricsStore.upsertNode({ publicKeyHex: 'CC'.repeat(32), name: 'Current Repeater', type: 'REPEATER', heardAt: 21000 });
+  metricsStore.upsertNode({ publicKeyHex: 'DD'.repeat(32), name: 'Chat Node', type: 'CHAT', heardAt: 21000 });
+
+  return metricsStore;
+}
+
 function defaultBotsConfig() {
   return [
     {
@@ -114,6 +162,90 @@ test('GET /api/metrics returns the current ServiceHealth snapshot as JSON', asyn
     const body = await res.json();
     assert.equal(body.packetsReceived, 3);
     assert.equal(body.packetsDecoded, 2);
+  });
+});
+
+test('GET /api/metrics/dashboard overview aggregates persisted data and computes previous-period trends', async () => {
+  const metricsStore = seedDashboardData();
+  const serviceHealth = fakeServiceHealth({
+    mqtt: { okimesh: { connected: true, lastConnectedAt: null, deliveries: { sent: 11, skipped: 3, failed: 3 } } }
+  });
+
+  await withServer({ metricsStore, serviceHealth }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/dashboard?view=overview&start=21000&end=31000`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+
+    assert.deepEqual({ start: body.start, end: body.end, view: body.view }, { start: 21000, end: 31000, view: 'overview' });
+    assert.deepEqual(body.data.packets, {
+      received: 8,
+      decoded: 6,
+      byType: [
+        { packetTypeBucket: 'advert', total: 4 },
+        { packetTypeBucket: 'txtMsg', total: 2 }
+      ]
+    });
+    assert.deepEqual(body.data.replies.outcomes, { sent: 1, failed: 0, expired: 1, cancelled: 0 });
+    assert.deepEqual(body.data.brokers, [{ brokerId: 'okimesh', sent: 7, skipped: 2, failed: 1 }]);
+    assert.deepEqual(body.data.repeaters, { added: 1, updated: 1 });
+    assert.deepEqual(body.data.comparison, { start: 11000, end: 21000, durationMs: 10000 });
+    assert.deepEqual(body.data.trends, {
+      packetsReceived: 3,
+      packetsDecoded: 2,
+      repliesSent: 0,
+      repliesExpired: 1,
+      repliesFailed: -1,
+      brokerSent: 3,
+      brokerFailed: -1,
+      repeatersAdded: 0,
+      repeatersUpdated: 1
+    });
+  });
+});
+
+test('GET /api/metrics/dashboard supports every view and omits comparisons for the all-time overview', async () => {
+  const metricsStore = seedDashboardData();
+  const serviceHealth = fakeServiceHealth({
+    mqtt: {
+      okimesh: { connected: true, lastConnectedAt: null, deliveries: { sent: 11, skipped: 3, failed: 3 } },
+      unused: { connected: false, lastConnectedAt: null, deliveries: { sent: 0, skipped: 0, failed: 0 } }
+    }
+  });
+
+  await withServer({ metricsStore, serviceHealth }, async (baseUrl) => {
+    const overview = await (await fetch(`${baseUrl}/api/metrics/dashboard?view=overview&range=all`)).json();
+    assert.equal(overview.view, 'overview');
+    assert.equal(overview.data.comparison, null);
+    assert.equal(overview.data.trends, null);
+
+    const packets = await (await fetch(`${baseUrl}/api/metrics/dashboard?view=packets&start=21000&end=31000`)).json();
+    assert.equal(packets.view, 'packets');
+    assert.equal(packets.data.history.buckets.reduce((sum, bucket) => sum + bucket.packetsReceived, 0), 8);
+    assert.deepEqual(packets.data.packetTypes.totals, [
+      { packetTypeBucket: 'advert', total: 4 },
+      { packetTypeBucket: 'txtMsg', total: 2 }
+    ]);
+    assert.ok(Array.isArray(packets.data.packetTypes.buckets));
+
+    const brokers = await (await fetch(`${baseUrl}/api/metrics/dashboard?view=brokers&start=21000&end=31000`)).json();
+    assert.equal(brokers.view, 'brokers');
+    assert.deepEqual(brokers.data.brokers, [
+      { brokerId: 'okimesh', sent: 7, skipped: 2, failed: 1 },
+      { brokerId: 'unused', sent: 0, skipped: 0, failed: 0 }
+    ]);
+
+    const bots = await (await fetch(`${baseUrl}/api/metrics/dashboard?view=bots&start=21000&end=31000`)).json();
+    assert.equal(bots.view, 'bots');
+    assert.deepEqual(bots.data.replyOutcomes, { sent: 1, failed: 0, expired: 1, cancelled: 0 });
+    assert.deepEqual(bots.data.bots, [{
+      botName: 'echo',
+      commands: [{ trigger: '!echo', count: 1 }, { trigger: '!test', count: 0 }],
+      totalReplies: 1
+    }]);
+
+    const repeaters = await (await fetch(`${baseUrl}/api/metrics/dashboard?view=repeaters&start=21000&end=31000`)).json();
+    assert.equal(repeaters.view, 'repeaters');
+    assert.deepEqual(repeaters.data.totals, { added: 1, updated: 1 });
   });
 });
 
@@ -568,6 +700,23 @@ test('GET /api/metrics/stream sends an initial snapshot as an SSE event', async 
     const payload = JSON.parse(text.slice('data: '.length).trim());
     assert.equal(payload.packetsReceived, 3);
 
+    controller.abort();
+  });
+});
+
+test('a sampler sample is broadcast as a follow-up SSE event to connected clients', async () => {
+  await withServer({}, async (baseUrl, { sampler }) => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/api/metrics/stream`, { signal: controller.signal });
+    const reader = res.body.getReader();
+    await reader.read(); // consume the initial ServiceHealth snapshot
+
+    const nextSnapshot = { packetsReceived: 12, packetsDecoded: 9, radioConnected: false };
+    sampler.emit('sample', nextSnapshot);
+
+    const { value } = await reader.read();
+    const event = new TextDecoder().decode(value);
+    assert.equal(event, `data: ${JSON.stringify(nextSnapshot)}\n\n`);
     controller.abort();
   });
 });

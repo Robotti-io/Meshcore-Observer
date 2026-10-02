@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bucketBotCommandCounts, OTHER_TRIGGER_LABEL } from '../../src/web/bot-command-buckets.js';
 

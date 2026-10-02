@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { resolveRangeWindow, RangeError, RANGE_ENUM } from '../../src/web/metrics-range.js';
 

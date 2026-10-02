@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -45,7 +45,7 @@ const emptyBrokersDir = mkdtempSync(join(tmpdir(), 'meshcore-config-empty-broker
 const emptyBrokersFile = join(emptyBrokersDir, 'brokers.config.json');
 writeFileSync(emptyBrokersFile, '[]', 'utf8');
 
-after(() => {
+afterAll(() => {
   rmSync(emptyBotsDir, { recursive: true, force: true });
   rmSync(emptyBrokersDir, { recursive: true, force: true });
 });

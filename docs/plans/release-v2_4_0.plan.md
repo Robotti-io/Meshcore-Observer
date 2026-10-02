@@ -152,6 +152,21 @@ This provides:
 - configurable coverage thresholds;
 - room to add more advanced CI reporting later without changing the test framework again.
 
+The Vitest migration and both development dependencies are explicitly approved for v2.4.0. This is the approved exception to the non-goal against framework changes made only to obtain coverage; the migration also standardizes test execution, JUnit reporting, and the coverage workflow.
+
+**Issue #10 progress (2026-10-02):** The suite now runs under Vitest with Istanbul. `npm test`, `npm run test:watch`, `npm run test:coverage`, and `npm run test:ci` are configured and documented in the README. Windows T2 validation on Node v24.18.0 passed twice at 47 test files / 470 tests, with matching results: 69.74% statement, 69.22% branch, 71.09% function, and 70.23% line coverage. JUnit, HTML, LCOV, JSON, and Cobertura artifacts were generated; coverage includes all 56 source files, including the unimported dashboard entry point at zero coverage. Lint passed. T3 recorded the initial baseline against base commit `c5e5d88a141b959633c11aedae416930e8e5b845` before risk-driven test additions, then added regression tests for SQLite startup failure ordering and failed flood-advert handling. The entrypoint test runs in a child process for isolation, so the parent Vitest coverage counters do not include its startup lines even though the behavior is asserted. The post-improvement Windows run passed 47 files / 472 tests at 69.82% statement, 69.31% branch, 71.09% function, and 70.31% line coverage. The working tree was dirty for both baselines; the recorded SHA identifies the base commit, not a commit containing the T2/T3 work. Linux validation remains for the issue #9 CI matrix. **Pre-T4 web review and T3.5 result:** `dashboard-logic.js` is fully covered, while browser-side `dashboard.js` remains at 0% because no browser interaction harness runs in the Node suite; it remains included in measurement pending a separate harness decision. Added seeded-data HTTP tests for aggregate overview data and comparison trends, no-comparison all-time behavior, and each of the packets, brokers, bots, and repeaters views. Added coverage for sampler-driven SSE updates. The server-response `error` callback could not be triggered deterministically through the public HTTP seam without adding a production test hook; abrupt disconnect cleanup remains covered. `metrics-server.js` increased from 68.7% statements / 62.4% branches / 56.3% functions to 95.2% / 88.9% / 93.8%. The full Windows suite and lint pass: 47 test files / 475 tests; repository coverage is 72.67% statements, 72.04% branches, 74.08% functions, and 73.17% lines. Linux validation remains with the issue #9 CI matrix.
+
+**T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 73% lines, just below the T3.5 result. The floors cover all `src/**/*.js` files, and README documents the review rationale required for future exclusions or threshold changes. A normal `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. CI artifact upload is deferred: issue #9 T1 leaves the CI platform and branch policy unresolved, and no workflow exists in this checkout. The `test:ci` script enforces the thresholds whenever invoked; add artifact upload after issue #9 resolves its platform decision.
+
+**Issue #10 task status:**
+
+- [x] T1 — select Vitest and Istanbul coverage tooling.
+- [x] T2 — configure deterministic local tests and reports; Linux CI validation remains pending.
+- [x] T3 — record baselines and add high-risk regression coverage.
+- [x] T3.5 — add aggregate dashboard-route and sampler-driven SSE coverage.
+- [x] T4 — enforce the measured coverage floors and verify report generation after threshold failure.
+- [ ] Validate coverage on Linux and upload reports from CI after issue #9 resolves the CI platform and branch policy.
+
 Initial development dependencies are expected to include:
 
 ```sh
@@ -203,6 +218,8 @@ Also produce an XML coverage artifact suitable for automated coverage reporting 
 ```text
 coverage/cobertura-coverage.xml
 ```
+
+Cobertura XML is the preferred CI coverage format where it integrates cleanly; it is not a release blocker if issue #9 can consume the required LCOV, JSON, and HTML coverage outputs. It remains distinct from the JUnit test-results XML.
 
 JUnit XML and coverage XML serve different purposes and should remain separate:
 
@@ -277,7 +294,8 @@ export default defineConfig({
         'text-summary',
         'html',
         'lcov',
-        'json'
+        'json',
+        'cobertura'
       ]
     }
   }
@@ -311,9 +329,9 @@ The migration should be considered complete only when there is confidence that t
 
 ### 4.6 Establish the coverage baseline
 
-Once the test suite is running under Vitest:
+After the Vitest migration and report configuration are stable:
 
-- [ ] Run the complete suite with Istanbul coverage enabled.
+- [ ] Run the complete suite with Istanbul coverage enabled and record an initial baseline before adding coverage-driven tests.
 - [ ] Record the initial repository baseline.
 - [ ] Record:
   - line coverage;
@@ -325,7 +343,9 @@ Once the test suite is running under Vitest:
 - [ ] Identify files with high line coverage but poor branch coverage.
 - [ ] Identify error and recovery paths that remain untested.
 - [ ] Preserve the initial coverage reports as CI artifacts.
-- [ ] Document the baseline in the v2.4 development issue or associated pull request.
+- [ ] Document the baseline in the v2.4 development issue or associated pull request, including date, branch, exact commit SHA, Node version, command, and metric totals.
+
+Record a second, post-improvement baseline before setting thresholds. Use the tested commit SHA as the stable reference; branch names alone are not durable.
 
 ### 4.7 Do not initially optimize for a headline percentage
 
@@ -349,16 +369,16 @@ A module with 95% line coverage but an untested recovery path may represent subs
 
 After the initial baseline and targeted improvement pass:
 
-- [ ] Establish minimum line coverage.
-- [ ] Establish minimum statement coverage.
-- [ ] Establish minimum function coverage.
-- [ ] Establish minimum branch coverage.
-- [ ] Configure Vitest/Istanbul to enforce those thresholds.
-- [ ] Make CI fail when coverage falls below agreed thresholds.
-- [ ] Prefer thresholds that prevent regression rather than arbitrary aspirational numbers.
+- [x] Establish minimum line coverage: 73%.
+- [x] Establish minimum statement coverage: 72%.
+- [x] Establish minimum function coverage: 73%.
+- [x] Establish minimum branch coverage: 71%.
+- [x] Configure Vitest/Istanbul to enforce those thresholds.
+- [x] Ensure the `test:ci` command fails when coverage falls below the agreed thresholds; CI platform integration remains pending issue #9 T1.
+- [x] Prefer thresholds that prevent regression rather than arbitrary aspirational numbers; the floors sit just below T3.5's measured result.
 - [ ] Consider stricter thresholds for high-risk modules once their suites mature.
 - [ ] Document intentionally unreachable or platform-specific code rather than silently excluding it.
-- [ ] Review every proposed coverage exclusion during code review.
+- [x] Require a code-review rationale for any proposed coverage exclusion; no source files are excluded.
 
 Thresholds should initially be set only after the actual v2.4 baseline has been measured.
 
@@ -385,6 +405,8 @@ These artifacts provide different views of the same test execution:
 | HTML report              | Human investigation                      |
 
 The CI workflow should upload reports even when coverage thresholds or tests fail where technically possible, so failed builds remain diagnosable.
+
+**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. This repository has no CI workflow, while issue #9 T1 has not resolved GitHub Actions versus the GitLab shared-template model. Uploading these files from CI is therefore deferred to issue #9 after that platform decision; no pipeline was introduced as part of T4.
 
 ### 4.10 Pull-request reporting
 
@@ -1250,7 +1272,7 @@ Unless operational testing exposes a concrete need, v2.4.0 should avoid:
 - replacing SQLite
 - introducing a frontend build framework
 - large-scale TypeScript migration
-- changing test frameworks merely to obtain coverage reporting
+- unapproved test-framework changes; the Vitest/Istanbul migration in this plan is explicitly approved
 - chasing 100% coverage
 - tests written solely to increase a coverage percentage
 - redesigning the radio abstraction

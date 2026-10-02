@@ -446,9 +446,22 @@ store and its sampling loop), regardless of `PACKETCAPTURE_METRICS_UI_ENABLED`.
 ```sh
 npm start       # normal use
 npm run dev     # restarts on file changes
-npm test        # run the test suite
+npm test        # one-shot test run
+npm run test:watch    # watch tests during development
+npm run test:coverage # test suite plus local coverage reports
+npm run test:ci       # CI test and coverage run
 npm run lint    # eslint
 ```
+
+Test runs write JUnit results to `artifacts/junit.xml`. Coverage runs also
+write HTML, LCOV, JSON, and Cobertura reports under `coverage/`.
+
+Coverage runs enforce minimum repository totals of 72% statements, 71%
+branches, 73% functions, and 73% lines. These floors sit just below the
+measured T3.5 result and apply to every `src/**/*.js` file, including browser
+code. Do not add coverage exclusions just to improve the totals. Any proposed
+exclusion or threshold change should include a code-review rationale grounded
+in measured coverage and meaningful behavior tests.
 
 ## Unattended startup on Windows
 

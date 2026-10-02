@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
@@ -15,16 +15,16 @@ async function waitFor(predicate, timeoutMs = 1000) {
   }
 }
 
-function makeRig({ intervalHours = 0, quietMs = 0, now = () => Date.now(), sendFloodAdvert = async () => {} } = {}) {
+function makeRig({ intervalHours = 0, quietMs = 0, now = () => Date.now(), sendFloodAdvert = async () => {}, schedulerLogger = logger } = {}) {
   const radioManager = new EventEmitter();
   radioManager.runCommand = (fn) => fn({ sendFloodAdvert });
   const store = new MetricsStore({ dbPath: ':memory:' });
   const airtimeCoordinator = new AirtimeCoordinator({ quietMs, now });
   radioManager.on('radio.packet', () => airtimeCoordinator.noteActivity());
   const scheduler = new FloodAdvertScheduler({
-    radioManager, airtimeCoordinator, store, logger, intervalHours, pollIntervalMs: 5, now
+    radioManager, airtimeCoordinator, store, logger: schedulerLogger, intervalHours, pollIntervalMs: 5, now
   });
-  return { radioManager, store, scheduler };
+  return { radioManager, store, scheduler, schedulerLogger };
 }
 
 test('requests one startup flood advert after connection and waits for quiet air', async () => {
@@ -76,6 +76,42 @@ test('requests the next advert from the prior accepted-send time', async () => {
   assert.equal(sent, 1);
   nowMs = dueAt;
   await waitFor(() => sent === 2);
+  await rig.scheduler.stop();
+  rig.store.close();
+});
+
+test('resolves a failed flood advert attempt and logs the command error without marking it sent', async () => {
+  const warnings = [];
+  const rig = makeRig({
+    schedulerLogger: {
+      info() {},
+      error() {},
+      warn: (source, message, meta) => warnings.push({ source, message, meta })
+    },
+    sendFloodAdvert: async () => {
+      throw new Error('radio send failed');
+    }
+  });
+
+  rig.scheduler.start();
+  rig.radioManager.emit('radio.connected');
+  await waitFor(() => warnings.length === 1);
+
+  const state = rig.store.getFloodAdvertState();
+  assert.equal(state.status, 'idle');
+  assert.equal(state.requestedAt, null);
+  assert.equal(state.attemptStartedAt, null);
+  assert.ok(Number.isInteger(state.lastAttemptAt));
+  assert.equal(state.lastSentAt, null);
+  assert.ok(Number.isInteger(state.nextDueAt));
+  assert.deepEqual(warnings[0], {
+    source: 'services.floodAdvert',
+    message: 'flood advert command failed',
+    meta: { error: 'radio send failed' }
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(warnings.length, 1, 'a failed startup-only advert must not enter an immediate retry loop');
   await rig.scheduler.stop();
   rig.store.close();
 });

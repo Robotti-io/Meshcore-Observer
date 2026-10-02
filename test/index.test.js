@@ -1,5 +1,9 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { RepeatCheckSweeper } from '../src/bots/repeat-check-sweeper.js';
 
 // Windows delivers process termination very differently from POSIX (no real
@@ -71,4 +75,41 @@ test('logs a clean shutdown when SIGINT is received', async () => {
   assert.equal(sweeperStartCalls, 1, 'the enabled bot starts the repeat-check sweeper');
   assert.equal(sweeperStopCalls, 1, 'application shutdown stops the repeat-check sweeper');
   assert.equal(process.exitCode, 0);
+});
+
+test('does not start radio or network services when the required store cannot open', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'meshcore-store-startup-failure-'));
+  const botsConfigPath = join(tempDir, 'bots.config.json');
+  const brokersConfigPath = join(tempDir, 'brokers.config.json');
+  const invalidDbPath = join(tempDir, 'not-a-database');
+  mkdirSync(invalidDbPath);
+  writeFileSync(botsConfigPath, '[]', 'utf8');
+  writeFileSync(brokersConfigPath, '[]', 'utf8');
+
+  try {
+    const result = spawnSync(process.execPath, [resolve('src/index.js')], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      timeout: 5000,
+      env: {
+        ...process.env,
+        PACKETCAPTURE_CONNECTION_TYPE: 'tcp',
+        PACKETCAPTURE_TCP_HOST: '127.0.0.1',
+        PACKETCAPTURE_TCP_PORT: '1',
+        PACKETCAPTURE_IATA: 'CVG',
+        PACKETCAPTURE_BOTS_CONFIG_FILE: botsConfigPath,
+        PACKETCAPTURE_BROKERS_CONFIG_FILE: brokersConfigPath,
+        PACKETCAPTURE_METRICS_UI_DB_PATH: invalidDbPath
+      }
+    });
+    const output = `${result.stdout}\n${result.stderr}`;
+
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1);
+    assert.match(output, /failed to open the persisted data store/);
+    assert.doesNotMatch(output, /failed to open tcp connection|radio connect attempt failed/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });

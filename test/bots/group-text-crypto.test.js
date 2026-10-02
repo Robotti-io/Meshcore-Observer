@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createCipheriv, createHmac } from 'node:crypto';
 import { decryptGroupText } from '../../src/bots/group-text-crypto.js';
