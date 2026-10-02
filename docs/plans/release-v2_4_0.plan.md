@@ -958,6 +958,8 @@ A bug fix is not complete until:
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/12](https://github.com/Robotti-io/Meshcore-Observer/issues/12)
 
+**Planning decisions (2026-10-02):** A configured `auth.passwordEnv` is authoritative and fails startup if missing/empty; positional lookup is retained only when it is absent. Shared named variables are allowed. The selector must match `^[A-Z_][A-Z0-9_]*$` and is valid only with password auth. Preserve the existing credential requirement for disabled password-auth brokers. Secret values are not trimmed or exposed in errors/logs.
+
 Password-authenticated MQTT brokers currently obtain their password from a positional environment variable:
 
 ```text
@@ -968,9 +970,9 @@ where `<n>` corresponds to the broker's array position in `brokers.config.json`.
 
 This means reordering brokers may associate an existing secret with a different broker.
 
-### 6.1 Proposed backwards-compatible improvement
+### 6.1 Resolved backwards-compatible design
 
-Investigate allowing password-authenticated brokers to optionally specify the environment variable containing their password, for example:
+Allow password-authenticated brokers to optionally specify the environment variable containing their password, for example:
 
 ```json
 {
@@ -987,14 +989,18 @@ The JSON configuration would contain only the environment variable name, never t
 
 ### 6.2 Work
 
-- [ ] Design a stable broker-to-secret mapping independent of array position.
-- [ ] Preserve support for existing `PACKETCAPTURE_MQTT<n>_PASSWORD` configuration during v2.x.
-- [ ] Prefer the explicitly named variable when configured.
-- [ ] Validate `passwordEnv` strictly.
-- [ ] Ensure secrets remain redacted from logs and configuration error output.
-- [ ] Add tests for named-secret configuration.
-- [ ] Add tests proving broker reordering does not change named-secret association.
-- [ ] Document positional password variables as legacy/deprecated if the new mechanism is adopted.
+- [x] Design a stable broker-to-secret mapping independent of array position; `auth.passwordEnv` is authoritative when configured, and positional mapping is used only when absent.
+- [x] Preserve support for existing `PACKETCAPTURE_MQTT<n>_PASSWORD` configuration during v2.x when `passwordEnv` is absent.
+- [x] Use the explicitly named variable exclusively when configured; fail startup if it is missing/empty, without falling back to positional lookup.
+- [x] Validate `passwordEnv` with strict AJV schema rules: uppercase environment-variable syntax and password-auth only.
+- [x] Permit intentional reuse of the same named variable by multiple brokers.
+- [x] Ensure secrets remain redacted from logs and configuration error output.
+- [x] Add tests for named-secret configuration.
+- [x] Add tests proving broker reordering does not change named-secret association.
+- [x] Document positional password variables as a legacy fallback that remains supported during v2.x.
+- [x] Preserve the current requirement that disabled password-auth brokers also have a configured password.
+
+**Implementation status (2026-10-02):** T2 and T3 are complete. At T2 completion, the focused config tests passed (54 tests), the full suite passed (47 files / 483 tests), `npm run test:ci` passed, and lint passed. T3's initial broker example loader test passed (16 tests); the full suite then passed (47 files / 484 tests), and lint passed. The final example expansion adds two TLS-enabled password-auth placeholders mapped to distinct variables; the updated loader test (16 tests), lint, and `git diff --check` passed. `brokers.config.example.json` now shows anonymous OKIMesh mqtt1/mqtt2 entries, MeshMapper and LetsMesh token-auth examples, and both password-auth placeholders. Positional fallback remains documented; token auth uses no static password variable.
 
 ### 6.3 Non-goal
 

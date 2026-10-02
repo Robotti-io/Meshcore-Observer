@@ -83,16 +83,35 @@ the others.
 
 - **`none`** - anonymous (e.g. OKI Mesh)
 - **`password`** - a static `auth.username` (in the file) and password. The
-  password itself is never stored in the file - set it as
-  `PACKETCAPTURE_MQTT<n>_PASSWORD`, where `<n>` is that broker's **1-based
-  position in the array** (the first entry is `MQTT1`, the second `MQTT2`,
-  and so on - reordering the array changes which entry a given
-  `..._PASSWORD` variable belongs to).
-- **`token`** - a JWT signed **on the radio itself** (the private key never
-  leaves the device) and refreshed automatically before it expires. Used
-  for LetsMesh. Set `auth.audience` (required) and optionally
-  `auth.tokenTtlSeconds` (default 24h) in the file - no environment
-  variable needed, since there's no static secret to keep out of it.
+  password itself is never stored in the file. For a stable mapping, set
+  `auth.passwordEnv` to the uppercase environment-variable name containing
+  the password:
+
+  The broker example includes two password-auth placeholders,
+  `mqtt1.example.com` and `mqtt2.example.com`. Their `passwordEnv` selectors
+  map to `MQTT1_EXAMPLE_PASSWORD` and `MQTT2_EXAMPLE_PASSWORD` in
+  `.env.example`, respectively. Replace the placeholder hosts and usernames
+  with your broker's settings and provide real password values through the
+  process environment or `.env.local`. The example keeps the passwords out
+  of JSON and uses TLS for these password-auth connections. The OKIMesh
+  entries are anonymous; MeshMapper and LetsMesh use device-signed tokens.
+  If `passwordEnv` is configured, that variable is used exclusively; a
+  missing or empty value is a startup error, even if the legacy positional
+  variable is set. Multiple brokers may intentionally share one named
+  variable. For backward compatibility, `PACKETCAPTURE_MQTT<n>_PASSWORD`
+  remains supported when `passwordEnv` is absent, where `<n>` is the
+  broker's **1-based position in the array**. This positional mapping is
+  legacy and reordering the array changes which broker it applies to; new
+  configurations should use `passwordEnv`.
+- **`token`** - a MeshCore auth JWT signed **on the radio itself** (the
+  private key never leaves the device) and refreshed automatically before
+  it expires. The example includes MeshMapper at `mqtt.meshmapper.net` and
+  LetsMesh at `mqtt-us-v1.letsmesh.net`, both using device-signed token auth.
+  See the [MeshCore-HA setup](https://wiki.meshmapper.net/mqtt-ha/) for the
+  MeshMapper connection settings and the [broker overview](https://wiki.meshmapper.net/mqtt-main/)
+  for both broker endpoints. Set `auth.audience` (required) and optionally
+  `auth.tokenTtlSeconds` (default 24h) in the file. Token auth does not use
+  a static password environment variable.
 
 Published topics (compatible with the existing MeshCore MQTT convention):
 

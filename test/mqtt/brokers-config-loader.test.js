@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { loadBrokersConfig, BrokersConfigError } from '../../src/mqtt/brokers-config-loader.js';
 
 function withTempFile(content, fn) {
@@ -25,6 +26,76 @@ const VALID_BROKER = {
   port: 1883,
   auth: { method: 'none' }
 };
+
+test('broker configuration example validates token, password, and anonymous auth examples', () => {
+  const examplePath = fileURLToPath(new URL('../../brokers.config.example.json', import.meta.url));
+  const brokers = loadBrokersConfig(examplePath);
+  const okimeshBrokers = brokers.filter((broker) => broker.id.startsWith('okimesh-'));
+
+  assert.deepEqual(
+    okimeshBrokers.map(({ id, host, auth }) => ({ id, host, method: auth.method })),
+    [
+      {
+        id: 'okimesh-mqtt1',
+        host: 'mqtt1.okimesh.org',
+        method: 'none'
+      },
+      {
+        id: 'okimesh-mqtt2',
+        host: 'mqtt2.okimesh.org',
+        method: 'none'
+      }
+    ]
+  );
+  const meshmapper = brokers.find((broker) => broker.id === 'meshmapper');
+  assert.equal(meshmapper.host, 'mqtt.meshmapper.net');
+  assert.equal(meshmapper.port, 443);
+  assert.equal(meshmapper.transport, 'wss');
+  assert.equal(meshmapper.tls, true);
+  assert.equal(meshmapper.auth.method, 'token');
+  assert.equal(meshmapper.auth.audience, 'mqtt.meshmapper.net');
+
+  const letsmesh = brokers.find((broker) => broker.id === 'letsmesh');
+  assert.equal(letsmesh.host, 'mqtt-us-v1.letsmesh.net');
+  assert.equal(letsmesh.port, 443);
+  assert.equal(letsmesh.transport, 'wss');
+  assert.equal(letsmesh.tls, true);
+  assert.equal(letsmesh.auth.method, 'token');
+  assert.equal(letsmesh.auth.audience, 'letsmesh');
+
+  const passwordBrokers = brokers.filter((broker) => broker.id.startsWith('password-broker-'));
+  assert.deepEqual(
+    passwordBrokers.map(({ id, host, port, tls, auth }) => ({
+      id,
+      host,
+      port,
+      tls,
+      method: auth.method,
+      username: auth.username,
+      passwordEnv: auth.passwordEnv
+    })),
+    [
+      {
+        id: 'password-broker-1',
+        host: 'mqtt1.example.com',
+        port: 8883,
+        tls: true,
+        method: 'password',
+        username: 'observer-1',
+        passwordEnv: 'MQTT1_EXAMPLE_PASSWORD'
+      },
+      {
+        id: 'password-broker-2',
+        host: 'mqtt2.example.com',
+        port: 8883,
+        tls: true,
+        method: 'password',
+        username: 'observer-2',
+        passwordEnv: 'MQTT2_EXAMPLE_PASSWORD'
+      }
+    ]
+  );
+});
 
 test('returns an empty array when the file does not exist', () => {
   const result = withTempFile(null, (filePath) => loadBrokersConfig(filePath));
@@ -110,6 +181,39 @@ test('accepts a password-auth broker with a username (the password itself comes 
   assert.equal(result.auth.method, 'password');
   assert.equal(result.auth.username, 'bot');
   assert.equal(result.auth.password, null);
+});
+
+test('accepts and preserves a named password environment variable for central resolution', () => {
+  const broker = {
+    ...VALID_BROKER,
+    id: 'private',
+    auth: { method: 'password', username: 'bot', passwordEnv: 'MQTT_PRIVATE_PASSWORD' }
+  };
+  const [result] = withTempFile(JSON.stringify([broker]), (filePath) => loadBrokersConfig(filePath));
+  assert.equal(result.auth.passwordEnv, 'MQTT_PRIVATE_PASSWORD');
+  assert.equal(result.auth.password, null);
+});
+
+test('rejects malformed named password environment variable names', () => {
+  for (const passwordEnv of ['mqtt_password', '1MQTT_PASSWORD', 'MQTT-PASSWORD', '']) {
+    const broker = { ...VALID_BROKER, auth: { method: 'password', username: 'bot', passwordEnv } };
+    assert.throws(
+      () => withTempFile(JSON.stringify([broker]), (filePath) => loadBrokersConfig(filePath)),
+      BrokersConfigError,
+      `expected ${JSON.stringify(passwordEnv)} to be rejected`
+    );
+  }
+});
+
+test('rejects passwordEnv when the broker does not use password authentication', () => {
+  for (const method of ['none', 'token']) {
+    const broker = { ...VALID_BROKER, auth: { method, passwordEnv: 'MQTT_PRIVATE_PASSWORD' } };
+    assert.throws(
+      () => withTempFile(JSON.stringify([broker]), (filePath) => loadBrokersConfig(filePath)),
+      BrokersConfigError,
+      `expected ${method} auth to reject passwordEnv`
+    );
+  }
 });
 
 test('rejects a token-auth broker with no audience', () => {
