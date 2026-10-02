@@ -9,6 +9,7 @@ import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
 import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
+import { createDefaultCommandHandlers } from './bots/command-handlers/index.js';
 import { RepeatCheckSweeper } from './bots/repeat-check-sweeper.js';
 import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
@@ -216,6 +217,7 @@ async function main() {
       replyQueue,
       nodeRegistry,
       statsReporter,
+      commandHandlers: createDefaultCommandHandlers({ nodeRegistry, statsReporter }),
       repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
     });
     botsByName.set(botConfig.name, bot);

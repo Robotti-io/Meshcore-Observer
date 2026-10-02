@@ -1012,100 +1012,28 @@ Do not remove existing positional variables in v2.4.0 if doing so would create a
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/13](https://github.com/Robotti-io/Meshcore-Observer/issues/13)
 
-`ChannelBot` now supports several distinct command behaviors:
+Future releases are expected to expand bot command kinds and capabilities. Issue #13 now targets a small, repeatable handler boundary that keeps common radio/reply lifecycle work centralized and avoids adding command-specific SQLite columns for each new command kind.
 
-- exact-response commands
-- repeater lookup commands
-- stats commands
+The detailed code findings, resolved assumptions, task breakdown, acceptance criteria, and implementation status are maintained in [the Issue #13 plan](v2.4.0/issue-13-channelbot-boundary.md).
 
-It also owns channel decoding, command matching, deduplication, reply enqueueing, response rendering, and repeat-confirmation bookkeeping.
+The completed T1 evidence audit showed that `ChannelBot` dispatched exact, lookup, and stats behavior, while lookup/stats data already used `NodeRegistry` and `StatsReporter` seams. T3 extracted those command behaviors behind an explicit handler map and added SQLite migration 8 to replace lookup-specific columns with strictly validated, versioned JSON handler state. T4 verified current commands, migration, queue recovery, dashboard metrics, and a future handler context without adding database columns. Shared radio/reply lifecycle and dashboard fields remain in the common path. The user approved the finalized plan, including the migration.
 
-The purpose of this issue is to evaluate whether the current command-handling boundary remains appropriate as the application grows.
+### 7.1 Current status
 
-**A refactor is not required for this issue to be completed.**
+- [x] Resolved the expected-growth assumption: future command kinds are anticipated.
+- [x] Approved the one-time generic-context SQLite migration in the finalized implementation plan.
+- [x] Complete the responsibility and persistence evidence audit: a fourth kind currently crosses strict config validation, `ChannelBot` matching/rendering branches, queue item mapping, and SQLite fields/migration; the current queue contains lookup-specific state from migration 6.
+- [x] Confirm that shared RF decode/channel/hop/dedup, queue/send, byte-budget rendering, and repeat-confirmation lifecycle should remain centralized; exact/lookup/stats match and response-state preparation are the command-specific seams.
+- [x] Finalize the handler contract and migration decision: explicit handler map, versioned `{ kind, version, data }` state, and one SQLite migration to generic `handler_state_json`.
+- [x] Obtain user approval of the finalized plan, including the one-time migration.
+- [x] Implement the selected design.
+- [x] T3 implementation validation: all 47 test files / 484 tests passed and lint passed.
+- [x] Complete T4 verification: 48 test files / 492 tests and lint passed; a v7 migration fixture and a temporary copy of the local v7 store migrated to v8 with lifecycle counts preserved, while a custom handler context survived store/queue restart without schema changes.
+- [x] Verify current commands and queued reply recovery; prove a new command context needs no new database columns.
+- [x] Record the outcome and evidence in the Issue #13 plan.
+- [ ] Link the eventual PR or GitHub issue update when available.
 
-If the current structure remains the clearest and lowest-risk design after review, documenting that conclusion and the reasoning behind it is considered a successful outcome.
-
-### 7.1 Investigation
-
-- [ ] Identify the current responsibilities owned by `ChannelBot`.
-- [ ] Identify which responsibilities are command-specific versus radio/channel lifecycle responsibilities.
-- [ ] Review whether adding another command kind would require disproportionate modification to the core packet-handling path.
-- [ ] Evaluate the minimum useful command-handler abstraction, if one is justified.
-- [ ] Determine whether separating command parsing/resolution would materially improve:
-  - testability;
-  - ownership clarity;
-  - extension cost;
-  - failure isolation.
-- [ ] Use coverage and test-suite findings to identify command-handling behavior that is difficult to exercise independently.
-- [ ] Avoid introducing an abstraction solely to reduce file size or increase coverage.
-- [ ] Preserve existing command configuration compatibility.
-
-Possible conceptual interface, if extraction proves useful:
-
-```text
-match(message)
-resolve(context)
-renderContext(...)
-```
-
-The exact shape should follow the existing code rather than forcing a predetermined abstraction.
-
-### 7.2 Decision outcomes
-
-This investigation should conclude with one of the following documented outcomes:
-
-#### 7.2.1 Outcome A — Refactor justified
-
-Proceed with a focused extraction if the review shows that a command-handler boundary materially improves maintainability, testability, or extension cost.
-
-Any refactor should:
-
-- preserve existing command behavior and configuration;
-- keep radio decoding, hop filtering, deduplication, and queueing centralized where appropriate;
-- avoid unnecessary framework or plugin complexity;
-- include regression coverage for existing command types;
-- reduce coupling without introducing additional lifecycle ambiguity.
-
-#### 7.2.2 Outcome B — No refactor required
-
-If the existing `ChannelBot` structure remains appropriate:
-
-- document why the current responsibility boundary is still acceptable;
-- identify any known pressure points to monitor;
-- document what future condition would justify revisiting the abstraction;
-- avoid changing production structure solely to satisfy this issue;
-- open separate follow-up work only if a concrete future need is identified.
-
-Examples of future triggers might include:
-
-- addition of several more command kinds;
-- repeated duplication between command implementations;
-- difficulty testing command behavior without exercising unrelated radio logic;
-- changes to one command type frequently affecting others;
-- lifecycle or dependency complexity becoming difficult to reason about.
-
-### 7.3 Decision record
-
-Before closing the issue, record the conclusion in the issue or associated pull request:
-
-- **Decision:** Refactor / No refactor
-- **Evidence considered:** coverage findings, existing tests, expected command growth, code ownership, observed duplication
-- **Reasoning:** why the chosen direction is preferable
-- **Follow-up:** any deferred work or conditions that should cause the decision to be revisited
-
-### 7.4 Acceptance criteria
-
-This issue is complete when:
-
-- [ ] the current `ChannelBot` responsibility boundary has been reviewed;
-- [ ] the cost of adding another command kind has been evaluated;
-- [ ] relevant coverage/testability findings have been considered;
-- [ ] a clear decision has been documented;
-- [ ] if refactoring is justified, the extraction is implemented with regression coverage;
-- [ ] if refactoring is not justified, the rationale and future revisit criteria are documented;
-- [ ] existing command behavior and configuration remain compatible;
-- [ ] no abstraction is introduced solely for stylistic reasons or file-size reduction.
+**T1 evidence record (2026-10-02):** `test/bots/channel-bot.test.js` contains 47 tests; command-kind paths are exercised with fake radio events and encrypted packet fixtures, while response templates, stats ranges, node registry, and stats reporter also have focused module tests. `ReplyQueue` persists plain data and resumes pending replies; MetricsStore migrations 4–6 added/consolidated reply persistence, with migration 6 adding lookup-specific fields. Dashboard counts/outcomes use shared bot/trigger/status/resolution fields. These findings justify reducing command-specific cross-layer changes while preserving the shared RF/reply path.
 
 ---
 

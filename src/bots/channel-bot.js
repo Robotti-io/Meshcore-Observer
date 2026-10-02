@@ -3,7 +3,7 @@ import { normalizeRawPacketEvent } from '../packets/packet-normalizer.js';
 import { calculatePacketHash } from '../packets/packet-hash.js';
 import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
 import { RepeatCheckTracker } from './repeat-check-tracker.js';
-import { resolveStatsRange } from './stats-range.js';
+import { createDefaultCommandHandlers } from './command-handlers/index.js';
 import { channelHashForKey } from './channel-key.js';
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
@@ -15,27 +15,6 @@ const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
 // only used when a caller (e.g. a test) constructs a bot without threading
 // the configured value through.
 const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 10000;
-
-function formatRelativeAge(timestamp, now) {
-  if (timestamp === undefined || timestamp === null) {
-    return 'unknown';
-  }
-
-  const ageMs = Math.max(0, now - Number(timestamp));
-  if (ageMs < 60 * 1000) {
-    return 'just now';
-  }
-
-  const units = [
-    ['y', 365 * 24 * 60 * 60 * 1000],
-    ['mo', 30 * 24 * 60 * 60 * 1000],
-    ['d', 24 * 60 * 60 * 1000],
-    ['h', 60 * 60 * 1000],
-    ['m', 60 * 1000]
-  ];
-  const [unit, durationMs] = units.find(([, duration]) => ageMs >= duration);
-  return `${Math.floor(ageMs / durationMs)}${unit} ago`;
-}
 
 function hopCountFor(packet) {
   if (DIRECT_ROUTES.has(packet.route_type_string)) {
@@ -53,7 +32,7 @@ function formatPath(packet) {
 
 /**
  * One independently-configured channel bot: listens on its own channel,
- * matches its own set of exact trigger -> response-template commands, and
+ * dispatches its configured commands through explicit kind handlers, and
  * replies with a message rendered within a hard byte budget (see
  * response-template.js). A deployment can run any number of these, each
  * bound to a different channel/command set - see bots.config.json and
@@ -89,10 +68,7 @@ export class ChannelBot {
   #minHops;
   #maxMessageBytes;
   #commands;
-  #lookupCommands;
-  #statsCommands;
-  #nodeRegistry;
-  #statsReporter;
+  #commandHandlers;
   #logger;
   #deduplicator;
   #repeatCheckTracker;
@@ -132,7 +108,8 @@ export class ChannelBot {
     repeatCheckTracker = new RepeatCheckTracker({ timeoutMs: repeatCheckTimeoutMs, now }),
     replyQueue,
     nodeRegistry,
-    statsReporter
+    statsReporter,
+    commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter })
   }) {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
@@ -141,20 +118,23 @@ export class ChannelBot {
     this.#minHops = botConfig.minHops;
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
-    this.#lookupCommands = botConfig.commands.filter((command) => command.kind === 'lookup');
-    this.#statsCommands = botConfig.commands.filter((command) => command.kind === 'stats');
-    this.#nodeRegistry = nodeRegistry;
-    this.#statsReporter = statsReporter;
+    this.#commandHandlers = commandHandlers;
     this.#now = now;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
     this.#repeatCheckTracker = repeatCheckTracker;
 
-    if (this.#lookupCommands.length > 0 && !nodeRegistry) {
+    if (botConfig.commands.some((command) => command.kind === 'lookup') && !nodeRegistry) {
       throw new Error(`bot "${this.#name}" has a lookup command but no nodeRegistry was provided`);
     }
-    if (this.#statsCommands.length > 0 && !statsReporter) {
+    if (botConfig.commands.some((command) => command.kind === 'stats') && !statsReporter) {
       throw new Error(`bot "${this.#name}" has a stats command but no statsReporter was provided`);
+    }
+    for (const command of botConfig.commands) {
+      const kind = command.kind ?? 'exact';
+      if (!this.#commandHandlers.has(kind)) {
+        throw new Error(`bot "${this.#name}" has a ${kind} command but no matching command handler was provided`);
+      }
     }
     // sendQueuedReply() intentionally lets a send failure propagate (see
     // its own doc comment) for a real ReplyQueue to catch/count/log - this
@@ -351,40 +331,15 @@ export class ChannelBot {
       return;
     }
 
-    let command = this.#commands.get(decrypted.text);
-    // Distinct name from ReplyQueue's own `outcome` ('sent'/'failed'/...
-    // written onto a spread copy of the queued item once dispatch settles,
-    // see reply-queue.js#safeRecordOutcome) - this is a different axis
-    // entirely (which of a 'lookup' command's four response templates
-    // applies), and reusing the same name would read as if one shadowed
-    // the other.
-    let lookupOutcome;
-    let query;
-    let name;
-    let matchCount;
-    let lastHeardAt;
-    let nodePrefix;
-    let repeaterCount;
-
-    if (!command) {
-      const lookupMatch = this.#matchLookupCommand(decrypted.text);
-      if (lookupMatch) {
-        ({ command, outcome: lookupOutcome, query, name, matchCount, lastHeardAt, nodePrefix, repeaterCount } = lookupMatch);
+    let match = null;
+    for (const handler of this.#commandHandlers.values()) {
+      match = handler?.match({ commands: [...this.#commands.values()], text: decrypted.text }) ?? null;
+      if (match) {
+        break;
       }
     }
 
-    // A 'stats' command's argument (its range token, e.g. "1h") rides
-    // along in this same `query` field a 'lookup' command's argument
-    // already uses - sendQueuedReply knows which interpretation applies
-    // from command.kind, so no separate field/DB column is needed.
-    if (!command) {
-      const statsMatch = this.#matchStatsCommand(decrypted.text);
-      if (statsMatch) {
-        ({ command, query } = statsMatch);
-      }
-    }
-
-    if (!command) {
+    if (!match) {
       this.#logger.debug('bots.channelBot', 'decrypted message did not match any configured trigger', {
         bot: this.#name,
         sender: decrypted.sender,
@@ -393,6 +348,7 @@ export class ChannelBot {
       });
       return;
     }
+    const { command, state: handlerStateJson } = match;
 
     const hopCount = hopCountFor(packet);
     if (hopCount < this.#minHops) {
@@ -438,11 +394,8 @@ export class ChannelBot {
     this.#replyQueue.enqueue({
       botName: this.#name,
       channel: this.#channelName,
-      // command.trigger, not decrypted.text: for a 'lookup' command
-      // decrypted.text also carries the query argument (e.g.
-      // "!lookup E85C"), but sendQueuedReply looks the command config back
-      // up by its bare trigger. For an 'exact' command the two are always
-      // identical, since that's what made this.#commands.get() match.
+      // command.trigger, not decrypted.text: argument-taking handlers
+      // match text that also carries command-specific input.
       trigger: command.trigger,
       sender: decrypted.sender,
       hopCount,
@@ -455,86 +408,8 @@ export class ChannelBot {
       // payload's "hash" field (there uppercase, matching the existing
       // compatibility format), just lowercased for this purpose.
       hash: hash.toLowerCase(),
-      // Only populated for a 'lookup' command match (see
-      // #matchLookupCommand) - undefined for 'exact' commands, which
-      // sendQueuedReply ignores in favor of the single `response` template.
-      query,
-      lookupOutcome,
-      name,
-      matchCount,
-      lastHeardAt,
-      nodePrefix,
-      repeaterCount
+      handlerStateJson
     });
-  }
-
-  /**
-   * Checks `text` against every configured 'lookup' command's trigger,
-   * resolving the argument (if any) against the node registry. Returns
-   * `null` if `text` doesn't match any lookup trigger at all - as opposed
-   * to matching one with a missing/invalid argument, which resolves to
-   * `outcome: 'invalid'` rather than falling through to "no trigger
-   * matched" (the operator gets a helpful reply either way).
-   *
-   * Only the first configured lookup command whose trigger matches is
-   * used - two lookup commands sharing a trigger isn't a supported
-   * configuration.
-   */
-  #matchLookupCommand(text) {
-    for (const command of this.#lookupCommands) {
-      const { trigger } = command;
-      let query;
-      if (text === trigger) {
-        query = '';
-      } else if (text.startsWith(`${trigger} `)) {
-        query = text.slice(trigger.length + 1).trim();
-      } else {
-        continue;
-      }
-
-      if (query.length === 0) {
-        return { command, outcome: 'invalid', query };
-      }
-
-      const result = this.#nodeRegistry.findByPrefix(query, { type: 'REPEATER' });
-      return {
-        command,
-        outcome: result.status,
-        query: result.query ?? query,
-        name: result.node?.name,
-        matchCount: result.matchCount,
-        lastHeardAt: result.node?.lastHeardAt,
-        nodePrefix:
-          result.status === 'found' && query.length < 4
-            ? result.node?.publicKeyHex?.slice(0, 4) ?? result.query ?? query
-            : result.query ?? query,
-        repeaterCount: result.status === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined
-      };
-    }
-    return null;
-  }
-
-  /**
-   * Checks `text` against every configured 'stats' command's trigger.
-   * Unlike #matchLookupCommand, this does no store work at all - it just
-   * captures the raw range token (e.g. "1h"), possibly empty/unrecognized.
-   * Validity is resolved later, in sendQueuedReply, at actual send time:
-   * a queued item is re-read from MetricsStore at dispatch (see
-   * reply-queue.js), not kept as this object, so there's nothing to gain
-   * by resolving the range here, and resolving it fresh at send time means
-   * the numbers reflect "now" rather than several-seconds-stale match time.
-   */
-  #matchStatsCommand(text) {
-    for (const command of this.#statsCommands) {
-      const { trigger } = command;
-      if (text === trigger) {
-        return { command, query: '' };
-      }
-      if (text.startsWith(`${trigger} `)) {
-        return { command, query: text.slice(trigger.length + 1).trim() };
-      }
-    }
-    return null;
   }
 
   /**
@@ -557,9 +432,9 @@ export class ChannelBot {
    * is what provides that guarantee for this path, one level up from
    * where every other public method here still catches locally.
    *
-   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, query?: string, lookupOutcome?: string, name?: string, matchCount?: number, lastHeardAt?: number, nodePrefix?: string, repeaterCount?: number}} item
+   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson: string}} item
    */
-  async sendQueuedReply({ trigger, sender, hopCount, path, hash, query, lookupOutcome, name, matchCount, lastHeardAt, nodePrefix, repeaterCount }) {
+  async sendQueuedReply({ trigger, sender, hopCount, path, hash, handlerStateJson }) {
     const command = this.#commands.get(trigger);
     if (!command) {
       // Not expected in the current architecture (bots.config.json is
@@ -570,54 +445,22 @@ export class ChannelBot {
       throw new Error(`no configured command matches trigger "${trigger}"`);
     }
 
-    // A 'lookup' command has no single `response` template - which of its
-    // four outcome-specific templates applies was already decided at match
-    // time (see #matchLookupCommand) and travels with the queued item as
-    // `lookupOutcome` (named apart from ReplyQueue's own `outcome` - see
-    // #handleRawPacket - so the two never get confused for each other).
-    // A 'stats' command instead resolves its argument (`query`, the range
-    // token) here, at actual send time - see #matchStatsCommand's doc
-    // comment for why. Only one outcome's template is ever rendered for
-    // either kind, so an 'exact' command's overflow-degradation behavior
-    // (see response-template.js) is the only kind that always gets an
-    // `overflowTemplate`.
-    let template;
-    let overflowTemplate;
-    let statsValues;
-    if (command.kind === 'lookup') {
-      template = this.#lookupResponseTemplate(command, lookupOutcome);
-    } else if (command.kind === 'stats') {
-      const resolved = resolveStatsRange(query, { now: this.#now(), earliestSampleAt: this.#statsReporter.earliestSampleAt() });
-      if (resolved) {
-        statsValues = { range: query, ...this.#statsReporter.summarize(resolved) };
-        template = command.response;
-        overflowTemplate = command.overflowResponse;
-      } else {
-        template = command.usageResponse;
-      }
-    } else {
-      template = command.response;
-      overflowTemplate = command.overflowResponse;
+    const handler = this.#commandHandlers.get(command.kind ?? 'exact');
+    if (!handler) {
+      throw new Error(`no command handler is registered for kind "${command.kind ?? 'exact'}"`);
     }
+    const data = handler.restore(handlerStateJson);
+    const rendered = handler.render({
+      command,
+      data,
+      now: this.#now(),
+      sharedReply: { sender, hopCount, path, trigger, hash }
+    });
 
     const { message, degraded } = renderResponse({
-      template,
-      overflowTemplate,
-      values: {
-        sender,
-        hopCount,
-        path,
-        trigger,
-        hash,
-        query,
-        name,
-        matchCount,
-        lastHeard: formatRelativeAge(lastHeardAt, this.#now()),
-        nodePrefix: nodePrefix ?? query,
-        repeaterCount:
-          repeaterCount ?? (lookupOutcome === 'not_found' ? this.#nodeRegistry.countRepeaters() : undefined),
-        ...statsValues
-      },
+      template: rendered.template,
+      overflowTemplate: rendered.overflowTemplate,
+      values: rendered.values,
       maxBytes: this.#maxMessageBytes
     });
 
@@ -682,16 +525,4 @@ export class ChannelBot {
     }
   }
 
-  #lookupResponseTemplate(command, lookupOutcome) {
-    switch (lookupOutcome) {
-      case 'found':
-        return command.foundResponse;
-      case 'not_found':
-        return command.notFoundResponse;
-      case 'ambiguous':
-        return command.ambiguousResponse;
-      default:
-        return command.invalidResponse;
-    }
-  }
 }

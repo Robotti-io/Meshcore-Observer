@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
+import { createHandlerStateCodec } from '../../src/bots/command-handlers/handler-state.js';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 
@@ -402,6 +406,54 @@ test('start() resumes a reply that was still pending in the store from a previou
 
   await waitFor(() => calls.length === 1, { timeoutMs: 2000 });
   assert.equal(calls[0].trigger, '!resumed');
+});
+
+test('a persisted handler context is restored and dispatched after reopening the store', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-handler-recovery-'));
+  const dbPath = join(dir, 'metrics.sqlite3');
+  const codec = createHandlerStateCodec({
+    kind: 'survey',
+    dataSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['questionId'],
+      properties: { questionId: { type: 'string' } }
+    }
+  });
+  let queue;
+  let store;
+
+  try {
+    const firstProcessStore = new MetricsStore({ dbPath });
+    const now = Date.now();
+    firstProcessStore.enqueueReplyItem({
+      ...baseItem({ trigger: '!survey' }),
+      handlerStateJson: codec.serialize({ questionId: 'weather' }),
+      enqueuedAt: now,
+      expiresAt: now + TTL_MS
+    });
+    const { id } = firstProcessStore.peekOldestPendingReplyItem();
+    firstProcessStore.close();
+
+    store = new MetricsStore({ dbPath });
+    const dispatched = [];
+    const dispatch = async (item) => dispatched.push({ trigger: item.trigger, data: codec.restore(item.handlerStateJson) });
+    queue = newQueue({ store, dispatch });
+    queue.start();
+
+    await waitFor(() => store.getReplyById(id).status === 'sent');
+    assert.deepEqual(dispatched, [{ trigger: '!survey', data: { questionId: 'weather' } }]);
+  } finally {
+    if (queue) {
+      await queue.stop();
+      queues.delete(queue);
+    }
+    if (store) {
+      stores.delete(store);
+      store.close();
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('start() does nothing when nothing was left pending', () => {

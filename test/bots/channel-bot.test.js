@@ -398,6 +398,22 @@ test('enqueues a plain-data reply (not a callback) into the shared replyQueue ra
   assert.equal(bot.getRepliesSent(), 1);
 });
 
+test('invalid queued handler state fails dispatch before any radio send', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  await assert.rejects(
+    bot.sendQueuedReply({
+      trigger: '!echo', sender: 'Jeymz', hopCount: 1, path: 'AA', hash: 'deadbeef',
+      handlerStateJson: JSON.stringify({ kind: 'exact', version: 2, data: {} })
+    }),
+    /invalid/
+  );
+  assert.equal(radioManager.commandCalls.length, 0);
+  bot.stop();
+});
+
 test('replies immediately when no replyQueue is injected (the default, immediate-send queue)', async () => {
   const radioManager = fakeRadioManager();
   const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
@@ -675,10 +691,19 @@ test('!lookup queues the found-node response snapshot for restart-safe dispatch'
   await flush();
 
   assert.equal(queued.length, 1);
-  assert.equal(queued[0].lookupOutcome, 'found');
-  assert.equal(queued[0].lastHeardAt, now - 20 * 60_000);
-  assert.equal(queued[0].nodePrefix, 'E85C');
-  assert.equal(queued[0].repeaterCount, undefined);
+  assert.deepEqual(JSON.parse(queued[0].handlerStateJson), {
+    kind: 'lookup',
+    version: 1,
+    data: {
+      query: 'E8',
+      outcome: 'found',
+      name: 'Summit Repeater',
+      matchCount: null,
+      lastHeardAt: now - 20 * 60_000,
+      nodePrefix: 'E85C',
+      repeaterCount: null
+    }
+  });
   bot.stop();
 });
 
@@ -699,11 +724,19 @@ test('!lookup renders pre-migration found rows with an explicit unknown age', as
     hopCount: 1,
     path: 'AA',
     hash: 'deadbeef',
-    lookupOutcome: 'found',
-    name: 'Legacy Repeater',
-    query: 'E85',
-    lastHeardAt: null,
-    nodePrefix: null
+    handlerStateJson: JSON.stringify({
+      kind: 'lookup',
+      version: 1,
+      data: {
+        query: 'E85',
+        outcome: 'found',
+        name: 'Legacy Repeater',
+        matchCount: null,
+        lastHeardAt: null,
+        nodePrefix: null,
+        repeaterCount: null
+      }
+    })
   });
 
   assert.equal(radioManager.commandCalls[0].message, '📡 E85 (heard unknown) = Legacy Repeater');

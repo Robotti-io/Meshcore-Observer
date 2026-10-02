@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { createHandlerStateCodec } from '../../src/bots/command-handlers/handler-state.js';
 import { MetricsStore, resolveBucketWidthMs } from '../../src/metrics/store.js';
 
 function openStore() {
@@ -492,13 +493,19 @@ test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, 
       hopCount: 3,
       path: 'AA➡️BB',
       hash: 'cafef00d',
-      query: 'E85C',
-      lookupOutcome: 'found',
-      name: 'Summit Repeater',
-      matchCount: 1,
-      lastHeardAt: 900,
-      nodePrefix: 'E85C',
-      repeaterCount: 17,
+      handlerStateJson: JSON.stringify({
+        kind: 'lookup',
+        version: 1,
+        data: {
+          query: 'E85C',
+          outcome: 'found',
+          name: 'Summit Repeater',
+          matchCount: 1,
+          lastHeardAt: 900,
+          nodePrefix: 'E85C',
+          repeaterCount: 17
+        }
+      }),
       enqueuedAt: 1_000,
       expiresAt: 61_000
     })
@@ -512,13 +519,19 @@ test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, 
   assert.equal(item.hopCount, 3);
   assert.equal(item.path, 'AA➡️BB');
   assert.equal(item.hash, 'cafef00d');
-  assert.equal(item.query, 'E85C');
-  assert.equal(item.lookupOutcome, 'found');
-  assert.equal(item.name, 'Summit Repeater');
-  assert.equal(item.matchCount, 1);
-  assert.equal(item.lastHeardAt, 900);
-  assert.equal(item.nodePrefix, 'E85C');
-  assert.equal(item.repeaterCount, 17);
+  assert.deepEqual(JSON.parse(item.handlerStateJson), {
+    kind: 'lookup',
+    version: 1,
+    data: {
+      query: 'E85C',
+      outcome: 'found',
+      name: 'Summit Repeater',
+      matchCount: 1,
+      lastHeardAt: 900,
+      nodePrefix: 'E85C',
+      repeaterCount: 17
+    }
+  });
   assert.equal(item.enqueuedAt, 1_000);
   assert.equal(item.expiresAt, 61_000);
   assert.equal(item.status, 'pending');
@@ -528,18 +541,12 @@ test('peekOldestPendingReplyItem returns the item with the earliest enqueuedAt, 
   store.close();
 });
 
-test('enqueueReplyItem stores optional lookup-only fields as null when omitted', () => {
+test('enqueueReplyItem defaults to a serializable exact handler context when omitted', () => {
   const store = openStore();
   store.enqueueReplyItem(baseReplyQueueItem());
 
   const item = store.peekOldestPendingReplyItem();
-  assert.equal(item.query, null);
-  assert.equal(item.lookupOutcome, null);
-  assert.equal(item.name, null);
-  assert.equal(item.matchCount, null);
-  assert.equal(item.lastHeardAt, null);
-  assert.equal(item.nodePrefix, null);
-  assert.equal(item.repeaterCount, null);
+  assert.deepEqual(JSON.parse(item.handlerStateJson), { kind: 'exact', version: 1, data: {} });
   store.close();
 });
 
@@ -547,19 +554,75 @@ test('enqueueReplyItem persists lookup response metadata for dispatch after rest
   const store = openStore();
   store.enqueueReplyItem(
     baseReplyQueueItem({
-      query: 'E8',
-      lookupOutcome: 'not_found',
-      repeaterCount: 17,
+      handlerStateJson: JSON.stringify({
+        kind: 'lookup',
+        version: 1,
+        data: {
+          query: 'E8',
+          outcome: 'not_found',
+          name: null,
+          matchCount: null,
+          lastHeardAt: null,
+          nodePrefix: 'E8',
+          repeaterCount: 17
+        }
+      }),
       enqueuedAt: 1_000,
       expiresAt: 61_000
     })
   );
 
   const item = store.peekOldestPendingReplyItem();
-  assert.equal(item.repeaterCount, 17);
-  assert.equal(item.lastHeardAt, null);
-  assert.equal(item.nodePrefix, null);
+  assert.equal(JSON.parse(item.handlerStateJson).data.repeaterCount, 17);
+  assert.equal(JSON.parse(item.handlerStateJson).data.lastHeardAt, null);
+  assert.equal(JSON.parse(item.handlerStateJson).data.nodePrefix, 'E8');
   store.close();
+});
+
+test('an additional handler context queues and restores without changing the reply table schema', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-generic-handler-state-'));
+  const dbPath = join(dir, 'metrics.sqlite3');
+  const codec = createHandlerStateCodec({
+    kind: 'survey',
+    dataSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['questionId', 'choices'],
+      properties: {
+        questionId: { type: 'string' },
+        choices: { type: 'array', items: { type: 'string' } }
+      }
+    }
+  });
+
+  let store;
+  try {
+    store = new MetricsStore({ dbPath });
+    store.enqueueReplyItem(baseReplyQueueItem({
+      trigger: '!survey',
+      handlerStateJson: codec.serialize({ questionId: 'weather', choices: ['sun', 'rain'] })
+    }));
+    store.close();
+    store = null;
+    const firstDb = new DatabaseSync(dbPath);
+    const firstColumns = firstDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
+    firstDb.close();
+
+    store = new MetricsStore({ dbPath });
+    const restored = store.peekOldestPendingReplyItem();
+    assert.deepEqual(codec.restore(restored.handlerStateJson), { questionId: 'weather', choices: ['sun', 'rain'] });
+    store.close();
+    store = null;
+    const secondDb = new DatabaseSync(dbPath);
+    const secondColumns = secondDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
+    secondDb.close();
+    assert.deepEqual(secondColumns, firstColumns);
+    assert.ok(secondColumns.includes('handler_state_json'));
+    assert.ok(!secondColumns.includes('survey'));
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('resolveReplyItem moves an item out of pending, recording status/resolvedAt/queuedMs', () => {
@@ -726,12 +789,20 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
 
     const store = new MetricsStore({ dbPath });
     const pending = store.peekOldestPendingReplyItem();
-    assert.equal(pending.query, 'E85');
-    assert.equal(pending.name, 'Summit Repeater');
+    assert.deepEqual(JSON.parse(pending.handlerStateJson), {
+      kind: 'lookup',
+      version: 1,
+      data: {
+        query: 'E85',
+        outcome: 'found',
+        name: 'Summit Repeater',
+        matchCount: 1,
+        lastHeardAt: null,
+        nodePrefix: null,
+        repeaterCount: null
+      }
+    });
     assert.equal(pending.status, 'pending');
-    assert.equal(pending.lastHeardAt, null);
-    assert.equal(pending.nodePrefix, null);
-    assert.equal(pending.repeaterCount, null);
     assert.equal(store.countPendingReplyItems(), 1);
     assert.deepEqual(store.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 }), [
       { botName: 'echo', outcome: 'sent', total: 1 }
@@ -739,7 +810,87 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 7);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 8);
+    const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
+    assert.ok(columns.includes('handler_state_json'));
+    assert.ok(!columns.includes('lookup_outcome'));
+    migratedDb.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migration 8 converts a v7 reply table and preserves lifecycle queries and dashboard totals', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-metrics-v7-'));
+  const dbPath = join(dir, 'metrics.sqlite3');
+
+  try {
+    const initializedStore = new MetricsStore({ dbPath });
+    initializedStore.close();
+
+    const v7Db = new DatabaseSync(dbPath);
+    v7Db.exec(`
+      DROP INDEX idx_bot_replies_status_enqueued;
+      DROP INDEX idx_bot_replies_status_resolved;
+      DROP INDEX idx_bot_replies_bot_status_resolved;
+      ALTER TABLE bot_replies RENAME TO bot_replies_v8;
+      CREATE TABLE bot_replies (
+        id INTEGER PRIMARY KEY, bot_name TEXT NOT NULL, channel TEXT, trigger TEXT NOT NULL,
+        sender TEXT, hop_count INTEGER, path TEXT, hash TEXT, query TEXT, lookup_outcome TEXT,
+        name TEXT, match_count INTEGER, enqueued_at INTEGER, expires_at INTEGER,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'expired', 'cancelled')),
+        resolved_at INTEGER, queued_ms INTEGER, last_heard_at INTEGER, node_prefix TEXT, repeater_count INTEGER
+      );
+      INSERT INTO bot_replies (
+        id, bot_name, channel, trigger, sender, hop_count, path, hash, query, lookup_outcome,
+        name, match_count, enqueued_at, expires_at, status, resolved_at, queued_ms,
+        last_heard_at, node_prefix, repeater_count
+      ) VALUES
+        (11, 'echo', '#echo', '!lookup', 'Jay', 2, 'AA', 'abc123', 'E85C', 'found',
+         'Summit', 1, 1000, 61000, 'pending', NULL, NULL, 900, 'E85C', 12),
+        (12, 'echo', '#echo', '!stats', 'Jay', 1, 'BB', 'abc124', '1h', NULL,
+         NULL, NULL, 1100, 61100, 'failed', 3100, 2000, NULL, NULL, NULL),
+        (13, 'echo', '#echo', '!echo', 'Jay', 1, 'CC', 'abc125', NULL, NULL,
+         NULL, NULL, 1200, 61200, 'sent', 4200, 3000, NULL, NULL, NULL);
+      DROP TABLE bot_replies_v8;
+      CREATE INDEX idx_bot_replies_status_enqueued ON bot_replies(status, enqueued_at);
+      CREATE INDEX idx_bot_replies_status_resolved ON bot_replies(status, resolved_at);
+      CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at);
+      PRAGMA user_version = 7;
+    `);
+    v7Db.close();
+
+    const migratedStore = new MetricsStore({ dbPath });
+    assert.deepEqual(JSON.parse(migratedStore.peekOldestPendingReplyItem().handlerStateJson), {
+      kind: 'lookup',
+      version: 1,
+      data: {
+        query: 'E85C', outcome: 'found', name: 'Summit', matchCount: 1,
+        lastHeardAt: 900, nodePrefix: 'E85C', repeaterCount: 12
+      }
+    });
+    assert.deepEqual(JSON.parse(migratedStore.getReplyById(12).handlerStateJson), {
+      kind: 'stats', version: 1, data: { query: '1h' }
+    });
+    assert.equal(migratedStore.getReplyById(12).status, 'failed');
+    assert.equal(migratedStore.getReplyById(12).resolvedAt, 3100);
+    assert.equal(migratedStore.getReplyById(12).queuedMs, 2000);
+    assert.deepEqual(migratedStore.queryBotReplyOutcomeTotals({ start: 0, end: 10_000 }), [
+      { botName: 'echo', outcome: 'failed', total: 1 },
+      { botName: 'echo', outcome: 'sent', total: 1 }
+    ]);
+    assert.deepEqual(migratedStore.queryBotCommandCounts({ botName: 'echo', start: 0, end: 10_000 }), [
+      { trigger: '!echo', count: 1 }
+    ]);
+    migratedStore.close();
+
+    const migratedDb = new DatabaseSync(dbPath);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 8);
+    const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
+    assert.deepEqual(columns, [
+      'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',
+      'enqueued_at', 'expires_at', 'status', 'resolved_at', 'queued_ms'
+    ]);
     migratedDb.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
