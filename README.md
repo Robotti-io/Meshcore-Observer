@@ -485,8 +485,8 @@ coverage/index.html
 The upload step runs after a failed test or coverage check as well. If setup
 fails before report files are created, that job has no report artifact.
 
-After successful and intentionally failing artifact uploads are validated, the
-checks to require for pull requests targeting `main` are:
+Successful and intentionally failing PR runs have both produced their report
+artifacts. The checks to require for pull requests targeting `main` are:
 
 - `lint`
 - `test (ubuntu-latest, Node 22.x)`
@@ -494,9 +494,9 @@ checks to require for pull requests targeting `main` are:
 - `test (windows-latest, Node 22.x)`
 - `test (windows-latest, Node 24.x)`
 
-Required-check configuration is still pending that validation. If the runner
-or Node matrix changes, update the workflow and this check list together, then
-confirm every new OS/Node combination passes before changing branch protection.
+Required-check configuration is still pending. If the runner or Node matrix
+changes, update the workflow and this check list together, then confirm every
+new OS/Node combination passes before changing branch protection.
 This CI workflow validates code; it does not build or deploy containers.
 
 ## Unattended startup on Windows

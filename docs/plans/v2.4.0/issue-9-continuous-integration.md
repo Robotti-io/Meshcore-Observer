@@ -58,12 +58,12 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 - [x] Add an unconditional, uniquely named artifact upload to each test-matrix job for JUnit, Cobertura, LCOV, JSON, and HTML reports; use the configured retention period and ignore missing files when setup fails early.
 - [x] Verify the successful PR run produced one matrix-specific artifact for each OS/Node combination.
 - [x] Locally verify the intentional coverage-threshold failure occurs after all 475 tests pass and produces all five report files.
-- [ ] Verify reports are uploaded on an intentionally failing coverage run.
+- [x] Verify reports are uploaded on an intentionally failing coverage run; GitHub run 37040249927 lists four non-empty matrix artifacts.
 - [ ] Configure and verify the lint and matrix statuses as required for pull requests to `main` after both artifact paths are validated.
 - **Objective:** Make test/coverage reports available to reviewers.
 - **Specific changes:** Upload `artifacts/junit.xml`, `coverage/cobertura-coverage.xml`, `coverage/lcov.info`, `coverage/coverage-final.json`, and `coverage/index.html` using an unconditional upload step and unique names for each OS/Node matrix job. Use the repository's configured artifact-retention policy unless maintainers specify another duration. After successful-run and failure-run artifact validation, require the lint and matrix checks for pull requests to `main`.
 - **Definition of done:** Reports are downloadable from successful and intentionally failing workflow runs; required check names are stable and block merging to `main`.
-- **Expected tests / validation:** [x] Verify GitHub lists four non-empty report artifacts on the successful PR run. [x] Verify locally that a 100% statement threshold fails after all tests pass and JUnit, Cobertura, LCOV, JSON, and HTML reports are generated. [ ] Verify GitHub uploads report artifacts from a PR run intentionally failing the coverage threshold. [ ] Verify GitHub marks the chosen lint and matrix checks as required for a pull request to `main` after artifact validation.
+- **Expected tests / validation:** [x] Verify GitHub lists four non-empty report artifacts on the successful PR run. [x] Verify locally that a 100% statement threshold fails after all tests pass and JUnit, Cobertura, LCOV, JSON, and HTML reports are generated. [x] Verify GitHub run 37040249927 failed all four matrix jobs at the coverage gate and lists four non-empty report artifacts. [ ] Verify GitHub marks the chosen lint and matrix checks as required for a pull request to `main` after artifact validation.
 
 #### T4: Document CI operation and maintenance
 
@@ -96,5 +96,5 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 
 1. [x] T1 — resolve GitHub Actions, main-only triggers, runner/Node matrix, and delayed required-check policy.
 2. [x] T2 — add lint and coverage-enforcing Windows/Linux matrix jobs; the PR matrix passes, with push-to-main validation pending after merge.
-3. [ ] T3 — upload reports on success and failure; validate an intentionally failing threshold run and then require stable checks.
+3. [ ] T3 — upload reports on success and failure (validated); configure and verify stable required checks for PRs to `main`.
 4. [x] T4 — document workflow operation and matrix maintenance; required-check configuration remains with T3.
