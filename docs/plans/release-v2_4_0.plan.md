@@ -588,37 +588,34 @@ This workstream is complete when:
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/11](https://github.com/Robotti-io/Meshcore-Observer/issues/11)
 
+**Planning decisions (2026-10-02):** Preserve the current Vitest runner, one-project execution, domain-based folders, and `*.test.js` names. Restrict changes to reliability or diagnostic issues supported by the Issue #11 audit; do not add test categories or rename files by default.
+
+**Issue #11 task status:**
+
+- [x] T1 — audit the suite and record evidence-based findings in the Issue #11 plan.
+- [x] T2 — fix confirmed resource-cleanup and isolation risks; affected tests and two full-suite runs passed, and lint passed.
+- [x] T3 — make confirmed timer tests deterministic while retaining real-I/O coverage; seven affected files passed (53 tests), two full-suite runs passed (47 files / 475 tests each), and lint passed.
+- [x] T4 — targeted review found no distinct missing high-risk behavior; existing tests cover the audited failure and recovery paths. `npm run test:ci` passed (47 files / 475 tests) and lint passed.
+
+**T1 audit findings (2026-10-02):** The 47-suite / 475-test JUnit report is readable, and the current organization needs no broad changes. T1 identified failure-path cleanup candidates in the flood-advert scheduler, radio-manager tests, and metrics-server test helper, plus timer/polling candidates in the airtime coordinator, scheduler, command queue, radio manager, sampler, reply queue, and MQTT token-refresh tests. Real socket, HTTP/SSE, and child-process waits remain integration behavior. No distinct missing high-risk failure case was confirmed; T4 is conditional on further targeted evidence.
+
+**T2 result (2026-10-02):** Flood-advert test rigs now stop the scheduler and close their store in `finally`; a file-local `afterEach` stops radio managers left active by failed assertions; and the metrics-server helper protects startup with its cleanup `try/finally`. The affected tests passed (52 tests), two full-suite runs passed (47 files / 475 tests each), and lint passed. An initial focused run had two unrepeatable bad-port failures in the metrics-server 404/405 cases; isolation, rerun, and both full-suite runs passed, so the observation is recorded for monitoring.
+
+**T3 result (2026-10-02):** The audited timer-only tests now use injected clocks, fake timers, or explicit synchronization in the airtime coordinator, command queue, radio manager, sampler, reply queue, token-refresh loop, and flood-advert scheduler. The in-flight reply dispatch assertion still models a delayed send across poll ticks, with fake time controlling its delay. Real socket, HTTP/SSE, and child-process waits remain intact. All seven affected files passed together (53 tests), the full suite passed twice (47 files / 475 tests each), and lint passed.
+
+**T4 result (2026-10-02):** Targeted review of startup/shutdown, radio retries, flood-advert failure and recovery, persisted reply lifecycle, token refresh, and broker-isolated publish failures found existing regression coverage for the audited high-risk paths. No distinct gap justified adding another test. `npm run test:ci` passed (47 files / 475 tests; 72.67% statements, 72.04% branches, 74.08% functions, 73.17% lines); lint passed.
+
 The migration to Vitest and the introduction of formal coverage reporting should also be used to improve the organization, determinism, diagnosability, and maintainability of the test suite itself.
 
 Coverage data can identify where tests are missing, but this workstream should focus on whether the existing and newly-added tests clearly prove the intended behavior.
 
 The suite should make failures easy to diagnose, make architectural assumptions visible, and remain reliable when executed repeatedly in local development and CI.
 
-### 5.1 Establish clear test categories
+### 5.1 Preserve domain-based test organization
 
-Conceptually distinguish between:
+Keep the current `test/<domain>/<feature>.test.js` layout and `*.test.js` naming convention. The domain folders already make the suite navigable; do not add unit/service/integration suffixes or rename files as a standalone cleanup project.
 
-- unit tests;
-- component/service tests;
-- persistence integration tests;
-- application/bootstrap tests;
-- hardware-adjacent simulation tests.
-
-The categories describe the boundary being proven rather than the importance of the test.
-
-A possible naming convention is:
-
-```text
-*.unit.test.js
-*.service.test.js
-*.integration.test.js
-*.bootstrap.test.js
-*.simulation.test.js
-```
-
-Adopting new filenames should not require immediately renaming every existing test. The convention can be introduced incrementally as tests are added or substantially modified.
-
-Tests may continue to live under the existing `test/` hierarchy where that structure remains understandable.
+During T1, classify tests by the boundary they prove when that helps identify ownership or a meaningful reliability issue. Add more specific names or a small organizational adjustment only when it materially improves a test's purpose or failure diagnostics.
 
 ### 5.2 Avoid premature test-runner fragmentation
 
@@ -643,13 +640,13 @@ Coverage and JUnit reporting should continue to represent the complete test run 
 
 Because CI will consume `artifacts/junit.xml`, test organization should also produce understandable machine-readable results.
 
-Use descriptive `describe()` and `test()` / `it()` names so failures identify:
+Use descriptive Vitest `test()` names so failures identify:
 
 - the component under test;
 - the behavior or state transition being exercised;
 - the expected outcome.
 
-Prefer:
+An optional `describe()` group is useful when it clarifies related cases, but do not wrap or rename existing tests solely to normalize style. Prefer:
 
 ```js
 describe('ReplyQueue', () => {
@@ -928,7 +925,7 @@ This should progressively reduce the set of important behaviors that can only be
 
 This workstream is complete when:
 
-- [ ] test categories and naming conventions are documented;
+- [ ] the existing domain-based organization is retained, and any targeted naming change is justified by clearer test purpose or diagnostics;
 - [ ] the Vitest migration preserves or increases the number of meaningful behavioral tests;
 - [ ] JUnit output contains understandable suite and test names;
 - [ ] common test helpers have been reviewed for consolidation;

@@ -1,4 +1,4 @@
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
@@ -11,7 +11,7 @@ async function waitFor(predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('timed out waiting for condition');
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await vi.advanceTimersByTimeAsync(5);
   }
 }
 
@@ -27,62 +27,78 @@ function makeRig({ intervalHours = 0, quietMs = 0, now = () => Date.now(), sendF
   return { radioManager, store, scheduler, schedulerLogger };
 }
 
+async function withRig(options, fn) {
+  vi.useFakeTimers();
+  let rig;
+  try {
+    rig = makeRig(options);
+    await fn(rig);
+  } finally {
+    try {
+      if (rig) await rig.scheduler.stop();
+    } finally {
+      try {
+        rig?.store.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  }
+}
+
 test('requests one startup flood advert after connection and waits for quiet air', async () => {
   let nowMs = 0;
   let sent = 0;
-  const rig = makeRig({ intervalHours: 0, quietMs: 100, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } });
-  rig.scheduler.start();
-  rig.radioManager.emit('radio.connected');
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sent, 0);
-  nowMs = 100;
-  rig.radioManager.emit('radio.packet');
-  nowMs = 199;
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sent, 0);
-  nowMs = 200;
-  await waitFor(() => sent === 1);
-  await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
-  assert.equal(rig.store.getFloodAdvertState().lastSentAt, 200);
-  await rig.scheduler.stop();
-  rig.store.close();
+  await withRig({ intervalHours: 0, quietMs: 100, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } }, async (rig) => {
+    rig.scheduler.start();
+    rig.radioManager.emit('radio.connected');
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(sent, 0);
+    nowMs = 100;
+    rig.radioManager.emit('radio.packet');
+    nowMs = 199;
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(sent, 0);
+    nowMs = 200;
+    await waitFor(() => sent === 1);
+    await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
+    assert.equal(rig.store.getFloodAdvertState().lastSentAt, 200);
+  });
 });
 
 test('resumes one persisted pending request without creating a duplicate startup job', async () => {
   let sent = 0;
-  const rig = makeRig({ sendFloodAdvert: async () => { sent += 1; } });
-  rig.store.requestFloodAdvert(Date.now());
-  rig.scheduler.start();
-  rig.radioManager.emit('radio.connected');
-  await waitFor(() => sent === 1);
-  await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sent, 1);
-  await rig.scheduler.stop();
-  rig.store.close();
+  await withRig({ sendFloodAdvert: async () => { sent += 1; } }, async (rig) => {
+    rig.store.requestFloodAdvert(Date.now());
+    rig.scheduler.start();
+    rig.radioManager.emit('radio.connected');
+    await waitFor(() => sent === 1);
+    await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(sent, 1);
+  });
 });
 
 test('requests the next advert from the prior accepted-send time', async () => {
   let nowMs = 1_000;
   let sent = 0;
-  const rig = makeRig({ intervalHours: 47, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } });
-  rig.scheduler.start();
-  rig.radioManager.emit('radio.connected');
-  await waitFor(() => sent === 1);
-  await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
-  const dueAt = rig.store.getFloodAdvertState().nextDueAt;
-  nowMs = dueAt - 1;
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(sent, 1);
-  nowMs = dueAt;
-  await waitFor(() => sent === 2);
-  await rig.scheduler.stop();
-  rig.store.close();
+  await withRig({ intervalHours: 47, now: () => nowMs, sendFloodAdvert: async () => { sent += 1; } }, async (rig) => {
+    rig.scheduler.start();
+    rig.radioManager.emit('radio.connected');
+    await waitFor(() => sent === 1);
+    await waitFor(() => rig.store.getFloodAdvertState().lastSentAt !== null);
+    const dueAt = rig.store.getFloodAdvertState().nextDueAt;
+    nowMs = dueAt - 1;
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(sent, 1);
+    nowMs = dueAt;
+    await waitFor(() => sent === 2);
+  });
 });
 
 test('resolves a failed flood advert attempt and logs the command error without marking it sent', async () => {
   const warnings = [];
-  const rig = makeRig({
+  await withRig({
     schedulerLogger: {
       info() {},
       error() {},
@@ -91,27 +107,25 @@ test('resolves a failed flood advert attempt and logs the command error without 
     sendFloodAdvert: async () => {
       throw new Error('radio send failed');
     }
+  }, async (rig) => {
+    rig.scheduler.start();
+    rig.radioManager.emit('radio.connected');
+    await waitFor(() => warnings.length === 1);
+
+    const state = rig.store.getFloodAdvertState();
+    assert.equal(state.status, 'idle');
+    assert.equal(state.requestedAt, null);
+    assert.equal(state.attemptStartedAt, null);
+    assert.ok(Number.isInteger(state.lastAttemptAt));
+    assert.equal(state.lastSentAt, null);
+    assert.ok(Number.isInteger(state.nextDueAt));
+    assert.deepEqual(warnings[0], {
+      source: 'services.floodAdvert',
+      message: 'flood advert command failed',
+      meta: { error: 'radio send failed' }
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(warnings.length, 1, 'a failed startup-only advert must not enter an immediate retry loop');
   });
-
-  rig.scheduler.start();
-  rig.radioManager.emit('radio.connected');
-  await waitFor(() => warnings.length === 1);
-
-  const state = rig.store.getFloodAdvertState();
-  assert.equal(state.status, 'idle');
-  assert.equal(state.requestedAt, null);
-  assert.equal(state.attemptStartedAt, null);
-  assert.ok(Number.isInteger(state.lastAttemptAt));
-  assert.equal(state.lastSentAt, null);
-  assert.ok(Number.isInteger(state.nextDueAt));
-  assert.deepEqual(warnings[0], {
-    source: 'services.floodAdvert',
-    message: 'flood advert command failed',
-    meta: { error: 'radio send failed' }
-  });
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(warnings.length, 1, 'a failed startup-only advert must not enter an immediate retry loop');
-  await rig.scheduler.stop();
-  rig.store.close();
 });

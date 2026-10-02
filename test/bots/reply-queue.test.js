@@ -1,4 +1,4 @@
-import { test, vi } from 'vitest';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
@@ -37,12 +37,32 @@ function baseItem(overrides = {}) {
   return { botName: 'echo', channel: '#echo', trigger: '!echo', sender: 'Jeymz', hopCount: 1, path: 'AA', hash: 'deadbeef', ...overrides };
 }
 
-// Real (short) timings rather than fake timers, matching this repo's
-// existing convention for testing timer-driven code (see radio-manager's
-// backoff tests) - small enough that the suite stays fast.
 const QUIET_MS = 30;
 const TTL_MS = 200;
 const POLL_MS = 5;
+const queues = new Set();
+const stores = new Set();
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(async () => {
+  try {
+    for (const queue of queues) {
+      const stopping = queue.stop();
+      await vi.runOnlyPendingTimersAsync();
+      await stopping;
+    }
+  } finally {
+    queues.clear();
+    for (const store of stores) {
+      store.close();
+    }
+    stores.clear();
+    vi.useRealTimers();
+  }
+});
 
 // A real MetricsStore (:memory:), not a hand-rolled fake - ReplyQueue now
 // reads/writes its pending AND resolved replies through MetricsStore's
@@ -57,13 +77,14 @@ const POLL_MS = 5;
 // could drift from it.
 function newQueue(overrides = {}) {
   const store = overrides.store ?? new MetricsStore({ dbPath: ':memory:' });
+  if (store instanceof MetricsStore) stores.add(store);
   const airtimeCoordinator =
     overrides.airtimeCoordinator ??
     new AirtimeCoordinator({
       quietMs: overrides.quietMs ?? QUIET_MS,
       now: overrides.now
     });
-  return new ReplyQueue({
+  const queue = new ReplyQueue({
     ttlMs: TTL_MS,
     pollIntervalMs: POLL_MS,
     logger: silentLogger(),
@@ -71,24 +92,16 @@ function newQueue(overrides = {}) {
     airtimeCoordinator,
     ...overrides
   });
+  queues.add(queue);
+  return queue;
 }
 
-function waitFor(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
-  return new Promise((resolve, reject) => {
-    const start = Date.now();
-    const check = () => {
-      if (conditionFn()) {
-        resolve();
-        return;
-      }
-      if (Date.now() - start > timeoutMs) {
-        reject(new Error('waitFor timed out'));
-        return;
-      }
-      setTimeout(check, intervalMs);
-    };
-    check();
-  });
+async function waitFor(conditionFn, { timeoutMs = 2000, intervalMs = 5 } = {}) {
+  for (let elapsedMs = 0; elapsedMs <= timeoutMs; elapsedMs += intervalMs) {
+    if (conditionFn()) return;
+    await vi.advanceTimersByTimeAsync(intervalMs);
+  }
+  throw new Error('waitFor timed out');
 }
 
 test('does not send immediately - a queued reply waits for a quiet window', async () => {
@@ -122,11 +135,10 @@ test('repeated activity keeps resetting the quiet clock, delaying the send', asy
 
   // Keep the channel "busy" for longer than quietMs by repeatedly
   // resetting activity faster than the quiet window could elapse.
-  const keepBusyUntil = Date.now() + QUIET_MS * 4;
-  while (Date.now() < keepBusyUntil) {
+  for (let elapsedMs = 0; elapsedMs < QUIET_MS * 4; elapsedMs += POLL_MS) {
     queue.noteActivity();
     assert.equal(calls.length, 0, 'must not send while activity keeps being observed');
-    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    await vi.advanceTimersByTimeAsync(POLL_MS);
   }
 
   await waitFor(() => calls.length === 1);
@@ -148,7 +160,7 @@ test('sends queued replies in FIFO order, one quiet window at a time', async () 
 });
 
 test('sending an item resets the quiet clock, so the next item still needs its own fresh quiet window', async () => {
-  vi.useFakeTimers({ now: 0 });
+  vi.setSystemTime(0);
   const sendTimestamps = [];
   const { dispatch } = testDispatcher({
     '!first': () => sendTimestamps.push(Date.now()),
@@ -156,22 +168,17 @@ test('sending an item resets the quiet clock, so the next item still needs its o
   });
   const queue = newQueue({ dispatch });
 
-  try {
-    queue.enqueue(baseItem({ trigger: '!first' }));
-    queue.enqueue(baseItem({ trigger: '!second' }));
+  queue.enqueue(baseItem({ trigger: '!first' }));
+  queue.enqueue(baseItem({ trigger: '!second' }));
 
-    await vi.advanceTimersByTimeAsync(QUIET_MS);
-    assert.deepEqual(sendTimestamps, [QUIET_MS]);
+  await vi.advanceTimersByTimeAsync(QUIET_MS);
+  assert.deepEqual(sendTimestamps, [QUIET_MS]);
 
-    await vi.advanceTimersByTimeAsync(QUIET_MS - 1);
-    assert.deepEqual(sendTimestamps, [QUIET_MS], 'the next item must wait for its own complete quiet window');
+  await vi.advanceTimersByTimeAsync(QUIET_MS - 1);
+  assert.deepEqual(sendTimestamps, [QUIET_MS], 'the next item must wait for its own complete quiet window');
 
-    await vi.advanceTimersByTimeAsync(1);
-    assert.deepEqual(sendTimestamps, [QUIET_MS, QUIET_MS * 2]);
-  } finally {
-    await queue.stop();
-    vi.useRealTimers();
-  }
+  await vi.advanceTimersByTimeAsync(1);
+  assert.deepEqual(sendTimestamps, [QUIET_MS, QUIET_MS * 2]);
 });
 
 test('drops an item that expires before a quiet window is observed, and logs a warning with its channel/sender', async () => {
@@ -196,7 +203,7 @@ test('a slow-resolving dispatch does not cause a concurrent send from the next p
   const { dispatch } = testDispatcher({
     '!slow': async () => {
       events.push('start:!slow');
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS * 6)); // outlasts several poll ticks
+      await vi.advanceTimersByTimeAsync(POLL_MS * 6); // outlasts several poll ticks
       events.push('end:!slow');
     },
     '!second': () => events.push('end:!second')
@@ -266,7 +273,7 @@ test('stop() prevents further enqueue() calls from being accepted', async () => 
   queue.enqueue(baseItem());
 
   assert.equal(queue.size, 0);
-  await new Promise((resolve) => setTimeout(resolve, QUIET_MS * 2));
+  await vi.advanceTimersByTimeAsync(QUIET_MS * 2);
   assert.equal(calls.length, 0);
 });
 
@@ -293,7 +300,9 @@ test('stop() waits for an in-flight send to finish before resolving', async () =
   queue.enqueue(baseItem({ trigger: '!slow' }));
   await waitFor(() => events.includes('start'));
 
-  await queue.stop();
+  const stopping = queue.stop();
+  await vi.advanceTimersByTimeAsync(POLL_MS * 6);
+  await stopping;
   assert.deepEqual(events, ['start', 'end']);
 });
 
@@ -313,7 +322,6 @@ test('a reply is resolved to "sent", including sender/hash/queuedMs, once it act
   assert.equal(resolved.status, 'sent');
   assert.ok(Number.isInteger(resolved.resolvedAt));
   assert.ok(resolved.queuedMs >= 0);
-  store.close();
 });
 
 test('a reply is resolved to "failed" when dispatching it throws', async () => {
@@ -331,7 +339,6 @@ test('a reply is resolved to "failed" when dispatching it throws', async () => {
 
   assert.equal(resolved.status, 'failed');
   assert.equal(resolved.trigger, '!broken');
-  store.close();
 });
 
 test('a reply is resolved to "expired" when dropped before a quiet window is observed', async () => {
@@ -349,7 +356,6 @@ test('a reply is resolved to "expired" when dropped before a quiet window is obs
 
   assert.equal(resolved.status, 'expired');
   assert.ok(resolved.queuedMs >= 20);
-  store.close();
 });
 
 test('a resolveReplyItem failure is caught and logged (as a possible-duplicate risk), and does not crash the tick', async () => {
@@ -396,7 +402,6 @@ test('start() resumes a reply that was still pending in the store from a previou
 
   await waitFor(() => calls.length === 1, { timeoutMs: 2000 });
   assert.equal(calls[0].trigger, '!resumed');
-  store.close();
 });
 
 test('start() does nothing when nothing was left pending', () => {
@@ -406,7 +411,6 @@ test('start() does nothing when nothing was left pending', () => {
 
   assert.doesNotThrow(() => queue.start());
   assert.equal(calls.length, 0);
-  store.close();
 });
 
 test('a resumed item that is already past its TTL is expired on the first tick, not dispatched', async () => {
@@ -425,7 +429,6 @@ test('a resumed item that is already past its TTL is expired on the first tick, 
 
   assert.equal(calls.length, 0, 'a resumed-but-stale item must never dispatch');
   assert.equal(store.getReplyById(id).status, 'expired');
-  store.close();
 });
 
 test('start() called twice does not start a second timer (idempotent alongside enqueue())', async () => {
@@ -442,7 +445,6 @@ test('start() called twice does not start a second timer (idempotent alongside e
 
   // A doubled timer would tend to double-dispatch or race; give it a
   // moment past the first send to confirm nothing further happens.
-  await new Promise((resolve) => setTimeout(resolve, QUIET_MS * 2));
+  await vi.advanceTimersByTimeAsync(QUIET_MS * 2);
   assert.equal(calls.length, 1);
-  store.close();
 });

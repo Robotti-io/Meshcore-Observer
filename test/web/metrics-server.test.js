@@ -130,8 +130,6 @@ function defaultBotsConfig() {
 // live sampling/SSE-broadcast behavior still exercise it for real.
 async function withServer({ serviceHealth = fakeServiceHealth(), metricsStore = new MetricsStore({ dbPath: ':memory:' }), botsConfig = defaultBotsConfig(), sampleIntervalMs = 60000, maxChartBuckets = 180, retentionDays = 0, logger = fakeLogger() } = {}, fn) {
   const sampler = new MetricsSampler({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, logger });
-  sampler.start();
-
   const server = new MetricsServer({
     serviceHealth,
     metricsStore,
@@ -143,9 +141,10 @@ async function withServer({ serviceHealth = fakeServiceHealth(), metricsStore = 
     logger,
     sampler
   });
-  await server.start();
-  const { port } = server.address();
   try {
+    sampler.start();
+    await server.start();
+    const { port } = server.address();
     await fn(`http://127.0.0.1:${port}`, { metricsStore, sampler, server, logger });
   } finally {
     await server.stop();
