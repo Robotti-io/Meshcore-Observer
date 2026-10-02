@@ -463,6 +463,42 @@ to improve the totals. Any proposed exclusion or threshold change should
 include a code-review rationale grounded in measured coverage and meaningful
 behavior tests.
 
+### GitHub Actions
+
+`.github/workflows/ci.yml` runs for pull requests targeting `main` and pushes
+to `main`. Its independent lint job runs on Ubuntu with Node 24.x. The test
+matrix runs on Ubuntu and Windows with Node 22.x and 24.x; each job runs
+`npm ci` followed by `npm run test:ci`.
+
+Each test-matrix job uploads an artifact named
+`test-reports-<runner>-node-<version>`, containing the reports produced by
+that job:
+
+```text
+artifacts/junit.xml
+coverage/cobertura-coverage.xml
+coverage/lcov.info
+coverage/coverage-final.json
+coverage/index.html
+```
+
+The upload step runs after a failed test or coverage check as well. If setup
+fails before report files are created, that job has no report artifact.
+
+After successful and intentionally failing artifact uploads are validated, the
+checks to require for pull requests targeting `main` are:
+
+- `lint`
+- `test (ubuntu-latest, Node 22.x)`
+- `test (ubuntu-latest, Node 24.x)`
+- `test (windows-latest, Node 22.x)`
+- `test (windows-latest, Node 24.x)`
+
+Required-check configuration is still pending that validation. If the runner
+or Node matrix changes, update the workflow and this check list together, then
+confirm every new OS/Node combination passes before changing branch protection.
+This CI workflow validates code; it does not build or deploy containers.
+
 ## Unattended startup on Windows
 
 Once `npm start` has been confirmed reliable running in the foreground:

@@ -78,7 +78,7 @@ The documented/example repeat-check value matches the application's 10-second de
 
 Running with no explicit environment variable and running from a freshly copied `.env.example` should produce intentionally equivalent repeat-check behavior unless explicitly documented otherwise.
 
-Implementation updates are in place. The affected tests and lint still need to be run before this item is fully validated.
+Implementation and validation are complete: the local coverage suite passed all 47 files / 475 tests, `npm.cmd run lint` passed, and the four-entry PR matrix passed on the agreed 70% line-coverage floor.
 
 ---
 
@@ -111,8 +111,11 @@ For the agreed triggers (workflow implementation added in `.github/workflows/ci.
 - [ ] Validate the push-to-main run after merge.
 - [x] Add an unconditional, uniquely named artifact upload for JUnit, Cobertura, LCOV, JSON, and HTML reports from each matrix entry.
 - [x] Leave retention at GitHub's configured default.
-- [ ] Verify uploaded reports on a successful run and an intentionally failing coverage-threshold run.
+- [x] Verify the successful PR run uploaded four non-empty matrix-specific report artifacts.
+- [x] Verify locally that the intentional 100% statement-threshold failure occurs after all 475 tests pass and all five report files are generated.
+- [ ] Verify GitHub Actions uploads artifacts on an intentionally failing coverage-threshold run.
 - [ ] Configure the lint and matrix check statuses as required for PRs to `main` after artifact validation.
+- [x] Document CI triggers, runner/Node matrix, commands, report paths, artifact naming, planned required check names, and matrix maintenance guidance in README.
 
 ### 3.2 Platform coverage
 
@@ -168,18 +171,19 @@ The Vitest migration and both development dependencies are explicitly approved f
 
 **Issue #10 progress (2026-10-02):** The suite now runs under Vitest with Istanbul. `npm test`, `npm run test:watch`, `npm run test:coverage`, and `npm run test:ci` are configured and documented in the README. Windows T2 validation on Node v24.18.0 passed twice at 47 test files / 470 tests, with matching results: 69.74% statement, 69.22% branch, 71.09% function, and 70.23% line coverage. JUnit, HTML, LCOV, JSON, and Cobertura artifacts were generated; coverage includes all 56 source files, including the unimported dashboard entry point at zero coverage. Lint passed. T3 recorded the initial baseline against base commit `c5e5d88a141b959633c11aedae416930e8e5b845` before risk-driven test additions, then added regression tests for SQLite startup failure ordering and failed flood-advert handling. The entrypoint test runs in a child process for isolation, so the parent Vitest coverage counters do not include its startup lines even though the behavior is asserted. The post-improvement Windows run passed 47 files / 472 tests at 69.82% statement, 69.31% branch, 71.09% function, and 70.31% line coverage. The working tree was dirty for both baselines; the recorded SHA identifies the base commit, not a commit containing the T2/T3 work. Linux validation remains for the issue #9 CI matrix. **Pre-T4 web review and T3.5 result:** `dashboard-logic.js` is fully covered, while browser-side `dashboard.js` remains at 0% because no browser interaction harness runs in the Node suite; it remains included in measurement pending a separate harness decision. Added seeded-data HTTP tests for aggregate overview data and comparison trends, no-comparison all-time behavior, and each of the packets, brokers, bots, and repeaters views. Added coverage for sampler-driven SSE updates. The server-response `error` callback could not be triggered deterministically through the public HTTP seam without adding a production test hook; abrupt disconnect cleanup remains covered. `metrics-server.js` increased from 68.7% statements / 62.4% branches / 56.3% functions to 95.2% / 88.9% / 93.8%. The full Windows suite and lint pass: 47 test files / 475 tests; repository coverage is 72.67% statements, 72.04% branches, 74.08% functions, and 73.17% lines. Linux validation remains with the issue #9 CI matrix.
 
-**Issue #9 T2 follow-up (2026-10-02):** The temporary PR matrix subsequently passed all four Ubuntu/Windows × Node 22.x/24.x entries after setting the line threshold to 70%; all 475 tests passed in each entry. CI report downloads remain unverified until Issue #9 T3 artifact uploads are exercised.
+**Issue #9 T2/T3 follow-up (2026-10-02):** The temporary PR matrix passed all four Ubuntu/Windows × Node 22.x/24.x entries after setting the line threshold to 70%; all 475 tests passed in each entry. The subsequent successful run [37036741298](https://github.com/Robotti-io/Meshcore-Observer/actions/runs/37036741298) lists four matrix-specific report artifacts (109–110 KB each). Successful-run artifact upload is confirmed; the intentionally failing-run path and required check configuration remain pending.
 
 **T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 70% lines across all `src/**/*.js` files. The initial Issue #9 PR matrix ran all 475 tests in each entry, but its reported 72.96% line coverage missed the prior 73% floor. At the human's direction, the line floor is now 70%; the other floors and full source inclusion remain unchanged. The green four-entry CI rerun is recorded below. README documents the thresholds and review policy. A normal local `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. GitHub Actions and its triggers/matrix are implemented in Issue #9 T2; CI artifact upload remains assigned to T3.
 
 **Issue #10 task status:**
 
 - [x] T1 — select Vitest and Istanbul coverage tooling.
-- [x] T2 — configure deterministic local tests and reports; Linux CI validation remains pending.
+- [x] T2 — configure deterministic local tests and reports; the four-entry Linux/Windows × Node 22/24 CI matrix passed.
 - [x] T3 — record baselines and add high-risk regression coverage.
 - [x] T3.5 — add aggregate dashboard-route and sampler-driven SSE coverage.
 - [x] T4 — enforce the measured coverage floors and verify report generation after threshold failure.
-- [ ] Validate coverage on Linux and upload reports from CI after issue #9 resolves the CI platform and branch policy.
+- [x] Validate the test and coverage suite on Linux through the Issue #9 PR matrix.
+- [ ] Verify successful-run and intentionally failing-run artifact uploads; then require the stable CI checks for pull requests to `main`.
 
 The approved `vitest` and `@vitest/coverage-istanbul` development dependencies are installed, and the existing suite has been migrated while preserving its test names and behavioral assertions. Issue #9 should reuse these scripts and should not add another test framework or coverage dependency.
 
@@ -377,13 +381,13 @@ A module with 95% line coverage but an untested recovery path may represent subs
 
 After the initial baseline and targeted improvement pass:
 
-- [x] Establish minimum line coverage: 73%.
+- [x] Establish minimum line coverage: 70%.
 - [x] Establish minimum statement coverage: 72%.
 - [x] Establish minimum function coverage: 73%.
 - [x] Establish minimum branch coverage: 71%.
 - [x] Configure Vitest/Istanbul to enforce those thresholds.
-- [x] Ensure the `test:ci` command fails when coverage falls below the agreed thresholds; CI platform integration remains pending issue #9 T1.
-- [x] Prefer thresholds that prevent regression rather than arbitrary aspirational numbers; the floors sit just below T3.5's measured result.
+- [x] Ensure the `test:ci` command fails when coverage falls below the agreed thresholds; the GitHub Actions matrix is implemented and the PR matrix passes.
+- [x] Prefer thresholds that prevent regression rather than arbitrary aspirational numbers; the human selected a 70% line floor after observing 72.96% in CI, retaining the other floors and all source files.
 - [ ] Consider stricter thresholds for high-risk modules once their suites mature.
 - [ ] Document intentionally unreachable or platform-specific code rather than silently excluding it.
 - [x] Require a code-review rationale for any proposed coverage exclusion; no source files are excluded.
@@ -414,7 +418,7 @@ These artifacts provide different views of the same test execution:
 
 The CI workflow should upload reports even when coverage thresholds or tests fail where technically possible, so failed builds remain diagnosable.
 
-**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. The user selected GitHub Actions with pull-request-to-`main` and push-to-`main` triggers, an Ubuntu/Windows matrix on Node 22.x/24.x, and required checks after validation. Issue #9 T2 has implemented the workflow; the four-entry PR matrix now passes with the agreed 70% line floor. T3 has added matrix-specific report uploads; verifying artifacts from successful and failing runs and configuring required checks remain pending.
+**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. The user selected GitHub Actions with pull-request-to-`main` and push-to-`main` triggers, an Ubuntu/Windows matrix on Node 22.x/24.x, and required checks after validation. Issue #9 T2 has implemented the workflow; the four-entry PR matrix now passes with the agreed 70% line floor. T3 has added matrix-specific report uploads, and successful-run artifacts are confirmed; failure-run validation and required-check configuration remain pending.
 
 ### 4.10 Pull-request reporting
 
@@ -1295,7 +1299,7 @@ Unless operational testing exposes a concrete need, v2.4.0 should avoid:
 v2.4.0 is ready when:
 
 - [ ] all tests pass
-- [ ] lint passes
+- [x] lint passes — local `npm.cmd run lint` and the PR lint job passed.
 - [ ] CI is green on the selected platform matrix
 - [ ] a reproducible coverage report exists
 - [ ] the project's baseline line/function/branch coverage is documented

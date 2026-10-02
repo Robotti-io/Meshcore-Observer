@@ -56,19 +56,23 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 #### T3: Add coverage artifacts and required statuses
 
 - [x] Add an unconditional, uniquely named artifact upload to each test-matrix job for JUnit, Cobertura, LCOV, JSON, and HTML reports; use the configured retention period and ignore missing files when setup fails early.
-- [ ] Verify report artifacts on successful and intentionally failing runs, then configure and verify required statuses for pull requests to `main`.
+- [x] Verify the successful PR run produced one matrix-specific artifact for each OS/Node combination.
+- [x] Locally verify the intentional coverage-threshold failure occurs after all 475 tests pass and produces all five report files.
+- [ ] Verify reports are uploaded on an intentionally failing coverage run.
+- [ ] Configure and verify the lint and matrix statuses as required for pull requests to `main` after both artifact paths are validated.
 - **Objective:** Make test/coverage reports available to reviewers.
 - **Specific changes:** Upload `artifacts/junit.xml`, `coverage/cobertura-coverage.xml`, `coverage/lcov.info`, `coverage/coverage-final.json`, and `coverage/index.html` using an unconditional upload step and unique names for each OS/Node matrix job. Use the repository's configured artifact-retention policy unless maintainers specify another duration. After successful-run and failure-run artifact validation, require the lint and matrix checks for pull requests to `main`.
 - **Definition of done:** Reports are downloadable from successful and intentionally failing workflow runs; required check names are stable and block merging to `main`.
-- **Expected tests / validation:** [ ] Verify report files from one successful run and one run intentionally failing the coverage threshold. [ ] Verify GitHub marks the chosen lint and matrix checks as required for a pull request to `main` after artifact validation.
+- **Expected tests / validation:** [x] Verify GitHub lists four non-empty report artifacts on the successful PR run. [x] Verify locally that a 100% statement threshold fails after all tests pass and JUnit, Cobertura, LCOV, JSON, and HTML reports are generated. [ ] Verify GitHub uploads report artifacts from a PR run intentionally failing the coverage threshold. [ ] Verify GitHub marks the chosen lint and matrix checks as required for a pull request to `main` after artifact validation.
 
 #### T4: Document CI operation and maintenance
 
-- [ ] Task pending implementation.
+- [x] Document workflow triggers, runner/Node matrix, commands, report paths/artifact names, and planned required check names in README; record how matrix changes should be reviewed.
+- [x] Review README and plan details against the workflow and successful PR run.
 - **Objective:** Keep local and CI validation instructions aligned.
 - **Specific changes:** Document workflow triggers, matrix, report paths, and required check names in README. Record how Node-line or runner changes should be reviewed and keep CI validation separate from application deployment behavior.
 - **Definition of done:** README and Issue #9 plan match the committed workflow, with no obsolete `node:test` or `npm test`-only CI assumptions.
-- **Expected tests / validation:** Review documentation against a completed workflow run and verify YAML/workflow checks pass.
+- **Expected tests / validation:** [x] Review documentation against the successful PR run and current workflow configuration. Required-check settings and failure-artifact validation remain with T3.
 
 ### 6. Risks and Edge Cases
 
@@ -93,4 +97,4 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 1. [x] T1 — resolve GitHub Actions, main-only triggers, runner/Node matrix, and delayed required-check policy.
 2. [x] T2 — add lint and coverage-enforcing Windows/Linux matrix jobs; the PR matrix passes, with push-to-main validation pending after merge.
 3. [ ] T3 — upload reports on success and failure; validate an intentionally failing threshold run and then require stable checks.
-4. [ ] T4 — update README and plan documentation to match the workflow.
+4. [x] T4 — document workflow operation and matrix maintenance; required-check configuration remains with T3.
