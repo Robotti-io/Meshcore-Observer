@@ -179,7 +179,10 @@ dashboard: `https://map.okimesh.org/#/packets/{hash}`).
 
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
-times the mesh relays it to you.
+times the mesh relays it to you. Decrypted command messages must include a
+valid `sender: ` prefix; messages without one are not matched, even by
+commands whose templates do not use `{sender}`. The bot's own senderless
+reply rebroadcasts are still checked for repeat confirmation.
 
 A command's `overflowResponse` is optional. When the rendered `response`
 doesn't fit `maxMessageBytes` (the hop-path listing is the field most
@@ -227,6 +230,11 @@ A `"lookup"` command needs four response templates instead of one -
 
 A query longer than 1 byte doesn't need to stay byte-aligned - `!lookup
 E85` (2.5 bytes) works the same as `!lookup E85C`.
+
+The lookup action runs when the queued reply is dispatched, after hop and
+duplicate checks. The registry result therefore reflects the data available
+when the reply is sent, including after a pending reply is recovered on
+restart.
 
 #### Observer stats overview (`kind: "stats"`)
 

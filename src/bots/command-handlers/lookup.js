@@ -3,18 +3,30 @@ import { createHandlerStateCodec } from './handler-state.js';
 const stateCodec = createHandlerStateCodec({
   kind: 'lookup',
   dataSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['query', 'outcome', 'name', 'matchCount', 'lastHeardAt', 'nodePrefix', 'repeaterCount'],
-    properties: {
-      query: { type: 'string' },
-      outcome: { enum: ['found', 'not_found', 'ambiguous', 'invalid'] },
-      name: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-      matchCount: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] },
-      lastHeardAt: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
-      nodePrefix: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-      repeaterCount: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] }
-    }
+    anyOf: [
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['query'],
+        properties: { query: { type: 'string' } }
+      },
+      {
+        // Accept persisted v1 lookup snapshots written before actions moved
+        // to dispatch. They are re-resolved from the query after recovery.
+        type: 'object',
+        additionalProperties: false,
+        required: ['query', 'outcome', 'name', 'matchCount', 'lastHeardAt', 'nodePrefix', 'repeaterCount'],
+        properties: {
+          query: { type: 'string' },
+          outcome: { enum: ['found', 'not_found', 'ambiguous', 'invalid'] },
+          name: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          matchCount: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] },
+          lastHeardAt: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          nodePrefix: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          repeaterCount: { anyOf: [{ type: 'integer', minimum: 0 }, { type: 'null' }] }
+        }
+      }
+    ]
   }
 });
 
@@ -67,53 +79,37 @@ export function createLookupCommandHandler({ nodeRegistry }) {
           continue;
         }
 
-        if (query.length === 0) {
-          return {
-            command,
-            state: stateCodec.serialize({
-              query,
-              outcome: 'invalid',
-              name: null,
-              matchCount: null,
-              lastHeardAt: null,
-              nodePrefix: null,
-              repeaterCount: null
-            })
-          };
-        }
-
-        const result = nodeRegistry.findByPrefix(query, { type: 'REPEATER' });
-        return {
-          command,
-          state: stateCodec.serialize({
-            query: result.query ?? query,
-            outcome: result.status,
-            name: result.node?.name ?? null,
-            matchCount: result.matchCount ?? null,
-            lastHeardAt: result.node?.lastHeardAt ?? null,
-            nodePrefix:
-              result.status === 'found' && query.length < 4
-                ? result.node?.publicKeyHex?.slice(0, 4) ?? result.query ?? query
-                : result.query ?? query,
-            repeaterCount: result.status === 'not_found' ? nodeRegistry.countRepeaters() : null
-          })
-        };
+        return { command, state: stateCodec.serialize({ query }) };
       }
       return null;
     },
     restore: stateCodec.restore,
-    render({ command, data, sharedReply, now }) {
-      const { query, outcome, name, matchCount, lastHeardAt, nodePrefix, repeaterCount } = data;
+    execute({ command, data, now }) {
+      const { query } = data;
+      if (query.length === 0) {
+        return { template: command.invalidResponse, values: { query } };
+      }
+
+      const result = nodeRegistry.findByPrefix(query, { type: 'REPEATER' });
+      const outcome = result.status;
+      const name = result.node?.name ?? null;
+      const matchCount = result.matchCount ?? null;
+      const lastHeardAt = result.node?.lastHeardAt ?? null;
+      const nodePrefix =
+        result.status === 'found' && query.length < 4
+          ? result.node?.publicKeyHex?.slice(0, 4) ?? result.query ?? query
+          : result.query ?? query;
+      const repeaterCount = result.status === 'not_found' ? nodeRegistry.countRepeaters() : null;
+
       return {
         template: lookupResponseTemplate(command, outcome),
         values: {
-          ...sharedReply,
           query,
           name,
           matchCount,
           lastHeard: formatRelativeAge(lastHeardAt, now),
           nodePrefix: nodePrefix ?? query,
-          repeaterCount: repeaterCount ?? (outcome === 'not_found' ? nodeRegistry.countRepeaters() : undefined)
+          repeaterCount: repeaterCount ?? undefined
         }
       };
     }

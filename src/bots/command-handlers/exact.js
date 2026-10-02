@@ -13,11 +13,11 @@ export function createExactCommandHandler() {
       return command ? { command, state: stateCodec.serialize({}) } : null;
     },
     restore: stateCodec.restore,
-    render({ command, sharedReply }) {
+    execute({ command }) {
       return {
         template: command.response,
         overflowTemplate: command.overflowResponse,
-        values: sharedReply
+        values: {}
       };
     }
   };

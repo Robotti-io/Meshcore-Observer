@@ -1018,6 +1018,8 @@ The detailed code findings, resolved assumptions, task breakdown, acceptance cri
 
 The completed T1 evidence audit showed that `ChannelBot` dispatched exact, lookup, and stats behavior, while lookup/stats data already used `NodeRegistry` and `StatsReporter` seams. T3 extracted those command behaviors behind an explicit handler map and added SQLite migration 8 to replace lookup-specific columns with strictly validated, versioned JSON handler state. T4 verified current commands, migration, queue recovery, dashboard metrics, and a future handler context without adding database columns. Shared radio/reply lifecycle and dashboard fields remain in the common path. The user approved the finalized plan, including the migration.
 
+The Issue #13 follow-up is complete: handlers own command-specific actions and return named result values for shared template rendering; required sender metadata is parsed and validated once at the shared decrypted-message boundary. Command input is validated early, while actions run after hop and duplicate checks at queued reply dispatch. Lookup's move from match-time snapshots to dispatch-time resolution is an intentional compatibility change, documented and covered by tests. Full validation passed with 48 test files / 498 tests and lint.
+
 ### 7.1 Current status
 
 - [x] Resolved the expected-growth assumption: future command kinds are anticipated.
@@ -1032,6 +1034,16 @@ The completed T1 evidence audit showed that `ChannelBot` dispatched exact, looku
 - [x] Verify current commands and queued reply recovery; prove a new command context needs no new database columns.
 - [x] Record the outcome and evidence in the Issue #13 plan.
 - [ ] Link the eventual PR or GitHub issue update when available.
+
+### 7.2 Follow-up: Command Action Results and Sender Handling
+
+- [x] Resolve sender validity: require sender metadata on decrypted messages and reject prefixless or malformed messages before command matching; handlers may ignore the validated sender.
+- [x] Resolve command-action timing: validate command input early, then run actions after hop and duplicate checks at queued reply dispatch.
+- [x] Resolve the result contract: handlers return named, serializable values for shared response-template rendering, preserving existing placeholders.
+- [x] Implement a structured, serializable command-result values contract for shared response-template rendering.
+- [x] Keep sender parsing/validation at the shared decrypted-message boundary; verify sender attribution through queue persistence, logging, and metrics.
+- [x] Move lookup resolution from match-time snapshots to dispatch-time action execution; document and test the changed timing alongside stats.
+- [x] Verify current exact/lookup/stats behavior, queue restart recovery, UTF-8 byte-budget rendering, and future extension without command-specific schema changes; 48 test files / 498 tests and lint passed.
 
 **T1 evidence record (2026-10-02):** `test/bots/channel-bot.test.js` contains 47 tests; command-kind paths are exercised with fake radio events and encrypted packet fixtures, while response templates, stats ranges, node registry, and stats reporter also have focused module tests. `ReplyQueue` persists plain data and resumes pending replies; MetricsStore migrations 4–6 added/consolidated reply persistence, with migration 6 adding lookup-specific fields. Dashboard counts/outcomes use shared bot/trigger/status/resolution fields. These findings justify reducing command-specific cross-layer changes while preserving the shared RF/reply path.
 

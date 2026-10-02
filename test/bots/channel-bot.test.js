@@ -2,10 +2,14 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createCipheriv, createHash, createHmac } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { Packet } from '@liamcottle/meshcore.js';
 import { ChannelBot } from '../../src/bots/channel-bot.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
 import { RepeatCheckTracker } from '../../src/bots/repeat-check-tracker.js';
+import { MetricsStore } from '../../src/metrics/store.js';
 import { calculatePacketHash } from '../../src/packets/packet-hash.js';
 import { buildRawFrame, RouteType, PayloadType } from '../fixtures/packet-frames.js';
 
@@ -667,14 +671,16 @@ test('!lookup shows the full two-byte prefix for uniquely found one-byte and odd
   }
 });
 
-test('!lookup queues the found-node response snapshot for restart-safe dispatch', async () => {
+test('!lookup queues validated input and resolves registry data at dispatch', async () => {
   const radioManager = fakeRadioManager();
   const queued = [];
   const now = 3_000_000;
+  let name = 'Summit Repeater';
+  let lastHeardAt = now - 20 * 60_000;
   const nodeRegistry = fakeNodeRegistry((query) => ({
     status: 'found',
     query,
-    node: { name: 'Summit Repeater', publicKeyHex: 'E85C'.repeat(16), lastHeardAt: now - 20 * 60_000 }
+    node: { name, publicKeyHex: 'E85C'.repeat(16), lastHeardAt }
   }));
   const bot = new ChannelBot({
     radioManager,
@@ -691,25 +697,27 @@ test('!lookup queues the found-node response snapshot for restart-safe dispatch'
   await flush();
 
   assert.equal(queued.length, 1);
+  assert.equal(nodeRegistry.calls.length, 0, 'matching must not execute the lookup action');
   assert.deepEqual(JSON.parse(queued[0].handlerStateJson), {
     kind: 'lookup',
     version: 1,
-    data: {
-      query: 'E8',
-      outcome: 'found',
-      name: 'Summit Repeater',
-      matchCount: null,
-      lastHeardAt: now - 20 * 60_000,
-      nodePrefix: 'E85C',
-      repeaterCount: null
-    }
+    data: { query: 'E8' }
   });
+
+  name = 'Updated Repeater';
+  lastHeardAt = now - 5 * 60_000;
+  await bot.sendQueuedReply(queued[0]);
+  assert.equal(nodeRegistry.calls.length, 1);
+  assert.equal(radioManager.commandCalls[0].message, '📡 E85C (heard 5m ago) = Updated Repeater');
   bot.stop();
 });
 
-test('!lookup renders pre-migration found rows with an explicit unknown age', async () => {
+test('!lookup re-resolves legacy persisted snapshots at dispatch', async () => {
   const radioManager = fakeRadioManager();
-  const nodeRegistry = fakeNodeRegistry(() => ({ status: 'not_found', query: 'E8' }), 23);
+  const nodeRegistry = fakeNodeRegistry((query) => ({
+    status: 'found', query,
+    node: { name: 'Legacy Repeater', publicKeyHex: 'E85C'.repeat(16), lastHeardAt: null }
+  }), 23);
   const bot = new ChannelBot({
     radioManager,
     botConfig: baseBotConfig({ commands: [lookupCommand()] }),
@@ -739,7 +747,79 @@ test('!lookup renders pre-migration found rows with an explicit unknown age', as
     })
   });
 
-  assert.equal(radioManager.commandCalls[0].message, '📡 E85 (heard unknown) = Legacy Repeater');
+  assert.equal(radioManager.commandCalls[0].message, '📡 E85C (heard unknown) = Legacy Repeater');
+  assert.equal(nodeRegistry.calls.length, 1);
+  bot.stop();
+});
+
+test('lookup input survives store reopen and executes with dispatch-time registry data', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'meshcore-lookup-dispatch-'));
+  const dbPath = join(directory, 'metrics.sqlite3');
+  let store;
+  try {
+    store = new MetricsStore({ dbPath });
+    const initialRadio = fakeRadioManager();
+    const initialBot = new ChannelBot({
+      radioManager: initialRadio,
+      botConfig: baseBotConfig({ commands: [lookupCommand()] }),
+      logger: silentLogger(),
+      nodeRegistry: fakeNodeRegistry(() => { throw new Error('lookup action must wait for dispatch'); }),
+      replyQueue: {
+        enqueue: (item) => store.enqueueReplyItem({ ...item, enqueuedAt: 1000, expiresAt: 60_000 })
+      }
+    });
+    await startAndConnect(initialBot, initialRadio);
+    const channelKey = deriveHashtagChannelKey('#echo');
+    initialRadio.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !lookup E8' }));
+    await flush();
+
+    const queuedBeforeRestart = store.peekOldestPendingReplyItem();
+    assert.deepEqual(JSON.parse(queuedBeforeRestart.handlerStateJson), {
+      kind: 'lookup', version: 1, data: { query: 'E8' }
+    });
+    initialBot.stop();
+    store.close();
+    store = new MetricsStore({ dbPath });
+
+    const recoveredRadio = fakeRadioManager();
+    const recoveredBot = new ChannelBot({
+      radioManager: recoveredRadio,
+      botConfig: baseBotConfig({ commands: [lookupCommand()] }),
+      logger: silentLogger(),
+      now: () => 5000,
+      nodeRegistry: fakeNodeRegistry((query) => ({
+        status: 'found', query,
+        node: { name: 'Recovered Repeater', publicKeyHex: 'E85C'.repeat(16), lastHeardAt: 4000 }
+      }))
+    });
+    await startAndConnect(recoveredBot, recoveredRadio);
+    await recoveredBot.sendQueuedReply(store.peekOldestPendingReplyItem());
+
+    assert.equal(recoveredRadio.commandCalls[0].message, '📡 E85C (heard just now) = Recovered Repeater');
+    recoveredBot.stop();
+  } finally {
+    store?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('prefixless decrypted commands are rejected while senderless bot replies still confirm repeats', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: '!echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 0);
+
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['bb'], text: 'Jeymz: !echo' }));
+  await flush();
+  const sentMessage = radioManager.commandCalls[0].message;
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['cc'], text: sentMessage, timestamp: 1700000002 }));
+  await flush();
+
+  assert.equal(bot.getRepeatsConfirmed(), 1);
   bot.stop();
 });
 
@@ -829,6 +909,26 @@ test('!lookup with no argument replies with the invalidResponse and never querie
 
   assert.equal(radioManager.commandCalls[0].message, '⚠️ give at least 1 byte in hex, e.g. !lookup E8');
   assert.equal(nodeRegistry.calls.length, 0);
+});
+
+test('lookup action failures propagate through queued dispatch without sending a response', async () => {
+  const radioManager = fakeRadioManager();
+  const logger = silentLogger();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [lookupCommand()] }),
+    logger,
+    nodeRegistry: fakeNodeRegistry(() => { throw new Error('registry unavailable'); })
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !lookup E8' }));
+  await flush();
+
+  assert.equal(radioManager.commandCalls.length, 0);
+  assert.ok(logger.calls.warn.some((call) => call.message === 'failed to send reply'));
+  bot.stop();
 });
 
 test('!lookup with a registry-rejected (invalid) query replies with the invalidResponse', async () => {

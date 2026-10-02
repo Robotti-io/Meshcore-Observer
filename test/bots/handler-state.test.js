@@ -26,10 +26,7 @@ test('built-in handlers serialize and restore their versioned private state', ()
       handler: createLookupCommandHandler({ nodeRegistry }),
       command: { trigger: '!lookup', kind: 'lookup' },
       text: '!lookup E85C',
-      expected: {
-        query: 'E85C', outcome: 'found', name: 'Summit', matchCount: null,
-        lastHeardAt: 1000, nodePrefix: 'E85C', repeaterCount: null
-      }
+      expected: { query: 'E85C' }
     },
     {
       handler: createStatsCommandHandler({ statsReporter }),
@@ -44,6 +41,32 @@ test('built-in handlers serialize and restore their versioned private state', ()
     assert.ok(matched);
     assert.deepEqual(handler.restore(matched.state), expected);
   }
+});
+
+test('lookup matching stores validated input and defers registry action until dispatch execution', () => {
+  let registryCalls = 0;
+  const handler = createLookupCommandHandler({
+    nodeRegistry: {
+      findByPrefix: () => {
+        registryCalls += 1;
+        return { status: 'not_found', query: 'E8' };
+      },
+      countRepeaters: () => 7
+    }
+  });
+  const command = {
+    trigger: '!lookup', kind: 'lookup',
+    notFoundResponse: 'no {query} among {repeaterCount}'
+  };
+
+  const matched = handler.match({ commands: [command], text: '!lookup E8' });
+  assert.equal(registryCalls, 0);
+  assert.deepEqual(handler.restore(matched.state), { query: 'E8' });
+
+  const action = handler.execute({ command, data: handler.restore(matched.state), now: 1000 });
+  assert.equal(registryCalls, 1);
+  assert.equal(action.template, command.notFoundResponse);
+  assert.deepEqual(action.values, { query: 'E8', name: null, matchCount: null, lastHeard: 'unknown', nodePrefix: 'E8', repeaterCount: 7 });
 });
 
 test('handler state restoration rejects malformed, mismatched, unsupported, and extra-property state', () => {

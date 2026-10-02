@@ -27,15 +27,15 @@ export function createStatsCommandHandler({ statsReporter }) {
       return null;
     },
     restore: stateCodec.restore,
-    render({ command, data, sharedReply, now }) {
+    execute({ command, data, now }) {
       const resolved = resolveStatsRange(data.query, { now, earliestSampleAt: statsReporter.earliestSampleAt() });
       if (!resolved) {
-        return { template: command.usageResponse, values: { ...sharedReply, query: data.query } };
+        return { template: command.usageResponse, values: { query: data.query } };
       }
       return {
         template: command.response,
         overflowTemplate: command.overflowResponse,
-        values: { ...sharedReply, range: data.query, ...statsReporter.summarize(resolved) }
+        values: { range: data.query, ...statsReporter.summarize(resolved) }
       };
     }
   };

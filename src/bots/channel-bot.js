@@ -450,17 +450,23 @@ export class ChannelBot {
       throw new Error(`no command handler is registered for kind "${command.kind ?? 'exact'}"`);
     }
     const data = handler.restore(handlerStateJson);
-    const rendered = handler.render({
+    const actionResult = await handler.execute({
       command,
       data,
       now: this.#now(),
-      sharedReply: { sender, hopCount, path, trigger, hash }
     });
 
     const { message, degraded } = renderResponse({
-      template: rendered.template,
-      overflowTemplate: rendered.overflowTemplate,
-      values: rendered.values,
+      template: actionResult.template,
+      overflowTemplate: actionResult.overflowTemplate,
+      values: {
+        sender,
+        hopCount,
+        path,
+        trigger,
+        hash,
+        ...actionResult.values
+      },
       maxBytes: this.#maxMessageBytes
     });
 

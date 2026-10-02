@@ -7,6 +7,7 @@ GitHub issue: [https://github.com/Robotti-io/Meshcore-Observer/issues/13](https:
 - Future releases are expected to add bot command kinds and capabilities.
 - The goal is a small, repeatable command extension seam that keeps shared bot orchestration understandable and prevents every new command kind from requiring new SQLite columns.
 - The user approved a one-time SQLite migration to generic, strictly validated command state as part of the finalized plan before T1 began.
+- Follow-up direction: command handlers should own command-specific input interpretation and actions, then return named, serializable result values for shared response-template rendering. Sender-prefix extraction and validation belong at the shared decrypted-message boundary because sender is required message metadata; handlers may ignore the validated sender when they do not need it.
 - Record the decision and evidence in this plan and mirror the outcome in the v2.4.0 release plan. Link the eventual PR or GitHub issue update when available.
 
 ## 1. Feature Summary
@@ -47,7 +48,7 @@ Do not add a new framework, implicit self-registration, per-handler timers, or h
 
 ## 4. Scope and Constraints
 
-- Preserve exact, lookup, and stats command behavior, configuration compatibility, byte-budget rendering, queue semantics, and restart recovery.
+- Preserve exact/stats behavior, configuration and template compatibility, byte-budget rendering, queue semantics, and restart recovery. Lookup keeps its templates/results but intentionally resolves its registry data at dispatch under the approved follow-up contract below.
 - Keep shared radio decoding, channel filtering, hop filtering, deduplication, enqueue/send lifecycle, and repeat confirmation in shared infrastructure.
 - Keep command-specific dependencies behind handler/service seams; do not let the bot orchestration query `MetricsStore` directly.
 - Keep queued handler state plain JSON data, bounded and validated; never persist functions, class instances, or radio secrets.
@@ -131,3 +132,64 @@ Do not add a new framework, implicit self-registration, per-handler timers, or h
 2. [x] T2 — finalize handler contract and migration strategy; user approval recorded.
 3. [x] T3 — implement only the approved boundary and persistence design.
 4. [x] T4 — verify regressions, persistence, and extension without schema changes; document results.
+
+## 10. Follow-Up: Handler-Owned Actions, Results, and Sender Parsing
+
+This follow-up builds on the completed T1–T4 boundary. A command handler interprets validated command input, performs its command-specific action, and returns named result values for the shared response-template renderer. The shared decrypted-message boundary parses and validates required sender metadata once; a handler that does not use sender data may ignore it. Shared channel filtering, minimum-hop enforcement, deduplication, queueing, byte-budget rendering, radio sending, and repeat confirmation remain in `ChannelBot` and shared services.
+
+### Current evidence and constraints
+
+- `decryptGroupText()` currently both decrypts and splits a plausible `sender: message` prefix, returning the sender and prefix-stripped command text. The agreed contract treats this prefix as required decrypted-message metadata and validates it once before handler matching.
+- `ChannelBot` currently drops any decrypted message without a sender before attempting handler matching. This behavior remains: prefixless or malformed sender metadata is an invalid message, even if a command would not otherwise use sender data. Handlers receive the normalized message and may ignore its validated sender.
+- The latest `bot_replies` schema allows `sender` to be null for legacy or non-command reply rows. No sender column migration is required for the inbound sender-validation contract.
+- Handler work currently runs at different stages: lookup resolves and snapshots registry data during matching; stats queries metrics during response preparation; exact commands use only configured templates and shared reply values.
+- The shared response renderer already accepts a values object and handles UTF-8 byte limits and overflow templates. Returning strict JSON-serializable named values fits that seam; callbacks and handler instances must remain out of persisted state.
+
+### T5: Finalize the invocation, action, result, and sender contract
+
+- **Objective:** Decide the boundaries and timing before changing command behavior.
+- **Specific changes:** Define the normalized message handlers receive; where required sender metadata is validated; and when command actions execute relative to hop validation, deduplication, queueing, and dispatch. Use named, serializable values as the result contract. Specify prefixless-message behavior and preserve sender attribution in queue metrics.
+- **Definition of done:** Decisions are recorded for the open questions in Section 11, including backward-compatible behavior for current configured commands and templates.
+- **Expected tests / validation:** Code-path review only; no production edits.
+- [x] **Decision complete (2026-10-02):** Require and validate sender metadata at the shared decrypted-message boundary; reject prefixless/malformed messages before command matching. Parse and validate command input early, but execute command actions only after hop and duplicate admission checks, at queued reply dispatch. Use named, serializable result values for shared template rendering. Lookup will move from match-time snapshot resolution to dispatch-time resolution, matching stats' dispatch-time behavior; document and test this timing change.
+
+### T6: Implement handler-owned action and result-value flow
+
+- **Objective:** Make command-specific actions return data for shared template rendering.
+- **Specific changes:** Refine the handler contract so command input/state is strictly validated and serializable, an action returns named output values, and the handler selects the configured response template. Adapt exact, lookup, and stats so data-backed actions execute at queued dispatch; persist validated serializable input rather than lookup results captured during matching. Keep common reply values separate from command results and keep the shared byte-budget renderer and sender in the common path.
+- **Definition of done:** Command action/result flow is consistent across built-in handlers, and adding a command action does not add command-specific SQLite columns or duplicate common send lifecycle code.
+- **Expected tests / validation:** Focused handler tests for input parsing, action results, response-template values, action failures, preservation of exact/stats behavior, and the approved lookup timing change.
+- [x] **T6 result (2026-10-02):** Built-in handlers now persist strictly validated parsed input and expose an `execute()` action that returns named values for shared response-template rendering. Lookup reads the registry only during queued dispatch; stats retains its dispatch-time query. Existing v1 lookup snapshots remain strictly accepted for pending-queue recovery and are re-resolved from their query. Exact, lookup, stats, state-codec, and handler-failure tests pass.
+
+### T7: Validate sender metadata at the shared decrypted-message boundary
+
+- **Objective:** Make the required sender-prefix parsing and validation an explicit shared message-boundary responsibility, separate from command-specific actions.
+- **Specific changes:** Normalize decrypted messages into validated sender and command-text fields once before handler matching. Reject absent, malformed, or out-of-bound sender prefixes consistently. Pass normalized metadata to handlers and preserve sender attribution through queue, logging, and metrics.
+- **Definition of done:** All handlers receive the same validated message shape; commands that do not use sender data need no sender-specific parsing, while prefixless messages are consistently rejected.
+- **Expected tests / validation:** Tests for valid, absent, malformed, and boundary-length sender prefixes; queue persistence and metrics retain sender attribution.
+- [x] **T7 result (2026-10-02):** Added a centralized AJV schema for normalized decrypted group text. Sender attribution is parsed and shape-validated once before matching; absent or malformed sender prefixes remain ineligible for commands, while senderless own replies continue through repeat-confirmation handling. Tests cover valid, absent, malformed, and length-boundary prefixes plus queue/send attribution.
+
+### T8: Verify recovery, compatibility, and extension cost
+
+- **Objective:** Demonstrate that the refined contract works through queued dispatch and remains maintainable.
+- **Specific changes:** Add regression tests that persist a matched command's serializable input, execute it after queue dispatch/reopen, and render shared plus command-specific values. Update bot configuration and response-template documentation with the finalized contract.
+- **Definition of done:** Current command output, queue recovery, byte-budget handling, and reporting remain correct; a representative new action can be added without command-specific database schema changes.
+- **Expected tests / validation:** Focused tests, full `npm test`, `npm run lint`, and migration verification only if T5 finds and separately approves a storage change.
+- [x] Added a close/reopen dispatch test proving a pending lookup stores only validated input and resolves current registry data after recovery.
+- [x] Updated README channel-bot guidance for required sender metadata and dispatch-time lookup resolution.
+- [x] Complete full-suite test and lint validation for the follow-up.
+- [x] **T8 result (2026-10-02):** Added a store close/reopen recovery test for lookup input and dispatch-time resolution; updated README documentation for required sender metadata and lookup timing. Full validation passed: 48 test files / 498 tests and `npm.cmd run lint`.
+
+### 11. Resolved Decisions and Compatibility Notes for the Follow-Up
+
+- **Sender metadata:** The `sender:` prefix is required decrypted-message metadata. Parse and validate it once in the shared message boundary; reject prefixless or malformed messages before matching. A command may ignore the sender value but does not redefine message validity.
+- **Command input and action timing:** Validate and parse command input early without performing command actions. Run actions only after shared hop and duplicate checks, at queued reply dispatch, using persisted serializable input for restart recovery.
+- **Lookup timing compatibility:** Lookup currently snapshots registry results during matching. It will instead resolve at dispatch, consistently with stats, so delayed/recovered replies reflect data when the action runs. This is an intentional behavior change to make handler action timing consistent.
+- **Result representation and templates:** Handlers return structured objects of named serializable values so templates can select action results. Existing `{sender}`, `{path}`, `{trigger}`, and other response placeholders remain supported; no command-template syntax break or schema change is planned absent evidence.
+
+### 12. Suggested Execution Order for the Follow-Up
+
+1. [x] T5 — record the agreed sender and action-timing contract.
+2. [x] T6 — implement command action results and shared rendering against that contract.
+3. [x] T7 — validate sender metadata at the shared decrypted-message boundary.
+4. [x] T8 — verify current behavior, restart recovery, templates, and extension cost.
