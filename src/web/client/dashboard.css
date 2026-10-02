@@ -3,9 +3,8 @@
   --chart-ink-secondary: #52514e;
   --chart-muted: #898781;
   --chart-gridline: #e1e0d9;
-  /* dataviz skill's validated 8-hue categorical palette, fixed order -
-     reused as-is for every categorical chart on this dashboard (packet
-     types, and each bot's command breakdown), never a second palette. */
+  /* Validated categorical palette for packet types and the first eight bot
+     commands; later bot commands receive deterministic generated hues. */
   --cat-1: #2a78d6;
   --cat-2: #eb6834;
   --cat-3: #1baf7a;
@@ -14,6 +13,8 @@
   --cat-6: #008300;
   --cat-7: #4a3aa7;
   --cat-8: #e34948;
+  --bot-command-generated-saturation: 72%;
+  --bot-command-generated-lightness: 45%;
   --control-border: color-mix(in srgb, canvastext 25%, transparent);
   --control-active-bg: color-mix(in srgb, canvastext 12%, transparent);
   --trend-increase: #237a35;
@@ -33,6 +34,8 @@
     --cat-6: #008300;
     --cat-7: #9085e9;
     --cat-8: #e66767;
+    --bot-command-generated-saturation: 74%;
+    --bot-command-generated-lightness: 64%;
     --trend-increase: #79d98a;
     --trend-decrease: #ff8b80;
   }

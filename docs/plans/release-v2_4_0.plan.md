@@ -1054,12 +1054,12 @@ SQLite should remain a shared persistence mechanism, but the API surface should 
 
 ### 8.1 Work
 
-- [ ] Identify logical store/repository boundaries.
-- [ ] Determine whether selected concerns can be extracted without duplicating database ownership.
-- [ ] Keep migrations centralized and transactional.
-- [ ] Avoid refactoring solely to reduce file size.
-- [ ] Prefer extraction only where ownership or testing becomes materially clearer.
-- [ ] Use coverage results to identify persistence behavior currently exercised only indirectly.
+- [x] Inventory store responsibilities, consumers, migration/transaction seams, and direct versus indirect test coverage; record evidence of ownership friction or test limitations.
+- [x] Retain the current `MetricsStore` design and schema: one SQLite connection and migration owner are clear, and no repository extraction is justified.
+- [x] Report every configured bot command individually in the Channel bots chart and table, preserving config order and exact trigger counts without command-specific frontend mappings; keep the storage API/schema unchanged. `npm.cmd test` passed (48 files / 493 tests) and `npm.cmd run lint` passed.
+- [x] Evaluate schema/data-model changes against the evidence; no change was justified. Any future storage change still requires separate explicit human approval.
+- [x] Avoid refactoring solely to reduce file size; no repository extraction was justified by the ownership or testing evidence.
+- [x] Use coverage results to identify persistence behavior currently exercised only indirectly; focused store and consumer tests cover the current persistence seams.
 
 Potential boundaries include:
 

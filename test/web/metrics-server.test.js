@@ -534,10 +534,10 @@ test('GET /api/metrics/bots/commands returns every configured bot, zero-filled, 
   });
 });
 
-test('GET /api/metrics/bots/commands folds an 8th-and-later configured command into "Other"', async () => {
+test('GET /api/metrics/bots/commands reports every configured command individually beyond seven', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
-  const commands = Array.from({ length: 8 }, (_, i) => ({ trigger: `!cmd${i}`, response: 'x' }));
-  seedResolvedReply(metricsStore, { botName: 'multi', trigger: '!cmd7', status: 'sent', occurredAt: 5000 });
+  const commands = Array.from({ length: 8 }, (_, i) => ({ trigger: i === 7 ? '!stats' : `!cmd${i}`, response: 'x' }));
+  seedResolvedReply(metricsStore, { botName: 'multi', trigger: '!stats', status: 'sent', occurredAt: 5000 });
 
   const botsConfig = [{ name: 'multi', channel: '#multi', enabled: true, minHops: 0, commands }];
 
@@ -545,8 +545,8 @@ test('GET /api/metrics/bots/commands folds an 8th-and-later configured command i
     const res = await fetch(`${baseUrl}/api/metrics/bots/commands?start=0&end=10000`);
     const body = await res.json();
 
-    assert.equal(body.bots[0].commands.length, 8); // 7 primary + Other
-    assert.deepEqual(body.bots[0].commands[7], { trigger: 'Other', count: 1 });
+    assert.equal(body.bots[0].commands.length, 8);
+    assert.deepEqual(body.bots[0].commands[7], { trigger: '!stats', count: 1 });
     assert.equal(body.bots[0].totalReplies, 1);
   });
 });
