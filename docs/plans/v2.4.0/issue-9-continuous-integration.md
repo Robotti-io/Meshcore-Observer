@@ -16,7 +16,7 @@ Run deterministic lint, test, and threshold-enforced coverage checks on GitHub A
 - Tests are under `test/` and use Vitest with Node's built-in `node:assert/strict`.
 - `vitest.config.js` includes every `src/**/*.js` file and enforces global minimums of 72% statements, 71% branches, 73% functions, and 70% lines. `reportOnFailure` generates JUnit and coverage reports when a test or threshold fails.
 - `npm run test:ci` writes `artifacts/junit.xml` and reports under `coverage/` (Cobertura, LCOV, JSON, and HTML). Both directories are gitignored and can still be uploaded by a workflow.
-- This repository currently has no CI workflow. The human has explicitly selected GitHub Actions for this project and overridden the conflicting GitLab-template instruction for this CI work.
+- `.github/workflows/ci.yml` now runs the lint job and four-entry coverage-test matrix. T3 adds matrix-specific report artifact uploads. The human explicitly selected GitHub Actions and overrode the conflicting GitLab-template instruction for this CI work.
 - The local branch refs include `main` and `release-v2_4_0`; there are no `development` or `production` branches. Checks are scoped to pull requests targeting `main` and pushes to `main` only.
 
 ### 3. Proposed Approach
@@ -42,23 +42,25 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 - **Definition of done:** Platform, triggers, runner/Node matrix, and gating sequence are agreed.
 - **Validation:** Confirmed against the human's explicit decisions and current local branch refs.
 
-#### T2: Add lint and test jobs
+#### T2: Add lint and test jobs — PR matrix complete; push-to-main check pending
 
 - [x] Add the main-only GitHub Actions workflow with read-only contents permission, an independent Ubuntu/Node 24.x lint job, and the four-entry Ubuntu/Windows × Node 22.x/24.x coverage-test matrix.
 - [x] Initial temporary-PR run executed all four matrix entries; the 475 tests passed, but the jobs failed the 73% line-coverage floor at 72.96% in the reported run.
-- [ ] Rerun the PR matrix with the agreed 70% line floor and confirm every job passes; validate the push-to-`main` trigger after merge.
+- [x] Rerun the PR matrix with the agreed 70% line floor; all four jobs and the 475-test suite passed.
+- [ ] Validate the push-to-`main` trigger after merge.
 - **Objective:** Make baseline quality checks automatic.
 - **Specific changes:** Add `.github/workflows/ci.yml` for the agreed pull-request and push events. Run `npm ci` and `npm run lint` in an independent lint job. Run `npm ci` and `npm run test:ci` in a matrix of `ubuntu-latest` and `windows-latest` with Node 22.x and 24.x. Set `permissions: contents: read`; no secrets are required by the test suite. Report uploads remain in T3.
 - **Definition of done:** Lint passes and the full coverage-enforcing test command passes in all four OS/Node combinations; failures are surfaced as distinct check results.
-- **Expected tests / validation:** [x] Inspect the workflow structure and confirm the intended triggers, jobs, and matrix are declared. [x] Confirm all matrix entries execute `npm ci` and all 475 tests pass on the initial temporary-PR run. [ ] Confirm the recalibrated coverage gate passes on every matrix entry. [ ] Validate the push-to-main run.
+- **Expected tests / validation:** [x] Inspect the workflow structure and confirm the intended triggers, jobs, and matrix are declared. [x] Confirm all matrix entries execute `npm ci` and all 475 tests pass on the initial temporary-PR run. [x] Confirm the 70% line floor and all other coverage gates pass on every PR matrix entry. [ ] Validate the push-to-main run after merge.
 
 #### T3: Add coverage artifacts and required statuses
 
-- [ ] Task pending implementation.
+- [x] Add an unconditional, uniquely named artifact upload to each test-matrix job for JUnit, Cobertura, LCOV, JSON, and HTML reports; use the configured retention period and ignore missing files when setup fails early.
+- [ ] Verify report artifacts on successful and intentionally failing runs, then configure and verify required statuses for pull requests to `main`.
 - **Objective:** Make test/coverage reports available to reviewers.
-- **Specific changes:** Upload `artifacts/junit.xml`, `coverage/cobertura-coverage.xml`, `coverage/lcov.info`, `coverage/coverage-final.json`, and `coverage/index.html` using an unconditional upload step and unique names for each OS/Node matrix job. Use the repository's configured artifact-retention policy unless maintainers specify another duration. After the workflow is stable, require the lint and matrix checks for pull requests to `main`.
+- **Specific changes:** Upload `artifacts/junit.xml`, `coverage/cobertura-coverage.xml`, `coverage/lcov.info`, `coverage/coverage-final.json`, and `coverage/index.html` using an unconditional upload step and unique names for each OS/Node matrix job. Use the repository's configured artifact-retention policy unless maintainers specify another duration. After successful-run and failure-run artifact validation, require the lint and matrix checks for pull requests to `main`.
 - **Definition of done:** Reports are downloadable from successful and intentionally failing workflow runs; required check names are stable and block merging to `main`.
-- **Expected tests / validation:** Verify report files from one successful run and one run intentionally failing the coverage threshold. Then verify GitHub marks the chosen checks as required for a pull request to `main`.
+- **Expected tests / validation:** [ ] Verify report files from one successful run and one run intentionally failing the coverage threshold. [ ] Verify GitHub marks the chosen lint and matrix checks as required for a pull request to `main` after artifact validation.
 
 #### T4: Document CI operation and maintenance
 
@@ -89,6 +91,6 @@ Add a minimal GitHub Actions workflow with a lint job and a Windows/Linux test m
 ### 8. Suggested Execution Order
 
 1. [x] T1 — resolve GitHub Actions, main-only triggers, runner/Node matrix, and delayed required-check policy.
-2. [ ] T2 — add lint and coverage-enforcing Windows/Linux matrix jobs (workflow authored; GitHub run validation pending).
+2. [x] T2 — add lint and coverage-enforcing Windows/Linux matrix jobs; the PR matrix passes, with push-to-main validation pending after merge.
 3. [ ] T3 — upload reports on success and failure; validate an intentionally failing threshold run and then require stable checks.
 4. [ ] T4 — update README and plan documentation to match the workflow.

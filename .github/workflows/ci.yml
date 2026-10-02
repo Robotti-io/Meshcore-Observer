@@ -56,3 +56,16 @@ jobs:
 
       - name: Run tests and coverage thresholds
         run: npm run test:ci
+
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.os }}-node-${{ matrix.node-version }}
+          path: |
+            artifacts/junit.xml
+            coverage/cobertura-coverage.xml
+            coverage/lcov.info
+            coverage/coverage-final.json
+            coverage/index.html
+          if-no-files-found: ignore

@@ -107,20 +107,23 @@ For the agreed triggers (workflow implementation added in `.github/workflows/ci.
 - [x] Define the test job as a four-entry matrix: `ubuntu-latest` and `windows-latest`, each on Node 22.x and 24.x; each entry runs `npm ci` and `npm run test:ci` (tests plus threshold-enforced coverage).
 - [x] Set workflow permissions to `contents: read`; the tests require no secrets or external service credentials.
 - [x] Initial temporary-PR run executed all four matrix entries and all 475 tests passed; the reported 72.96% line coverage failed the 73% floor.
-- [ ] Confirm the agreed 70% line floor passes in all four PR matrix entries, then validate the push-to-main run.
-- [ ] Upload JUnit, Cobertura, LCOV, JSON, and HTML reports from each matrix entry with an unconditional step and a distinct artifact name.
-- [ ] Use GitHub's configured artifact retention unless a maintainer specifies another duration.
+- [x] Confirm the agreed 70% line floor passes in all four PR matrix entries; all 475 tests pass in each entry.
+- [ ] Validate the push-to-main run after merge.
+- [x] Add an unconditional, uniquely named artifact upload for JUnit, Cobertura, LCOV, JSON, and HTML reports from each matrix entry.
+- [x] Leave retention at GitHub's configured default.
+- [ ] Verify uploaded reports on a successful run and an intentionally failing coverage-threshold run.
+- [ ] Configure the lint and matrix check statuses as required for PRs to `main` after artifact validation.
 
 ### 3.2 Platform coverage
 
 The test matrix covers both supported operating systems and both selected Node lines:
 
-- [ ] Run the core test suite on Windows.
-- [ ] Run the core test suite on Linux.
-- [ ] Run the core test suite on Node 22.x.
-- [ ] Run the core test suite on Node 24.x.
+- [x] Run the core test suite on Windows; all 475 tests pass in the matrix.
+- [x] Run the core test suite on Linux; all 475 tests pass in the matrix.
+- [x] Run the core test suite on Node 22.x; all 475 tests pass in the matrix.
+- [x] Run the core test suite on Node 24.x; all 475 tests pass in the matrix.
 - [ ] Identify tests that are genuinely platform-specific rather than weakening the entire test matrix.
-- [ ] Confirm `node:sqlite` behavior under both CI environments.
+- [x] Confirm `node:sqlite` behavior under both CI environments through the passing full-suite matrix.
 
 Optional:
 
@@ -165,7 +168,9 @@ The Vitest migration and both development dependencies are explicitly approved f
 
 **Issue #10 progress (2026-10-02):** The suite now runs under Vitest with Istanbul. `npm test`, `npm run test:watch`, `npm run test:coverage`, and `npm run test:ci` are configured and documented in the README. Windows T2 validation on Node v24.18.0 passed twice at 47 test files / 470 tests, with matching results: 69.74% statement, 69.22% branch, 71.09% function, and 70.23% line coverage. JUnit, HTML, LCOV, JSON, and Cobertura artifacts were generated; coverage includes all 56 source files, including the unimported dashboard entry point at zero coverage. Lint passed. T3 recorded the initial baseline against base commit `c5e5d88a141b959633c11aedae416930e8e5b845` before risk-driven test additions, then added regression tests for SQLite startup failure ordering and failed flood-advert handling. The entrypoint test runs in a child process for isolation, so the parent Vitest coverage counters do not include its startup lines even though the behavior is asserted. The post-improvement Windows run passed 47 files / 472 tests at 69.82% statement, 69.31% branch, 71.09% function, and 70.31% line coverage. The working tree was dirty for both baselines; the recorded SHA identifies the base commit, not a commit containing the T2/T3 work. Linux validation remains for the issue #9 CI matrix. **Pre-T4 web review and T3.5 result:** `dashboard-logic.js` is fully covered, while browser-side `dashboard.js` remains at 0% because no browser interaction harness runs in the Node suite; it remains included in measurement pending a separate harness decision. Added seeded-data HTTP tests for aggregate overview data and comparison trends, no-comparison all-time behavior, and each of the packets, brokers, bots, and repeaters views. Added coverage for sampler-driven SSE updates. The server-response `error` callback could not be triggered deterministically through the public HTTP seam without adding a production test hook; abrupt disconnect cleanup remains covered. `metrics-server.js` increased from 68.7% statements / 62.4% branches / 56.3% functions to 95.2% / 88.9% / 93.8%. The full Windows suite and lint pass: 47 test files / 475 tests; repository coverage is 72.67% statements, 72.04% branches, 74.08% functions, and 73.17% lines. Linux validation remains with the issue #9 CI matrix.
 
-**T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 70% lines across all `src/**/*.js` files. The initial Issue #9 PR matrix ran all 475 tests in each entry, but its reported 72.96% line coverage missed the prior 73% floor. At the human's direction, the line floor is now 70%; the other floors and full source inclusion remain unchanged. A green CI rerun is pending. README documents the thresholds and review policy. A normal local `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. GitHub Actions and its triggers/matrix are implemented in Issue #9 T2; CI artifact upload remains assigned to T3.
+**Issue #9 T2 follow-up (2026-10-02):** The temporary PR matrix subsequently passed all four Ubuntu/Windows × Node 22.x/24.x entries after setting the line threshold to 70%; all 475 tests passed in each entry. CI report downloads remain unverified until Issue #9 T3 artifact uploads are exercised.
+
+**T4 (2026-10-02):** `vitest.config.js` enforces global minimums of 72% statements, 71% branches, 73% functions, and 70% lines across all `src/**/*.js` files. The initial Issue #9 PR matrix ran all 475 tests in each entry, but its reported 72.96% line coverage missed the prior 73% floor. At the human's direction, the line floor is now 70%; the other floors and full source inclusion remain unchanged. The green four-entry CI rerun is recorded below. README documents the thresholds and review policy. A normal local `npm run test:ci` passed at 72.67% / 72.04% / 74.08% / 73.17%; an intentional 100% statement override failed as expected, and JUnit, HTML, LCOV, JSON, and Cobertura files remained available after the failure. GitHub Actions and its triggers/matrix are implemented in Issue #9 T2; CI artifact upload remains assigned to T3.
 
 **Issue #10 task status:**
 
@@ -409,7 +414,7 @@ These artifacts provide different views of the same test execution:
 
 The CI workflow should upload reports even when coverage thresholds or tests fail where technically possible, so failed builds remain diagnosable.
 
-**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. The user selected GitHub Actions with pull-request-to-`main` and push-to-`main` triggers, an Ubuntu/Windows matrix on Node 22.x/24.x, and required checks after validation. Issue #9 T2 has implemented the workflow; its first PR run exposed a line-floor mismatch, now set to the agreed 70%. A green PR rerun remains pending. CI artifact upload remains pending in Issue #9 T3.
+**Current status:** The local runner is configured with `reportOnFailure`, and report generation after an intentional threshold failure was verified. The user selected GitHub Actions with pull-request-to-`main` and push-to-`main` triggers, an Ubuntu/Windows matrix on Node 22.x/24.x, and required checks after validation. Issue #9 T2 has implemented the workflow; the four-entry PR matrix now passes with the agreed 70% line floor. T3 has added matrix-specific report uploads; verifying artifacts from successful and failing runs and configuring required checks remain pending.
 
 ### 4.10 Pull-request reporting
 

@@ -37,14 +37,14 @@ Migrate the existing suite to Vitest and use `@vitest/coverage-istanbul` for Ist
 - **Definition of done:** [x] Framework, provider, and dependency governance are explicitly selected; the release non-goal is scoped to prohibit unapproved framework changes and no longer conflicts with this approved migration.
 - **Expected tests / validation:** Validate the selected versions and report outputs during T2; no separate tool comparison is required.
 
-#### T2: Configure deterministic local reports — implemented; Linux CI validation pending
+#### T2: Configure deterministic local reports — implementation and four-entry CI execution complete; artifact inspection pending
 
 - [x] Local tooling, reports, and Windows validation complete.
 
 - **Objective:** Produce complete, reproducible results.
 - **Specific changes:** Add compatible, matching Vitest and `@vitest/coverage-istanbul` versions plus package scripts/config for one-shot tests, watch mode, coverage, JUnit, LCOV, JSON, and HTML; explicitly include every `src/**/*.js` file. Configure Cobertura XML if it integrates cleanly with CI.
 - **Definition of done:** [x] Documented commands create the agreed artifacts; all `src/**/*.js` files are included without source exclusions.
-- **Expected tests / validation:** [x] Windows report runs completed twice with identical test counts and coverage totals; representative JUnit, JSON, HTML, LCOV, and Cobertura outputs were inspected, including an unimported source file. [ ] Repeat on Linux in the issue #9 CI matrix.
+- **Expected tests / validation:** [x] Windows report runs completed twice with identical test counts and coverage totals; representative JUnit, JSON, HTML, LCOV, and Cobertura outputs were inspected, including an unimported source file. [x] Issue #9's Ubuntu/Windows × Node 22.x/24.x PR matrix passed the 475-test suite and coverage thresholds in every entry. [ ] Inspect downloadable CI reports after Issue #9 T3 uploads them.
 - **Progress:** Migrated all 47 test files to Vitest while preserving test names and assertions; configured `npm test`, `npm run test:watch`, `npm run test:coverage`, and `npm run test:ci`. Added local artifact guidance to the README. Windows validation on 2026-10-02 with Node v24.18.0: 47 files / 470 tests passed; lint passed; both coverage runs reported 69.74% statements, 69.22% branches, 71.09% functions, and 70.23% lines. JUnit contains 470 test cases. Coverage JSON includes all 56 source files; `src/web/client/dashboard.js` appears at 0% as expected. The initial baseline remains T3 work and these verification totals are not yet recorded as the official baseline.
 
 #### T3: Measure and improve high-risk coverage — completed
@@ -58,7 +58,7 @@ Migrate the existing suite to Vitest and use `@vitest/coverage-istanbul` for Ist
 - **Initial baseline (pre-improvement):** Captured 2026-10-02 at 11:04 America/New_York with `npm run test:coverage`, Node v24.18.0, branch `release-v2_4_0`, HEAD `c5e5d88a141b959633c11aedae416930e8e5b845`. Results: 69.74% statements (1715/2459), 69.22% branches (785/1134), 71.09% functions (332/467), and 70.23% lines (1647/2345); 47 test files / 470 tests passed. The working tree was dirty with T2 implementation and documentation changes; HEAD is recorded as the base commit, and the baseline includes those working-tree changes. No risk-driven tests had been added.
 - **Progress:** Coverage review found two high-risk gaps selected for targeted tests: startup must stop before radio/network activity when the required SQLite store cannot open, and failed scheduled flood adverts must be resolved and logged without being counted as sent. The reply-queue quiet-window assertion was made deterministic with Vitest fake timers after a pre-baseline run intermittently observed 29 ms against its 30 ms boundary; no production code changed for that stabilization.
 - **Targeted tests:** Added an isolated entrypoint test proving an unopenable SQLite store exits before the TCP radio transport starts, and a scheduler test proving a failed flood-advert command is logged, resolved as idle/unsent, and does not enter an immediate retry loop. No production behavior change was needed. The entrypoint check runs in a child process to isolate startup side effects, so its source execution is not included in Vitest's parent-process coverage counters; it provides behavioral protection while those lines remain uncovered in the report.
-- **Post-improvement baseline:** Captured 2026-10-02 at 11:09 America/New_York with `npm run test:ci`, Node v24.18.0, branch `release-v2_4_0`, HEAD `c5e5d88a141b959633c11aedae416930e8e5b845`. Results: 69.82% statements (1717/2459), 69.31% branches (786/1134), 71.09% functions (332/467), and 70.31% lines (1649/2345); 47 test files / 472 tests passed. The working tree remained dirty with T2/T3 changes, so HEAD is the base commit rather than a commit containing the measured changes. Linux validation remains pending in issue #9 CI.
+- **Post-improvement baseline:** Captured 2026-10-02 at 11:09 America/New_York with `npm run test:ci`, Node v24.18.0, branch `release-v2_4_0`, HEAD `c5e5d88a141b959633c11aedae416930e8e5b845`. Results: 69.82% statements (1717/2459), 69.31% branches (786/1134), 71.09% functions (332/467), and 70.31% lines (1649/2345); 47 test files / 472 tests passed. The working tree remained dirty with T2/T3 changes, so HEAD is the base commit rather than a commit containing the measured changes. The later Issue #9 PR matrix confirmed the full suite and coverage thresholds on both Linux and Windows; CI report download/inspection remains pending T3.
 
 #### Pre-T4 review — `src/web` and `src/web/client` coverage
 
@@ -106,7 +106,7 @@ Migrate the existing suite to Vitest and use `@vitest/coverage-istanbul` for Ist
 ### 8. Suggested Execution Order
 
 1. [x] T1 — Vitest/Istanbul stack and dependency approval resolved.
-2. [x] T2 — migrate/configure the suite and produce repeatable artifacts on Windows; Linux confirmation remains with the issue #9 CI matrix.
+2. [x] T2 — migrate/configure the suite and produce repeatable artifacts on Windows; the full Linux/Windows CI matrix also passed. Downloadable CI artifact inspection remains with Issue #9 T3.
 3. [x] T3 — record pre- and post-improvement baselines; add tests for startup store-failure ordering and flood-advert send failure.
 4. [x] T3.5 — cover aggregate dashboard routes and live SSE updates.
 5. [x] T4 — record the improved baseline and enforce coverage floors; CI artifact upload is assigned to Issue #9 workflow implementation.
