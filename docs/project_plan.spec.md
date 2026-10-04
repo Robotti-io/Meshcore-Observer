@@ -2,13 +2,19 @@
 
 ## Implementation Plan and Specification
 
-**Status:** Proposed
+**Status:** Historical — original greenfield replacement plan; the JavaScript implementation now exists.
 **Target:** Greenfield replacement for the customized Python `meshcore-packet-capture` observer
 **Primary runtime:** Node.js on Windows with a USB-connected Heltec V3
 **Language:** JavaScript only
 **Module system:** ES modules
 **Primary local radio transport:** Serial / COM port
 **Future deployment target:** Containerized internal Kubernetes environment using a transport that does not assume direct desktop COM-port access
+
+This document records the original replacement requirements and remains useful
+as historical design context. For current runtime behavior, configuration, and
+developer workflow, use the repository's `README.md`, `AGENTS.md`, source, and
+the relevant v2.4.0 issue plans. Issue #9 selected GitHub Actions for code
+validation; container build and deployment remain separate work.
 
 ---
 
@@ -1306,7 +1312,8 @@ Initialize the Node project as its own Git repository from the beginning.
 
 Do not use an installer that downloads upstream source into the working tree.
 
-Recommended branch expectations should remain compatible with the organization's:
+The following was the original proposed branch layout, not a statement of the
+currently implemented CI triggers:
 
 ```text
 main

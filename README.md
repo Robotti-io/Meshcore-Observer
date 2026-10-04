@@ -30,6 +30,29 @@ cd meshcore-observer
 npm install
 ```
 
+## Upgrade from v2.3.x
+
+1. Stop the running observer before updating its files.
+2. Preserve your local `.env.local`, `brokers.config.json`, and
+   `bots.config.json`; do not replace them with the example files. Back up the
+   configured metrics database as well (by default, `data/metrics.sqlite3`).
+3. Update the source checkout to the v2.4.0 release tag and install the locked
+   dependencies:
+
+   ```sh
+   git fetch --tags
+   git checkout v2.4.0
+   npm ci
+   ```
+
+4. Start the observer with `npm start`.
+
+The existing SQLite store applies its pending migrations transactionally at
+startup. v2.4.0 does not require replacing existing configuration files.
+Password-authenticated brokers may continue using the legacy positional
+`PACKETCAPTURE_MQTT<n>_PASSWORD` variables in v2.x; new configurations should
+use each broker's stable `auth.passwordEnv` mapping (see the MQTT section).
+
 ## Configure
 
 Configuration is entirely environment-driven, with two optional local files
@@ -180,7 +203,7 @@ dashboard: `https://map.okimesh.org/#/packets/{hash}`).
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
 times the mesh relays it to you. Decrypted command messages must include a
-valid `sender: ` prefix; messages without one are not matched, even by
+valid `sender:` prefix; messages without one are not matched, even by
 commands whose templates do not use `{sender}`. The bot's own senderless
 reply rebroadcasts are still checked for repeat confirmation.
 
@@ -541,6 +564,11 @@ the script before running it.
 
 ## Architecture
 
+For development workflow, see [CONTRIBUTING.md](CONTRIBUTING.md). For the
+current architecture and configuration contract, this README and the source
+are authoritative; `docs/project_plan.spec.md` is the original replacement
+plan and is retained as historical context.
+
 ```text
 src/
   config/     centralized, schema-validated configuration (the only place process.env is read)
@@ -566,4 +594,4 @@ Engineering conventions (validation, logging, protected boundaries, dependency p
 
 ## License
 
-ISC (see `package.json`).
+ISC; see [LICENSE.txt](LICENSE.txt).

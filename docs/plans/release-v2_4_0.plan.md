@@ -1136,7 +1136,9 @@ Avoid redesigning persistence based purely on theoretical concerns. Changes in t
 
 **GitHub Issue Link:** [https://github.com/Robotti-io/Meshcore-Observer/issues/16](https://github.com/Robotti-io/Meshcore-Observer/issues/16)
 
-Blocked by
+Issue #16 release preparation may proceed before merge so the candidate is ready for review. Prepare the version and GitHub Release draft in the PR workflow; create the actual GitHub Release only after merge and successful post-merge CI/required-check validation. Release notes live only in the GitHub Release; repository plans remain the detailed change record.
+
+Release dependency issues (resolve before final release; they do not block Issue #16 preparation)
 
 - [https://github.com/Robotti-io/Meshcore-Observer/issues/7](https://github.com/Robotti-io/Meshcore-Observer/issues/7)
 - [https://github.com/Robotti-io/Meshcore-Observer/issues/8](https://github.com/Robotti-io/Meshcore-Observer/issues/8)
@@ -1148,13 +1150,16 @@ Blocked by
 - [https://github.com/Robotti-io/Meshcore-Observer/issues/14](https://github.com/Robotti-io/Meshcore-Observer/issues/14)
 - [https://github.com/Robotti-io/Meshcore-Observer/issues/15](https://github.com/Robotti-io/Meshcore-Observer/issues/15)
 
-- [ ] Add a repository `LICENSE` file matching the package's declared ISC license.
-- [ ] Review README installation and upgrade instructions for v2.4.0.
-- [ ] Consider adding a lightweight `CONTRIBUTING.md`.
-- [ ] Confirm example configuration files remain synchronized with runtime defaults.
-- [ ] Run a documentation pass for stale references left by the v1 → v2 architecture changes.
-- [ ] Document how to run the normal and coverage test suites.
-- [ ] Prepare v2.4.0 release notes with clear upgrade guidance.
+- [x] Add a root `LICENSE.txt` with the standard ISC license text and `Copyright (c) 2026 Robotti Tech Services`; the lockfile audit found no copyleft runtime dependency requiring a change from ISC.
+- [x] Review README installation and upgrade instructions for v2.4.0.
+- [x] Add a lightweight `CONTRIBUTING.md`.
+- [x] Confirm example configuration files remain synchronized with runtime defaults; align the bot example channel with README.
+- [x] Run a documentation pass for stale references left by the v1 → v2 architecture changes.
+- [x] Document how to run the normal and coverage test suites.
+- [x] Set the candidate package version to 2.4.0 in `package.json` and `package-lock.json`.
+- [ ] Prepare v2.4.0 release notes with clear upgrade guidance for the GitHub Release draft only; do not create the actual release until merge and post-merge checks pass.
+
+**Issue #16 implementation update (2026-10-04):** The license, contributor guide, README/architecture guidance, example alignment, and v2.4.0 package version are prepared in the candidate. The GitHub Release draft remains pending GitHub CLI authentication; release notes are not stored in this repository. Create the draft before merge once authenticated, and publish the release only after merge and successful post-merge validation.
 
 ---
 

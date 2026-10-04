@@ -1,7 +1,7 @@
 [
   {
     "name": "echo-bot",
-    "channel": "#bot",
+    "channel": "#echo",
     "enabled": true,
     "minHops": 1,
     "maxMessageBytes": 120,
