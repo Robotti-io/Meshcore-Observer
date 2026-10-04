@@ -1090,6 +1090,8 @@ This is primarily a maintainability review; large structural changes are not req
 
 v2.4.0 should use the current local deployment as a real-world validation environment.
 
+**Run started (2026-10-02 21:59:20 UTC):** Candidate code is running from this project workspace with copied, ignored configuration and database files; the previous active instance was halted first. Manual observations are planned every 15 minutes through Sunday, October 4. The copied settings sample health every second and use unlimited retention. See [the Issue #15 soak log](v2.4.0/issue-15-operational-soak-log.md) for the baseline and preflight note. A clean restart is scheduled for Saturday, October 3 at 20:00 EDT, and forced process termination/recovery for Sunday, October 4 at 08:00 EDT; outcomes remain pending.
+
 ### 9.1 Observe over multi-day runtime
 
 - [ ] Process memory / RSS behavior.
