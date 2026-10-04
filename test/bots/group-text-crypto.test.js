@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { createCipheriv, createHmac } from 'node:crypto';
 import { decryptGroupText } from '../../src/bots/group-text-crypto.js';
@@ -119,4 +119,23 @@ test('does not treat a colon appearing after position 50 as a sender split', () 
   assert.ok(result);
   assert.equal(result.sender, null);
   assert.equal(result.text, `${longPrefix}: message`);
+});
+
+test('validates sender-prefix length and leaves malformed sender text unattributed', () => {
+  const key16 = Buffer.alloc(16, 0x0c);
+  const validSender = 'x'.repeat(49);
+  const valid = encryptGroupText({ key16, timestamp: 1, flags: 0, text: `${validSender}: !echo` });
+  const validResult = decryptGroupText(valid.ciphertext, valid.mac, key16);
+  assert.equal(validResult.sender, validSender);
+  assert.equal(validResult.text, '!echo');
+
+  const tooLong = encryptGroupText({ key16, timestamp: 1, flags: 0, text: `${'x'.repeat(50)}: !echo` });
+  const tooLongResult = decryptGroupText(tooLong.ciphertext, tooLong.mac, key16);
+  assert.equal(tooLongResult.sender, null);
+  assert.equal(tooLongResult.text, `${'x'.repeat(50)}: !echo`);
+
+  const malformed = encryptGroupText({ key16, timestamp: 1, flags: 0, text: 'bad[]: !echo' });
+  const malformedResult = decryptGroupText(malformed.ciphertext, malformed.mac, key16);
+  assert.equal(malformedResult.sender, null);
+  assert.equal(malformedResult.text, 'bad[]: !echo');
 });

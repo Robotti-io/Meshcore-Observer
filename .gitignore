@@ -5,6 +5,7 @@ bots.config.json
 brokers.config.json
 *.log
 coverage/
+artifacts/
 .claude/
 data/
 docs/working_docs

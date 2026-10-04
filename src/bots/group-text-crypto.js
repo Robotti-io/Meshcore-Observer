@@ -1,4 +1,8 @@
 import { createHmac, createDecipheriv, timingSafeEqual } from 'node:crypto';
+import { compileSchema } from '../validation/ajv.js';
+import { decryptedGroupTextSchema } from './schemas.js';
+
+const validateDecryptedGroupText = compileSchema(decryptedGroupTextSchema);
 
 /**
  * Verifies and decrypts a GRP_TXT ciphertext with a single channel key.
@@ -59,5 +63,6 @@ export function decryptGroupText(ciphertext, cipherMac, key16) {
     }
   }
 
-  return { timestamp, flags, sender, text: content };
+  const decrypted = { timestamp, flags, sender, text: content };
+  return validateDecryptedGroupText(decrypted) ? decrypted : null;
 }

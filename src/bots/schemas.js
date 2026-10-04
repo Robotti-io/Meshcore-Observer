@@ -23,6 +23,21 @@ export const LOOKUP_RESPONSE_FIELDS = ['foundResponse', 'notFoundResponse', 'amb
 // is - one shared list, not a second hand-copied one.
 export const STATS_RESPONSE_FIELDS = ['response', 'usageResponse'];
 
+// Normalized output from decryptGroupText(). Sender may be null for a
+// successfully-decrypted bot reply being checked for a mesh rebroadcast;
+// ChannelBot requires a non-null sender before attempting command matching.
+export const decryptedGroupTextSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['timestamp', 'flags', 'sender', 'text'],
+  properties: {
+    timestamp: { type: 'integer', minimum: 0, maximum: 4294967295 },
+    flags: { type: 'integer', minimum: 0, maximum: 255 },
+    sender: { anyOf: [{ type: 'string', minLength: 1, maxLength: 49 }, { type: 'null' }] },
+    text: { type: 'string' }
+  }
+};
+
 export const botConfigSchema = {
   type: 'object',
   additionalProperties: false,

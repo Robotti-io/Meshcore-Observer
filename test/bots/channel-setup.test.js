@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { ensureChannel } from '../../src/bots/channel-setup.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';

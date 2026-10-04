@@ -1,7 +1,19 @@
-import { test } from 'node:test';
+import { afterEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { RadioManager } from '../../src/radio/radio-manager.js';
+
+const managers = new Set();
+
+afterEach(async () => {
+  const activeManagers = [...managers];
+  managers.clear();
+  try {
+    await Promise.all(activeManagers.map((manager) => manager.stop()));
+  } finally {
+    vi.useRealTimers();
+  }
+});
 
 function silentLogger() {
   const noop = () => {};
@@ -21,6 +33,12 @@ function baseRadioConfig(overrides = {}) {
 
 function onceEvent(emitter, event) {
   return new Promise((resolve) => emitter.once(event, resolve));
+}
+
+function makeManager(options) {
+  const manager = new RadioManager(options);
+  managers.add(manager);
+  return manager;
 }
 
 function createFakeConnection() {
@@ -48,7 +66,7 @@ function createFakeConnection() {
 
 test('connects successfully and emits radio.connected with normalized device info', async () => {
   const connection = createFakeConnection();
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport: async () => connection
@@ -73,7 +91,7 @@ test('a failed device query does not block connection, and leaves model/firmware
   connection.deviceQuery = async () => {
     throw new Error('unsupported command');
   };
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport: async () => connection
@@ -98,7 +116,7 @@ test('strips trailing null-padding and any packed data after it from manufacture
     // string into this single "remainder of frame" field.
     manufacturerModel: 'Heltec V3\0\0\0\0\0v1.17.1-d929643\0\0'
   });
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport: async () => connection
@@ -114,6 +132,7 @@ test('strips trailing null-padding and any packed data after it from manufacture
 });
 
 test('retries with backoff after a failed transport attempt, then succeeds', async () => {
+  vi.useFakeTimers();
   const connection = createFakeConnection();
   let attempts = 0;
   const openTransport = async () => {
@@ -124,7 +143,7 @@ test('retries with backoff after a failed transport attempt, then succeeds', asy
     return connection;
   };
 
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport
@@ -138,6 +157,7 @@ test('retries with backoff after a failed transport attempt, then succeeds', asy
   assert.equal(errorDetail.phase, 'connect');
   assert.equal(errorDetail.fatal, undefined);
 
+  await vi.advanceTimersByTimeAsync(5);
   await connected;
   assert.equal(attempts, 2);
 
@@ -150,7 +170,7 @@ test('reconnects automatically when the active connection disconnects', async ()
   const connections = [firstConnection, secondConnection];
   const openTransport = async () => connections.shift();
 
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport
@@ -173,7 +193,7 @@ test('reconnects automatically when the active connection disconnects', async ()
 
 test('stop() closes the active connection and suppresses its own disconnect from reconnecting', async () => {
   const connection = createFakeConnection();
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport: async () => connection
@@ -189,11 +209,11 @@ test('stop() closes the active connection and suppresses its own disconnect from
     reconnectAttempted = true;
   });
 
+  vi.useFakeTimers();
   await manager.stop();
   assert.equal(connection.closed, true);
 
-  // give any errant reconnect scheduling a chance to run
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.advanceTimersByTimeAsync(30);
   assert.equal(reconnectAttempted, false);
   assert.equal(manager.isConnected(), false);
 });
@@ -202,7 +222,7 @@ test('runCommand rejects when not connected and runs through the queue when conn
   const connection = createFakeConnection();
   connection.ping = async () => 'pong';
 
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig() },
     logger: silentLogger(),
     openTransport: async () => connection
@@ -221,13 +241,14 @@ test('runCommand rejects when not connected and runs through the queue when conn
 });
 
 test('gives up after exceeding a finite retry limit and emits a fatal radio.error', async () => {
+  vi.useFakeTimers();
   let attempts = 0;
   const openTransport = async () => {
     attempts += 1;
     throw new Error('always fails');
   };
 
-  const manager = new RadioManager({
+  const manager = makeManager({
     config: { radio: baseRadioConfig({ reconnect: { maxRetries: 1, initialDelayMs: 5, maxDelayMs: 5 } }) },
     logger: silentLogger(),
     openTransport
@@ -237,13 +258,13 @@ test('gives up after exceeding a finite retry limit and emits a fatal radio.erro
   manager.on('radio.error', (detail) => errors.push(detail));
 
   manager.start();
-  await new Promise((resolve) => setTimeout(resolve, 60));
+  await vi.advanceTimersByTimeAsync(5);
 
   assert.equal(attempts, 2);
   assert.equal(errors.at(-1).fatal, true);
 
   const attemptsAfterGiveUp = attempts;
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.advanceTimersByTimeAsync(30);
   assert.equal(attempts, attemptsAfterGiveUp);
 
   await manager.stop();

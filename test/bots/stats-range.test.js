@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { resolveStatsRange, STATS_RANGE_TOKENS } from '../../src/bots/stats-range.js';
 

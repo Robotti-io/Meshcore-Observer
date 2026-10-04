@@ -29,13 +29,13 @@ export class RepeatCheckTracker {
 
   /**
    * Registers `text` (the exact plaintext we just sent) as awaiting a
-   * repeat. Returns any entries that expired unconfirmed during this call's
-   * own eviction pass, so the caller can log/count them as timeouts.
+   * repeat. Returns entries that expired during the age pass separately
+   * from entries removed because the pending-entry limit was reached.
    *
    * @param {string} text
    * @param {object} meta arbitrary context (sender/trigger/hash/...) carried
    * through to a later confirmation or timeout report.
-   * @returns {object[]} expired, unconfirmed entries' `meta`
+   * @returns {{expired: object[], evicted: object[]}} expired entries and capacity-evicted entries' `meta`
    */
   register(text, meta) {
     const now = this.#now();
@@ -46,8 +46,13 @@ export class RepeatCheckTracker {
     this.#pendingByText.set(text, entries);
     this.#totalPending += 1;
 
-    this.#evictOverflow();
-    return expired;
+    const evicted = this.#evictOverflow();
+    return { expired, evicted };
+  }
+
+  /** Removes and returns every entry whose repeat-check timeout has elapsed. */
+  sweepExpired() {
+    return this.#evictExpired(this.#now());
   }
 
   /**
@@ -97,14 +102,16 @@ export class RepeatCheckTracker {
   }
 
   #evictOverflow() {
+    const evicted = [];
     while (this.#totalPending > this.#maxEntries) {
       const [oldestText] = this.#pendingByText.keys();
       const entries = this.#pendingByText.get(oldestText);
-      entries.shift();
+      evicted.push(entries.shift().meta);
       this.#totalPending -= 1;
       if (entries.length === 0) {
         this.#pendingByText.delete(oldestText);
       }
     }
+    return evicted;
   }
 }

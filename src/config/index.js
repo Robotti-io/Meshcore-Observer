@@ -111,8 +111,9 @@ function readBotReplyQueue(env) {
     // plaintext echoed back on the same channel (necessarily a rebroadcast
     // by another node - see channel-bot.js's #checkForRepeat) before giving
     // up and counting it unconfirmed. GRP_TXT has no protocol ACK to wait on
-    // instead (same reason quietMs exists above).
-    repeatCheckTimeoutMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS', 30000)
+    // instead (same reason quietMs exists above). Zero means the entry expires
+    // immediately; the next tracker sweep or operation counts it unconfirmed.
+    repeatCheckTimeoutMs: readInteger(env, 'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS', 10000)
   };
 }
 
@@ -144,10 +145,10 @@ function readMetricsUi(env) {
  * startup error.
  *
  * The one field never stored in that file is a password-auth broker's
- * password: it's read here from PACKETCAPTURE_MQTT<n>_PASSWORD, where <n> is
- * that broker's 1-based position in the array (not a field in the file
- * itself) - the same variable name this project has always used for that
- * purpose, now naming a position in the array instead of an env var prefix.
+ * password. A broker may name its password variable with auth.passwordEnv;
+ * otherwise the legacy PACKETCAPTURE_MQTT<n>_PASSWORD lookup uses its
+ * 1-based position in the array. The selector itself is removed before the
+ * normalized runtime configuration is returned.
  */
 function readBrokers(env) {
   const configuredPath = readString(env, 'PACKETCAPTURE_BROKERS_CONFIG_FILE');
@@ -172,15 +173,14 @@ function readBrokers(env) {
       return broker;
     }
     const number = index + 1;
-    const passwordKey = `PACKETCAPTURE_MQTT${number}_PASSWORD`;
+    const { passwordEnv, ...auth } = broker.auth;
+    const passwordKey = passwordEnv ?? `PACKETCAPTURE_MQTT${number}_PASSWORD`;
     const password = readString(env, passwordKey);
-    if (!password) {
-      throw new ConfigError(
-        `Broker "${broker.id}" (position ${number} in the brokers config file) uses password auth, ` +
-          `but ${passwordKey} is not set`
-      );
+    if (password === null) {
+      const context = passwordEnv ? `named variable ${passwordKey}` : `position ${number} variable ${passwordKey}`;
+      throw new ConfigError(`Broker "${broker.id}" uses password auth, but ${context} is not set or is empty`);
     }
-    return { ...broker, auth: { ...broker.auth, password } };
+    return { ...broker, auth: { ...auth, password } };
   });
 }
 

@@ -28,9 +28,10 @@ function normalizeBroker(broker) {
       method: broker.auth.method,
       username: broker.auth.username ?? null,
       // Never sourced from the JSON file - see readBrokers() in
-      // src/config/index.js, which fills this in from
-      // PACKETCAPTURE_MQTT<number>_PASSWORD for password-auth brokers.
+      // src/config/index.js, which fills this in from passwordEnv or the
+      // legacy PACKETCAPTURE_MQTT<number>_PASSWORD variable.
       password: null,
+      ...(broker.auth.passwordEnv ? { passwordEnv: broker.auth.passwordEnv } : {}),
       audience: broker.auth.audience ?? null,
       tokenTtlSeconds: broker.auth.tokenTtlSeconds ?? null
     }
@@ -44,9 +45,9 @@ function normalizeBroker(broker) {
  * (an explicitly configured path) should check that themselves before
  * calling this.
  *
- * Each broker's position in the returned array (1-based) is its "number" -
- * used only to name that broker's secret environment variable (see
- * src/config/index.js's readBrokers) - not a field in the file itself.
+ * A password-auth broker may name its secret environment variable with
+ * auth.passwordEnv. If it does not, its 1-based array position is used by
+ * src/config/index.js's readBrokers for the legacy variable name.
  *
  * File shape:
  * [

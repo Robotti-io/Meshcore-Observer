@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { Advert } from '@liamcottle/meshcore.js';
 import { parseAdvertFromPacket } from '../../src/nodes/advert-parser.js';

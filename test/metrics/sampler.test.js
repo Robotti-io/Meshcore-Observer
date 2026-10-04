@@ -1,6 +1,24 @@
-import { test } from 'node:test';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
+
+const samplers = new Set();
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  for (const sampler of samplers) sampler.stop();
+  samplers.clear();
+  vi.useRealTimers();
+});
+
+function makeSampler(options) {
+  const sampler = new MetricsSampler(options);
+  samplers.add(sampler);
+  return sampler;
+}
 
 function silentLogger() {
   const calls = { warn: [] };
@@ -37,7 +55,7 @@ test('emits "sample" with the fresh snapshot on every tick, and persists it', as
     pruneOlderThan: () => {}
   };
   const snapshot = baseSnapshot({ packetsReceived: 3, packetsDecoded: 2 });
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(snapshot),
     metricsStore,
     sampleIntervalMs: 10,
@@ -48,7 +66,7 @@ test('emits "sample" with the fresh snapshot on every tick, and persists it', as
   const emitted = [];
   sampler.on('sample', (s) => emitted.push(s));
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await vi.advanceTimersByTimeAsync(50);
   sampler.stop();
 
   assert.ok(emitted.length > 0, 'expected at least one sample tick');
@@ -63,12 +81,12 @@ test('a later tick reports only the delta since the previous tick, not the cumul
   const metricsStore = { recordPacketSample: (sample) => persisted.push(sample), pruneOlderThan: () => {} };
   let received = 5;
   const serviceHealth = { snapshot: () => baseSnapshot({ packetsReceived: received, packetsDecoded: received }) };
-  const sampler = new MetricsSampler({ serviceHealth, metricsStore, sampleIntervalMs: 15, retentionDays: 0, logger: silentLogger() });
+  const sampler = makeSampler({ serviceHealth, metricsStore, sampleIntervalMs: 15, retentionDays: 0, logger: silentLogger() });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await vi.advanceTimersByTimeAsync(15);
   received = 8; // +3 since the first tick
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await vi.advanceTimersByTimeAsync(15);
   sampler.stop();
 
   assert.ok(persisted.length >= 2, 'expected at least two ticks');
@@ -83,7 +101,7 @@ test('a store failure while recording a sample is caught and logged, never throw
       throw new Error('disk full');
     }
   };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 10,
@@ -92,7 +110,7 @@ test('a store failure while recording a sample is caught and logged, never throw
   });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.advanceTimersByTimeAsync(30);
   sampler.stop();
 
   assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to persist a metrics sample')));
@@ -101,7 +119,7 @@ test('a store failure while recording a sample is caught and logged, never throw
 test('never prunes when retentionDays is 0 (unlimited retention)', async () => {
   const pruneCalls = [];
   const metricsStore = { recordPacketSample: () => {}, pruneOlderThan: (cutoff) => pruneCalls.push(cutoff) };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 10,
@@ -110,7 +128,7 @@ test('never prunes when retentionDays is 0 (unlimited retention)', async () => {
   });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await vi.advanceTimersByTimeAsync(40);
   sampler.stop();
 
   assert.equal(pruneCalls.length, 0, 'retentionDays: 0 must never prune');
@@ -119,7 +137,7 @@ test('never prunes when retentionDays is 0 (unlimited retention)', async () => {
 test('prunes with a positive retentionDays configured', async () => {
   const pruneCalls = [];
   const metricsStore = { recordPacketSample: () => {}, pruneOlderThan: (cutoff) => pruneCalls.push(cutoff) };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 10,
@@ -128,7 +146,7 @@ test('prunes with a positive retentionDays configured', async () => {
   });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.advanceTimersByTimeAsync(30);
   sampler.stop();
 
   assert.ok(pruneCalls.length >= 1, 'expected at least one prune call');
@@ -143,7 +161,7 @@ test('a prune failure is caught and logged, never thrown', async () => {
       throw new Error('locked');
     }
   };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 10,
@@ -152,7 +170,7 @@ test('a prune failure is caught and logged, never thrown', async () => {
   });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await vi.advanceTimersByTimeAsync(30);
   sampler.stop();
 
   assert.ok(logger.calls.warn.some((call) => call.message.includes('failed to prune persisted metrics')));
@@ -161,7 +179,7 @@ test('a prune failure is caught and logged, never thrown', async () => {
 test('start() is idempotent - calling it twice does not double the tick rate', async () => {
   const persisted = [];
   const metricsStore = { recordPacketSample: (sample) => persisted.push(sample) };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 20,
@@ -171,7 +189,7 @@ test('start() is idempotent - calling it twice does not double the tick rate', a
 
   sampler.start();
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 45));
+  await vi.advanceTimersByTimeAsync(45);
   sampler.stop();
 
   // ~2 ticks expected at a 20ms interval over 45ms; a doubled rate (two
@@ -180,7 +198,7 @@ test('start() is idempotent - calling it twice does not double the tick rate', a
 });
 
 test('stop() is idempotent and safe to call without a prior start()', () => {
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore: { recordPacketSample: () => {} },
     sampleIntervalMs: 10,
@@ -195,7 +213,7 @@ test('stop() is idempotent and safe to call without a prior start()', () => {
 test('stop() actually halts ticking - no further samples after stop', async () => {
   const persisted = [];
   const metricsStore = { recordPacketSample: (sample) => persisted.push(sample) };
-  const sampler = new MetricsSampler({
+  const sampler = makeSampler({
     serviceHealth: fakeServiceHealth(baseSnapshot()),
     metricsStore,
     sampleIntervalMs: 10,
@@ -204,10 +222,10 @@ test('stop() actually halts ticking - no further samples after stop', async () =
   });
 
   sampler.start();
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await vi.advanceTimersByTimeAsync(25);
   sampler.stop();
   const countAtStop = persisted.length;
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await vi.advanceTimersByTimeAsync(40);
 
   assert.equal(persisted.length, countAtStop);
 });
