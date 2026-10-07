@@ -21,3 +21,13 @@ Items here are unscheduled investigation or implementation candidates for a futu
   - Truly malformed or unsupported frames remain observable at an appropriate log level.
   - Tests cover the chosen handling and ensure packet capture and forwarding behavior remain unchanged.
 - **Constraints:** Do not log full packet payloads or introduce additional dependencies without approval.
+
+## OBS-02 — Repeater region discovery for CoreScope
+
+- **Type:** Feature request
+- **Status:** Unscheduled / release unassigned
+- **Feature document:** [Repeater Region Discovery for CoreScope](feat-repeater_region_discovery.md)
+- **Goal:** Query recently direct-heard repeaters for their declared flood-allowed regions, persist successful answers, and publish CoreScope-compatible `meshcore/client/{PUBLIC_KEY}/regions` objects.
+- **Initial scope:** Opt-in anonymous zero-hop queries, conservative scheduling through existing radio coordination, strict validation, and persisted answer freshness. This is independent of the gessaman firmware's built-in observer `/neighbors` report.
+- **Planning dependencies:** Confirm firmware/library support, direct-routing and contact-state handling, remote-request ownership, storage representation, and per-broker publication permissions.
+- **Approval scope:** Backlog documentation only; implementation and protected-boundary changes need separate approval. Not assigned to the v2.5.0 telemetry work by this entry.
