@@ -450,8 +450,8 @@ automated tests.
 
 Packet activity (the line chart), the packet-types table, the packet-types
 pie chart, and a "Bot commands" section (one pie chart + table + total
-replies per configured channel bot, showing which of its commands are
-actually being used) are all driven by the same duration selector -
+replies per configured channel bot, counting successful deliveries by
+completion time) are all driven by the same duration selector -
 presets from 1 hour up to "All", or a custom start/end date range -
 backed by packet/bot-command metrics persisted locally in a SQLite file
 via Node's built-in `node:sqlite` (requires Node >=22.13.0; see `engines`
@@ -476,6 +476,33 @@ successful sends) for the shared reply queue. Neither is on the dashboard
 yet, but both are captured now specifically so a future view can query
 them without a schema change (see `MetricsStore#queryBrokerDeliveryTotals`
 and `#queryBotReplyOutcomeTotals`).
+
+Bot interaction history also records accepted usage: an eligible command
+counts when the shared reply queue successfully persists it after duplicate
+filtering. Usage queries use Observer acceptance time; sent, failed, expired,
+and cancelled outcomes use completion time. Queue recovery updates the same
+interaction ID without adding another use. The existing bot-local duplicate
+window remains transient; history does not provide permanent RF deduplication.
+
+Backend usage reads group by original sender name, command, bot, and channel
+over `[start, end)` millisecond ranges. Distinct sender names are not verified
+people or public keys; channel messages supply no reliable key attribution.
+Optional identifier/kind/source evidence remains null for these messages.
+Legacy rows without acceptance timestamps are reported as retained unknown
+acceptance, outside range counts, rather than inferred from reply completion.
+`getEarliestBotAcceptanceAt` reports retained bot coverage independently of
+packet samples. Group pages are capped at 200 rows. New sender aggregates and
+individual history are not exposed by the existing HTTP dashboard; their
+presentation is tracked separately in release issues #35/#36.
+
+Interaction history uses `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` (default
+`0`, unlimited), even with the dashboard disabled. Completed interaction
+rows are pruned by completion time strictly before the cutoff; pending rows
+are protected. A recently completed interaction can therefore retain an
+acceptance older than the configured window. IDs are stable within this
+database and are not reused after pruning. Migration 9 preserves existing
+records and adds attribution fields and an acceptance-time index; it does
+not archive message or reply bodies.
 
 The `HOST`/`PORT`/`MAX_CHART_BUCKETS` variables below only matter when the
 HTTP dashboard itself is enabled; `DB_PATH`/`SAMPLE_INTERVAL_MS`/

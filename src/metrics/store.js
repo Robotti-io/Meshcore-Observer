@@ -1,6 +1,35 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { compileSchema, formatErrors } from '../validation/ajv.js';
+import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
+
+const validateBotInteraction = compileSchema(botInteractionSchema);
+const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
+const validateBotUsageRange = compileSchema(botUsageRangeSchema);
+const validateBotUsagePage = compileSchema(botUsagePageSchema);
+
+function assertBotQuery(validate, query) {
+  if (!validate(query)) {
+    throw new Error(`Invalid bot reporting query: ${formatErrors(validate.errors)}`);
+  }
+  if (query.start !== undefined && query.start > query.end) {
+    throw new Error('Invalid bot reporting query: start must not exceed end');
+  }
+}
+
+// Fixed SQL and bound values only. Exact sender spelling is intentional;
+// unknown legacy names remain NULL, never an invented display label.
+const BOT_FILTER_SQL = `
+  (? IS NULL OR bot_name = ? COLLATE BINARY)
+  AND (? IS NULL OR channel = ? COLLATE BINARY)
+  AND (? IS NULL OR trigger = ? COLLATE BINARY)
+  AND (? IS NULL OR sender = ? COLLATE BINARY)
+`;
+
+function botFilterValues({ botName, channel, trigger, sender }) {
+  return [botName, channel, trigger, sender].flatMap((value) => [value ?? null, value ?? null]);
+}
 
 // Fixed rungs above the (dynamic, config-derived) sample interval. Ordered
 // ascending; resolveBucketWidthMs() walks this to find the smallest width
@@ -300,6 +329,49 @@ const MIGRATIONS = [
       'CREATE INDEX idx_bot_replies_status_resolved ON bot_replies(status, resolved_at)',
       'CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at)'
     ]
+  },
+  {
+    // Keep the existing interaction and its IDs, adding attribution evidence
+    // without a parallel event table. AUTOINCREMENT prevents a pruned highest
+    // ID from later identifying a different interaction in this database.
+    version: 9,
+    statements: [
+      `CREATE TABLE bot_replies_new (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_name                TEXT NOT NULL,
+        channel                 TEXT,
+        trigger                 TEXT NOT NULL,
+        sender                  TEXT,
+        hop_count               INTEGER,
+        path                    TEXT,
+        hash                    TEXT,
+        handler_state_json      TEXT NOT NULL CHECK (json_valid(handler_state_json)),
+        enqueued_at             INTEGER,
+        expires_at              INTEGER,
+        status                  TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed', 'expired', 'cancelled')),
+        resolved_at             INTEGER,
+        queued_ms               INTEGER,
+        sender_identifier       TEXT,
+        sender_identifier_kind  TEXT,
+        sender_identifier_source TEXT,
+        CHECK (
+          (sender_identifier IS NULL AND sender_identifier_kind IS NULL AND sender_identifier_source IS NULL)
+          OR (sender_identifier IS NOT NULL AND sender_identifier_kind IS NOT NULL AND sender_identifier_source IS NOT NULL)
+        )
+      )`,
+      `INSERT INTO bot_replies_new (
+        id, bot_name, channel, trigger, sender, hop_count, path, hash,
+        handler_state_json, enqueued_at, expires_at, status, resolved_at, queued_ms
+      ) SELECT id, bot_name, channel, trigger, sender, hop_count, path, hash,
+        handler_state_json, enqueued_at, expires_at, status, resolved_at, queued_ms
+        FROM bot_replies`,
+      'DROP TABLE bot_replies',
+      'ALTER TABLE bot_replies_new RENAME TO bot_replies',
+      'CREATE INDEX idx_bot_replies_status_enqueued ON bot_replies(status, enqueued_at)',
+      'CREATE INDEX idx_bot_replies_status_resolved ON bot_replies(status, resolved_at)',
+      'CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at)',
+      'CREATE INDEX idx_bot_replies_accepted ON bot_replies(enqueued_at, bot_name) WHERE enqueued_at IS NOT NULL'
+    ]
   }
 ];
 
@@ -313,6 +385,8 @@ const MIGRATIONS = [
 const BOT_REPLY_COLUMNS = `
   id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
   handler_state_json AS handlerStateJson,
+  sender_identifier AS senderIdentifier, sender_identifier_kind AS senderIdentifierKind,
+  sender_identifier_source AS senderIdentifierSource,
   enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
   resolved_at AS resolvedAt, queued_ms AS queuedMs
 `;
@@ -398,7 +472,12 @@ export class MetricsStore {
     this.#db = new DatabaseSync(dbPath);
     this.#db.exec('PRAGMA journal_mode = WAL');
     this.#db.exec('PRAGMA foreign_keys = ON');
-    this.#runMigrations();
+    try {
+      this.#runMigrations();
+    } catch (error) {
+      this.#db.close();
+      throw error;
+    }
 
     this.#insertSampleStmt = this.#db.prepare(`
       INSERT INTO metrics_samples (
@@ -426,8 +505,9 @@ export class MetricsStore {
       INSERT INTO bot_replies (
         bot_name, channel, trigger, sender, hop_count, path, hash,
         handler_state_json,
-        enqueued_at, expires_at, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+        enqueued_at, expires_at, status,
+        sender_identifier, sender_identifier_kind, sender_identifier_source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
     `);
     this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
@@ -780,6 +860,88 @@ export class MetricsStore {
     return rows.map((row) => ({ botName: row.botName, outcome: row.outcome, total: Number(row.total) }));
   }
 
+  /** Earliest retained, known acceptance; independent of packet sample coverage. */
+  getEarliestBotAcceptanceAt(filters = {}) {
+    assertBotQuery(validateBotUsageFilters, filters);
+    const row = this.#db.prepare(`SELECT MIN(enqueued_at) AS earliest FROM bot_replies WHERE ${BOT_FILTER_SQL}`)
+      .get(...botFilterValues(filters));
+    return toNumberOrNull(row.earliest);
+  }
+
+  /**
+   * Accepted usage over [start, end). Unknown acceptance is retained-history
+   * metadata, not assigned to this range. Names are exact labels, not people.
+   */
+  queryBotUsageTotals(query) {
+    assertBotQuery(validateBotUsageRange, query);
+    const values = botFilterValues(query);
+    const row = this.#db.prepare(`
+      SELECT COUNT(*) AS accepted, COUNT(DISTINCT sender COLLATE BINARY) AS distinctSenderNames,
+        COALESCE(SUM(sender IS NULL), 0) AS unknownSenderAccepted
+      FROM bot_replies WHERE enqueued_at >= ? AND enqueued_at < ? AND ${BOT_FILTER_SQL}
+    `).get(query.start, query.end, ...values);
+    const coverage = this.#db.prepare(`
+      SELECT MIN(enqueued_at) AS earliestAcceptanceAt,
+        COALESCE(SUM(enqueued_at IS NULL), 0) AS retainedUnknownAcceptance
+      FROM bot_replies WHERE ${BOT_FILTER_SQL}
+    `).get(...values);
+    return {
+      accepted: Number(row.accepted), distinctSenderNames: Number(row.distinctSenderNames),
+      unknownSenderAccepted: Number(row.unknownSenderAccepted),
+      retainedUnknownAcceptance: Number(coverage.retainedUnknownAcceptance),
+      earliestAcceptanceAt: toNumberOrNull(coverage.earliestAcceptanceAt)
+    };
+  }
+
+  /** Bounded exact-name/command/bot/channel groups for accepted usage. */
+  queryBotUsageGroups(query) {
+    const page = { limit: 100, offset: 0, ...query };
+    assertBotQuery(validateBotUsagePage, page);
+    const where = `WHERE enqueued_at >= ? AND enqueued_at < ? AND ${BOT_FILTER_SQL}`;
+    const values = [page.start, page.end, ...botFilterValues(page)];
+    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY';
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
+    const rows = this.#db.prepare(`
+      SELECT bot_name AS botName, channel, trigger, sender, COUNT(*) AS count
+      FROM bot_replies ${where} ${group}
+      ORDER BY count DESC, bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY
+      LIMIT ? OFFSET ?
+    `).all(...values, page.limit, page.offset);
+    return { total: Number(total), groups: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+  }
+
+  /** Bounded sender-name totals, with null representing unavailable evidence. */
+  queryBotSenderCounts(query) {
+    const page = { limit: 100, offset: 0, ...query };
+    assertBotQuery(validateBotUsagePage, page);
+    const where = `WHERE enqueued_at >= ? AND enqueued_at < ? AND ${BOT_FILTER_SQL}`;
+    const values = [page.start, page.end, ...botFilterValues(page)];
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (
+      SELECT 1 FROM bot_replies ${where} GROUP BY sender COLLATE BINARY
+    )`).get(...values);
+    const rows = this.#db.prepare(`SELECT sender, COUNT(*) AS count FROM bot_replies ${where}
+      GROUP BY sender COLLATE BINARY ORDER BY count DESC, sender COLLATE BINARY LIMIT ? OFFSET ?
+    `).all(...values, page.limit, page.offset);
+    return { total: Number(total), senders: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+  }
+
+  /** Bounded outcomes by completion time, including sent/failed/expired/cancelled. */
+  queryBotOutcomeGroups(query) {
+    const page = { limit: 100, offset: 0, ...query };
+    assertBotQuery(validateBotUsagePage, page);
+    const where = `WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
+    const values = [page.start, page.end, ...botFilterValues(page)];
+    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, status';
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
+    const rows = this.#db.prepare(`
+      SELECT bot_name AS botName, channel, trigger, sender, status AS outcome, COUNT(*) AS count
+      FROM bot_replies ${where} ${group}
+      ORDER BY count DESC, bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, status
+      LIMIT ? OFFSET ?
+    `).all(...values, page.limit, page.offset);
+    return { total: Number(total), groups: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+  }
+
   /**
    * Per-broker, per-outcome (sent/skipped/failed) packet delivery totals
    * over [start, end) - backs the dashboard's "MQTT brokers" section (see
@@ -985,18 +1147,32 @@ export class MetricsStore {
    * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
-    this.#insertBotReplyStmt.run(
-      item.botName,
-      item.channel,
-      item.trigger,
-      item.sender,
-      item.hopCount,
-      item.path,
-      item.hash,
-      item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
-      item.enqueuedAt,
-      item.expiresAt
+    const interaction = {
+      ...item,
+      handlerStateJson: item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
+      senderIdentifier: item.senderIdentifier ?? null,
+      senderIdentifierKind: item.senderIdentifierKind ?? null,
+      senderIdentifierSource: item.senderIdentifierSource ?? null
+    };
+    if (!validateBotInteraction(interaction)) {
+      throw new Error(`Invalid bot interaction: ${formatErrors(validateBotInteraction.errors)}`);
+    }
+    const { lastInsertRowid } = this.#insertBotReplyStmt.run(
+      interaction.botName,
+      interaction.channel,
+      interaction.trigger,
+      interaction.sender,
+      interaction.hopCount,
+      interaction.path,
+      interaction.hash,
+      interaction.handlerStateJson,
+      interaction.enqueuedAt,
+      interaction.expiresAt,
+      interaction.senderIdentifier,
+      interaction.senderIdentifierKind,
+      interaction.senderIdentifierSource
     );
+    return Number(lastInsertRowid);
   }
 
   /** How many replies are currently queued (`status = 'pending'`) - see ReplyQueue#getStats(). */
@@ -1064,7 +1240,7 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Deletes packet samples/their child rows, and resolved (never pending) replies, at or before `cutoffMs`. */
+  /** Deletes samples and resolved (never pending) interactions strictly before `cutoffMs`, by completion time for replies. */
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {

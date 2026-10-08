@@ -105,6 +105,7 @@ export class ReplyQueue {
    * code per item.
    *
    * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string}} item
+   * @returns {number|null} Durable interaction ID after acceptance, or null when stopped.
    */
   enqueue(item) {
     if (this.#stopped) {
@@ -112,12 +113,13 @@ export class ReplyQueue {
         bot: item.botName,
         trigger: item.trigger
       });
-      return;
+      return null;
     }
 
     const enqueuedAt = this.#now();
-    this.#store.enqueueReplyItem({ ...item, enqueuedAt, expiresAt: enqueuedAt + this.#ttlMs });
+    const interactionId = this.#store.enqueueReplyItem({ ...item, enqueuedAt, expiresAt: enqueuedAt + this.#ttlMs });
     this.#startTimer();
+    return interactionId;
   }
 
   #startTimer() {

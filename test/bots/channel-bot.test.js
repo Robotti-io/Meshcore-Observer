@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Packet } from '@liamcottle/meshcore.js';
 import { ChannelBot } from '../../src/bots/channel-bot.js';
+import { ReplyQueue } from '../../src/bots/reply-queue.js';
+import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
 import { RepeatCheckTracker } from '../../src/bots/repeat-check-tracker.js';
 import { MetricsStore } from '../../src/metrics/store.js';
@@ -163,6 +165,39 @@ test('does not reply when a trigger word appears as a substring, only on an exac
   await flush();
 
   assert.equal(radioManager.commandCalls.length, 0);
+});
+
+test('accepted usage excludes ineligible packets and repeated RF copies, preserving name and absent identity', async () => {
+  const radioManager = fakeRadioManager();
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const logger = silentLogger();
+  const now = Date.now();
+  const queue = new ReplyQueue({ store, logger, ttlMs: 60000, pollIntervalMs: 60000,
+    now: () => now, dispatch: async () => {}, airtimeCoordinator: new AirtimeCoordinator({ quietMs: 60000 }) });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ minHops: 2 }), logger, replyQueue: queue });
+  try {
+    await startAndConnect(bot, radioManager);
+    const channelKey = deriveHashtagChannelKey('#echo');
+    radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+    radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa','bb'], text: 'Jeymz: unrelated' }));
+    await flush();
+    assert.equal(store.queryBotUsageTotals({ start: now, end: now + 1 }).accepted, 0);
+    for (const hops of [['aa','bb'], ['aa','bb'], ['cc','dd','ee']]) {
+      radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops, text: 'Jeymz: !echo' }));
+      await flush();
+    }
+    assert.equal(store.queryBotUsageTotals({ start: now, end: now + 1 }).accepted, 1);
+    const record = store.peekOldestPendingReplyItem();
+    assert.equal(record.sender, 'Jeymz');
+    assert.equal(record.senderIdentifier, null);
+    assert.equal(record.senderIdentifierKind, null);
+    assert.equal(record.senderIdentifierSource, null);
+    assert.equal(store.queryBotOutcomeGroups({ start: now, end: now + 1 }).total, 0);
+  } finally {
+    bot.stop();
+    await queue.stop();
+    store.close();
+  }
 });
 
 test('does not reply when the hop count is below the configured minimum, and logs why', async () => {

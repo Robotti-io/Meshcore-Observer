@@ -119,6 +119,21 @@ test('does not send immediately - a queued reply waits for a quiet window', asyn
   assert.equal(calls[0].trigger, '!echo');
 });
 
+test('enqueue returns durable acceptance ID; stopped and failed enqueues add no usage', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const queue = newQueue({ store, dispatch: async () => {} });
+  const now = Date.now();
+  const id = queue.enqueue(baseItem());
+  assert.equal(store.getReplyById(id).enqueuedAt, now);
+  const range = { start: now, end: now + 10000 };
+  assert.equal(store.queryBotUsageTotals(range).accepted, 1);
+  assert.throws(() => queue.enqueue(baseItem({ messageBody: 'extra private data' })), /Invalid bot interaction/);
+  assert.equal(store.queryBotUsageTotals(range).accepted, 1);
+  await queue.stop();
+  assert.equal(queue.enqueue(baseItem()), null);
+  assert.equal(store.queryBotUsageTotals(range).accepted, 1);
+});
+
 test('a queued item carries channel, sender, hopCount, path, and hash - not just botName/trigger', async () => {
   const { dispatch, calls } = testDispatcher();
   const queue = newQueue({ dispatch });
@@ -439,10 +454,14 @@ test('a persisted handler context is restored and dispatched after reopening the
     const dispatched = [];
     const dispatch = async (item) => dispatched.push({ trigger: item.trigger, data: codec.restore(item.handlerStateJson) });
     queue = newQueue({ store, dispatch });
+    assert.equal(store.queryBotUsageTotals({ start: now, end: now + TTL_MS }).accepted, 1);
     queue.start();
 
     await waitFor(() => store.getReplyById(id).status === 'sent');
     assert.deepEqual(dispatched, [{ trigger: '!survey', data: { questionId: 'weather' } }]);
+    assert.equal(store.queryBotUsageTotals({ start: now, end: now + TTL_MS }).accepted, 1);
+    assert.equal(store.getReplyById(id).enqueuedAt, now);
+    assert.equal(store.getReplyById(id).senderIdentifier, null);
   } finally {
     if (queue) {
       await queue.stop();
