@@ -3,6 +3,8 @@
 **Owning issue:** [P1-02 — #23](https://github.com/Robotti-io/Meshcore-Observer/issues/23)
 **Status:** Discussion in progress; only the decisions explicitly recorded below are settled.
 
+**Current review:** #27's [concrete passive topology plan](pillar-1-issues/p1-06.md#implementation-plan) and [protocol subset](topology-protocol-notes.md) are staged after user-pushed #25 (a903e0e). Firmware establishes traveled flood versus remaining direct paths, TRACE exclusion and prefix collision limits. Proposed Observer-scoped histories, dynamic conservative identity, 72-hour freshness, 600/minute attempt budget, shared detail retention and optional days-based route pruning await finalized storage/configuration approval. These recommendations are not recorded as settled implementation decisions yet; #23's topology checkbox remains open.
+
 ## Bot reporting — settled on 2026-10-07
 
 Human direction establishes these requirements for [P1-07 — #28](https://github.com/Robotti-io/Meshcore-Observer/issues/28).

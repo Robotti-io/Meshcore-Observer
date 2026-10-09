@@ -2,8 +2,8 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — #28/#26/#24 are complete and user-pushed. #25 resource/event history is implemented locally, closed as completed with native project Done/progress-label removal verified. All 591 tests, CI coverage and lint pass. Research #22 and remaining decisions #23 stay active; next is #27's issue-local passive topology plan.
-The first four backend plans have approved protected storage/configuration scope and pass their full acceptance. Further topology/remote-request/region/telemetry work still needs its issue-local plan and relevant research. Current changes are scoped to #25, local and uncommitted.
+**Stage:** In progress — #28/#26/#24/#25 are complete and user-pushed; #25 is pushed in a903e0e. The backend baseline passes 591 tests, CI coverage and lint. #27's concrete passive topology plan is staged and native project In progress verified for planning. Its new storage/configuration contract awaits implementation approval. Research #22 and remaining decisions #23 stay active.
+The first four backend plans have approved protected storage/configuration scope and pass their full acceptance. #27 now has five ordered tasks, a verified passive protocol subset and concrete conservative identity/freshness/retention/budget recommendations. Current changes are #27 planning and its #22/#23/epic/queue documentation; feature acceptance and the P1-06 child checkbox remain open.
 
 ## Operator outcome
 
