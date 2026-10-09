@@ -3,7 +3,13 @@
 **Owning issue:** [P1-02 — #23](https://github.com/Robotti-io/Meshcore-Observer/issues/23)
 **Status:** Discussion in progress; only the decisions explicitly recorded below are settled.
 
-**Current delivery:** User "Proceed" approves #27's finalized [five-task passive topology plan](pillar-1-issues/p1-06.md#implementation-plan) on 2026-10-08, after committing its plan in 73ae156. All tasks are implemented locally and pass 620 tests/coverage/lint. Observer-scoped flood/direct histories, dynamic all-identity conservative resolution, 72-hour freshness, 600/minute attempt budget, shared unlimited detail retention, off-by-default days-based catalog pruning, atomic persistence and bounded reads are now settled decisions. #23's topology checkbox is complete; its remaining telemetry/region scope and #22's full remote capability research stay open.
+**Current delivery — 2026-10-09:** #27's approved five-task passive topology plan is fully implemented, validated with 620 tests/coverage/lint and user-pushed in cae9a48/migration 13. Its topology/config/storage decisions are settled. [#22 remote research](remote-capability-notes.md) is now complete; deployed firmware remains unknown. [#29 coordination plan](pillar-1-issues/p1-08.md#implementation-plan) is staged for implementation approval. #23 stays open for remaining telemetry/region semantics and protected integration decisions.
+
+## Remote source findings and proposed coordination — 2026-10-09
+
+Source findings, not new implementation-policy approvals: the Companion clears all remote pending slots when a new request is accepted; legacy prefix/one-shot helpers cannot establish robust request ownership; installed 1.15.0 supports low-level tagged binary reads but lacks anonymous APIs, and [upstream PR #44](https://github.com/meshcore-dev/meshcore.js/pull/44) is still open. Anonymous non-contact requests can create a contact and existing contacts use saved routes. Status/LPP/neighbour fields have version/unit/permission limitations. Region CSV can omit names without a truncation marker. The completed assessment records permanent primary references, proposed fixtures and separately authorized hardware checks (none performed).
+
+REMOTE-PLAN-01–04 propose exact owned listeners, generation guards and bounded ACK recovery, foreground priority and four validated default/override settings, bounded tag bookkeeping and an idle foundation. All remain pending #29 finalized-plan approval. Future #31 must review the conservative existing-zero-hop-contact-only recommendation; #30/#32 still own empty/unknown/partial/latest/history/publication state, and #34 owns guest-only authentication. Research completion does not settle these remaining decisions or permit radio/contact/credential/dependency changes.
 
 ## Bot reporting — settled on 2026-10-07
 

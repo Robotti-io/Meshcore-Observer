@@ -2,8 +2,8 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — #28/#26/#24/#25 are complete and user-pushed. User "Proceed" approves #27's finalized five-task storage/configuration plan; passive topology is fully implemented and validated locally with all 61 files / 620 tests, coverage thresholds, lint and whitespace checks passing. Research #22 and remaining telemetry/region decisions #23 stay active.
-Five backend features now satisfy their scoped acceptance. #27 adds migration 13, transactional path/reception/coverage history, bounded passive collection, strict configuration, conservative indexed proximity and save-first retention. Runtime changes are local for review/commit/push; public reporting, dashboard and active discovery/telemetry remain in their owning issues.
+**Stage:** In progress — five backend features #28/#26/#24/#25/#27 are complete and user-pushed; latest baseline cae9a48/migration 13 passes 620 tests/coverage/lint. Capability research #22 is complete. #29's concrete request-coordination plan is staged for implementation approval; remaining telemetry/region decisions #23 stay active.
+Research documents versioned capabilities, legacy helper limitations, single pending remote ownership, contact mutation/routing risks, field units and future authorized hardware gates. #29 proposes a minimal internal seam with configurable limits and bounded ACK recovery; it adds no polling until later producers are approved. Public reporting, dashboard and active discovery/telemetry remain in their owning issues.
 
 ## Operator outcome
 
@@ -23,7 +23,7 @@ Own reusable observation/persistence, reporting semantics, and shared remote-req
 
 Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acceptance criteria, validation expectations, and implementation-plan approval decisions.
 
-- [ ] [P1-01: Protocol, firmware, and library capability assessment](https://github.com/Robotti-io/Meshcore-Observer/issues/22)
+- [x] [P1-01: Protocol, firmware, and library capability assessment](https://github.com/Robotti-io/Meshcore-Observer/issues/22)
 - [ ] [P1-02: Reporting semantics, identity, retention, and data ownership](https://github.com/Robotti-io/Meshcore-Observer/issues/23)
 - [x] [P1-03: Persist Observer run and shutdown history](https://github.com/Robotti-io/Meshcore-Observer/issues/24)
 - [x] [P1-04: Sample process resources and selected runtime events](https://github.com/Robotti-io/Meshcore-Observer/issues/25)
@@ -43,6 +43,8 @@ Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acce
 Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime and aggregate reporting need not wait for discovery-specific upstream availability. OBS-02 is split into P1-09 durable answers, P1-10 direct-heard querying, and P1-11 CoreScope publication; shared observations/scheduling have their own owning issues.
 
 ## Dependencies and unresolved decisions
+
+- Update 2026-10-09: [completed capability notes](remote-capability-notes.md) distinguish inspected/released source from unknown deployed firmware; no live radio check occurred. [#29 plan](pillar-1-issues/p1-08.md#implementation-plan) has five ordered tasks and proposed REMOTE-PLAN-01–04 decisions; acceptance remains unchecked until implementation. #29 uses project In progress during planning. Research #22 closes as completed/project Done; #23 remains open.
 
 - Planning wave started on 2026-10-08: `docs/plans/v2.5.0/pillar-1-implementation-queue.md` links the four code-grounded draft plans and maps remaining issue-local gates. Review recommendation is #28, #26, #24, then #25. Relevant approved decisions unlock each issue; completion of all #23 discussions is not a global prerequisite for planning or an otherwise-ready approved implementation slice.
 
