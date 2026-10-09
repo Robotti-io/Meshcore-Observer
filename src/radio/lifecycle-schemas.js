@@ -5,7 +5,7 @@ function object(properties, required = Object.keys(properties)) {
 
 export const radioCommandOptionsSchema = object({ generation, requireReady: { type: 'boolean' } }, []);
 export const radioInvalidationSchema = object({
-  generation, reason: { enum: ['ack-timeout', 'write-error', 'protocol-error'] }
+  generation, reason: { enum: ['ack-timeout', 'write-error', 'protocol-error', 'request-cancelled'] }
 });
 // Internal test seam, not an additional environment/configuration setting.
 export const radioLifecycleOptionsSchema = object({

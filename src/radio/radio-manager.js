@@ -155,7 +155,8 @@ export class RadioManager extends EventEmitter {
     const explanations = {
       'ack-timeout': 'Remote request acknowledgement timed out; the radio connection is being reset to prevent a late acknowledgement from being assigned to another command.',
       'write-error': 'Remote request write failed; the radio connection is being reset because command acknowledgement ownership is uncertain.',
-      'protocol-error': 'Remote request acknowledgement was malformed; the radio connection is being reset to prevent incorrect command attribution.'
+      'protocol-error': 'Remote request acknowledgement was malformed; the radio connection is being reset to prevent incorrect command attribution.',
+      'request-cancelled': 'Remote request was stopped before acknowledgement; the radio connection is being reset because command acknowledgement ownership is uncertain.'
     };
     this.#logger.warn('services.radio', explanations[request.reason], {
       generation: session.id, reason: request.reason
