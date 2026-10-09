@@ -20,6 +20,12 @@ function evidence(runId, index) {
     transportCodes: null, containsRepeatedPrefix: false };
 }
 const p95 = (values) => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
+// T5: human-authorized proximity-only adjustment after the unchanged query
+// measured 115–124ms under coverage (80–82ms without instrumentation).
+// Keep writes and simpler reads at their original targets; no CI exclusion.
+const WRITE_TARGET_MS = 10;
+const READ_TARGET_MS = 100;
+const PROXIMITY_TARGET_MS = 150;
 
 test('20k paths/100k receptions/4k identities meet local write/read targets with indexed bounded queries', () => {
   const dir = mkdtempSync(join(tmpdir(), 'topology-cost-')); const path = join(dir, 'metrics.sqlite3');
@@ -86,9 +92,13 @@ test('20k paths/100k receptions/4k identities meet local write/read targets with
     console.info('Topology cost fixture:', { paths: 20000, receptions: 100000, inventory: 4000,
       writeP95Ms: Number(p95(writeTimes).toFixed(3)), firstMaximumPathP95Ms: Number(p95(firstMaxTimes).toFixed(3)),
       readP95Ms: readCosts, fixtureBytes: pageBefore * pageSize, measuredGrowthBytes: (pageAfter - pageBefore) * pageSize,
-      platform: process.platform, node: process.version, targets: { writeP95Ms: 10, readP95Ms: 100 } });
-    assert.ok(p95(writeTimes) < 10, 'local normal write p95 target');
-    assert.ok(p95(firstMaxTimes) < 10, 'local first maximum-path write p95 target');
-    for (const [name, cost] of Object.entries(readCosts)) assert.ok(cost < 100, `${name} local read p95 target`);
+      platform: process.platform, node: process.version,
+      targets: { writeP95Ms: WRITE_TARGET_MS, readP95Ms: READ_TARGET_MS, proximityReadP95Ms: PROXIMITY_TARGET_MS } });
+    assert.ok(p95(writeTimes) < WRITE_TARGET_MS, 'local normal write p95 target');
+    assert.ok(p95(firstMaxTimes) < WRITE_TARGET_MS, 'local first maximum-path write p95 target');
+    for (const [name, cost] of Object.entries(readCosts)) {
+      const target = name === 'proximity' ? PROXIMITY_TARGET_MS : READ_TARGET_MS;
+      assert.ok(cost < target, `${name} local read p95 ${cost}ms must be below ${target}ms`);
+    }
   } finally { store?.close(); rmSync(dir, { recursive: true, force: true }); }
 }, 30000);

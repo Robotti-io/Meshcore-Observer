@@ -755,6 +755,67 @@ the script before running it.
 
 ## Architecture
 
+### Shared remote-request foundation
+
+The shared coordinator is constructed at startup but remains idle: this
+foundation schedules no polls or automatic remote requests. It uses the
+existing Companion connection locally and requires no internet service.
+Region discovery and telemetry producers, durable answers and publication
+are separate release features; installing the foundation does not enable them.
+
+Operator overrides and code defaults match `.env.example`. All settings are
+whole numbers; an omitted value uses the default, while an explicit blank,
+fractional or out-of-range value fails startup before storage, radio or network
+effects.
+
+| Setting | Default | Valid range |
+| --- | --- | --- |
+| `PACKETCAPTURE_REMOTE_REQUEST_ACK_TIMEOUT_MS` | 5000 | 1000–30000 milliseconds |
+| `PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS` | 30000 | 1000–120000 milliseconds |
+| `PACKETCAPTURE_REMOTE_REQUEST_MIN_INTERVAL_MS` | 60000 | 10000–3600000 milliseconds |
+| `PACKETCAPTURE_REMOTE_REQUEST_MAX_PER_MINUTE` | 1 | 1–6 attempts per sliding minute |
+
+One aggregate remote request owns its context until a tagged answer or terminal
+outcome. Command and shared airtime ownership end after its acknowledgement,
+so bot replies, adverts, local commands and existing on-device signing can
+proceed while the RF answer is pending. Pending durable replies/adverts take
+priority at admission and again at actual dispatch. Busy air can indefinitely
+defer background work: the quiet window is a local activity heuristic, not a
+channel reservation guarantee. There is no coordinator retry loop or backlog.
+
+The initial request waits one configured interval. Minimum spacing and the
+sliding-minute cap both count physical attempts, including errors/timeouts;
+deferrals do not count. Reconnect retains the budget and idle time grants no
+catch-up burst. Queue waiting and physical-write/ACK waiting have separate ACK
+bounds. After Sent, the response bound is the smaller of the configured cap and
+the Companion estimate plus 1000ms, with a 1000ms minimum.
+
+Missing/malformed acknowledgements and ambiguous write failures reset only the
+captured connection generation, preventing a late acknowledgement from being
+assigned to another command. This briefly interrupts capture during reconnect.
+Warnings explain the reset; ordinary post-ACK response timeout does not reset
+the connection. If transport closure cannot be confirmed within 5000ms, the
+application fails closed and reports that the operator must verify closure and
+restart Observer. It never opens a competing replacement transport. Shutdown
+drains remote ownership before radio/storage teardown under the existing
+10-second deadline; failed teardown leaves the run unclosed for recovery rather
+than claiming a clean stop.
+
+Results mean a tag-matched answer attributed by the trusted Companion to the
+submitted context. The binary envelope provides no full RF sender identity.
+Generation guards reject old-session callbacks, and a 32-entry retired-tag map
+rejects known recent reuse for response cap plus 60000ms. This bounded process
+bookkeeping does not prove cryptographic identity or prevent every RF replay
+across restarts/arbitrary delay. Response interpretation and durable storage
+belong to the future feature owners. Installed anonymous-region dispatch remains
+unsupported until its separately approved library/firmware integration exists;
+the coordinator changes no contacts, routes, ACLs or login behavior.
+
+Deterministic tests cover installed serial/TCP framing with stub drivers, shared
+bot/advert/signing/capture work, 1,000 mixed completion/failure cycles and 1,000
+busy-air deferrals. They do not certify deployed firmware, hardware or RF
+delivery; activation and live validation remain in issues #31/#34/#37.
+
 ### Passive topology evidence
 
 The always-on local store records supported header paths from traffic already
@@ -811,6 +872,14 @@ normally prevents catalog deletion. Purged routes start new route history if
 heard again. Cleanup makes SQLite pages reusable without automatically
 shrinking the file. Rate, path and result bounds are **not a lifetime disk
 ceiling**; monitor disk usage under unlimited retention.
+
+The local topology cost fixture uses 20,000 paths, 100,000 reception details and
+4,000 identities. Its write p95 target is below 10ms; ordinary read targets are
+below 100ms. Proximity reads have a separately approved 150ms p95 target after
+coverage runs measured 115–124ms against the original 100ms target. The latest
+complete coverage run measured 83.275ms. These fixture targets are regression
+checks, not a universal deployment latency guarantee; indexes, result bounds
+and all other performance/coverage checks remain enforced.
 
 For development workflow, see [CONTRIBUTING.md](CONTRIBUTING.md). For the
 current architecture and configuration contract, this README and the source
