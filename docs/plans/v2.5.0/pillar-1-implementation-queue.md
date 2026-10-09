@@ -1,0 +1,54 @@
+# Pillar 1 implementation planning queue
+
+Updated: 2026-10-08. Parent: [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18).
+
+The first backend wave is complete. There are **zero prerequisite questions before drafting the next plan**. Run/resource semantics are settled; the remaining high-level #23 discussions are topology/path interpretation and telemetry/region behavior. Concrete storage/configuration/API decisions are recorded in their owning plan and reviewed when picked up; this is not a promise that only two individual decisions remain before every feature can ship.
+
+## First planning wave
+
+The first four code-grounded plans are approved and fully implemented: #28/#26/#24 are user-pushed, and #25 is complete locally with 591 tests, CI coverage and lint passing. All four owning issues are closed as completed with project Done. Remaining queue entries below still need their issue-local plans and relevant research.
+
+| Review order | Issue / plan | Current readiness | Local review gates |
+| --- | --- | --- | --- |
+| Complete | [#28 bot usage](https://github.com/Robotti-io/Meshcore-Observer/issues/28) / [plan](pillar-1-issues/p1-07.md#implementation-plan) | Approved, implemented locally and validated; new API/UI remains #35/#36 | BOT-PLAN-01/02/03 resolved; migration 9, acceptance/outcome reads, retention/recovery verified |
+| Closed / project Done | [#26 node adverts/direct-heard](https://github.com/Robotti-io/Meshcore-Observer/issues/26) / [plan](pillar-1-issues/p1-05.md#implementation-plan) | All five tasks/acceptance complete; 544 tests, CI coverage and lint pass | Default indefinite fingerprints; optional save-first days-based cleanup preserves offline inventory/discovery; no unresolved gate |
+| Closed / project Done | [#24 run history](https://github.com/Robotti-io/Meshcore-Observer/issues/24) / [plan](pillar-1-issues/p1-03.md#implementation-plan) | All five approved tasks/acceptance complete; 564 tests, CI coverage and lint pass | Database/run identity, exclusive ownership, monotonic lower-bound/recovery semantics, safe shutdown/retention settled; no open gate |
+| Closed / project Done | [#25 resource samples/events](https://github.com/Robotti-io/Meshcore-Observer/issues/25) / [plan](pillar-1-issues/p1-04.md#implementation-plan) | All five tasks/acceptance complete; 591 tests, CI coverage and lint pass; local/uncommitted | One-CPU/ELU units, typed/rate-bounded observations, atomic heartbeat/sample, unlimited shared retention and bounded reads settled; p95 3.781ms; no open gate |
+
+Review order is a recommendation, not an artificial dependency. #28 and #26 need no anonymous-region library upgrade, telemetry credentials, or live-radio transmission. #24/#25 can be reviewed together while the earlier backend issues implement. Allocate sequential migration versions only when executing a reviewed task.
+
+## Remaining planning queue
+
+These are scoped queue entries, **not completed implementation plans**. Their existing issues remain queued unless actual research/decision work is already active. Each next draft must inspect its relevant code before becoming reviewable.
+
+| Issue | Next plan deliverable | Issue-local decisions/evidence | Implementation prerequisite |
+| --- | --- | --- | --- |
+| [#22 capability assessment](https://github.com/Robotti-io/Meshcore-Observer/issues/22) | Versioned matrix with protocol/library/firmware references and response/contact fixtures | Supported versus unsupported/unknown fields, dependency artifact, request lifecycle and routing prerequisites; confirm upstream state at research time | Research already active; no runtime change |
+| [#23 reporting/data decisions](https://github.com/Robotti-io/Meshcore-Observer/issues/23) | Maintain [decision record](pillar-1-decisions.md), integrating each approved plan's contract | Track unresolved topology and telemetry/region choices without re-asking agreed bot/node/run/resource/default decisions | Decision work already active; relevant decision completion is enough for a consuming issue |
+| [#27 passive topology](https://github.com/Robotti-io/Meshcore-Observer/issues/27) | Validated local path evidence and bounded store/history reads | Supported path widths/order, unresolved/colliding prefixes, observation freshness/retention, distance meaning and no assumed path reversal | Relevant #22/#23 evidence; no RF probing |
+| [#29 remote request coordination](https://github.com/Robotti-io/Meshcore-Observer/issues/29) | Minimal completion-lifecycle ownership seam over existing command queue/airtime | Correlation lifetime, connection generation, quiet-air priority, timeout/retry/RF budgets | Relevant #22 capability findings |
+| [#30 durable region answers](https://github.com/Robotti-io/Meshcore-Observer/issues/30) | Latest successful answer plus approved attempt/publication state | Empty versus unknown/failure, partial/completeness indicators, answer freshness and history/latest retention | Relevant #22/#23 contract; can plan against fixtures before poller |
+| [#31 direct region querying](https://github.com/Robotti-io/Meshcore-Observer/issues/31) | Opt-in query loop using approved 72-hour evidence window | Supported dependency/firmware, contacts/direct route handling, dispatch-time eligibility, cadence/retries, disconnect behavior | #26 evidence, #29 coordination, #30 answer seam and relevant #22/#23 findings |
+| [#32 CoreScope publication](https://github.com/Robotti-io/Meshcore-Observer/issues/32) | Validated per-broker region publishing with truthful observation time | Verified exact public contract, broker opt-in/permissions, delayed/restart retry ownership and completeness mapping | #30 data contract and relevant #22/#23 findings; no need to wait for live poller to draft/test |
+| [#33 telemetry storage](https://github.com/Robotti-io/Meshcore-Observer/issues/33) | Supported-field schemas/units and bounded latest/history reads | Firmware-supported fields, unavailable values, observation/remote time, freshness/retention, no credentials in history | Relevant #22/#23 findings |
+| [#34 telemetry polling](https://github.com/Robotti-io/Meshcore-Observer/issues/34) | Opt-in radius-limited conservative polling | Telemetry-only secret references, verified contacts/routes, radius/freshness, cadence/timeout/backoff budgets | #27 evidence, #29 coordination, #33 storage and relevant #22/#23 findings |
+| [#35 reporting APIs](https://github.com/Robotti-io/Meshcore-Observer/issues/35) | Endpoint-by-endpoint validated bounded read contracts | Sender aggregate exposure/privacy, units, dataset-specific retained coverage, compatibility, request logging/security gaps | Implemented dataset reads for each approved slice; no blanket wait for all datasets |
+| [#36 dashboard integration](https://github.com/Robotti-io/Meshcore-Observer/issues/36) | Data views/states using shared Pillar 4 controls | Units/current-history labels, range/stale/empty/error handling, update cost, accessibility | Approved #35 slice and #41 shared-control seam; not completion of all Pillar 4 |
+| [#37 integrated validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37) | Reproducible baseline/soak/recovery/RF/operator checklist | Numeric budgets, duration, representative fixtures and explicitly authorized live actions | Required feature slices implemented; draft validation criteria alongside their plans |
+
+## Per-issue delivery workflow
+
+1. Draft the implementation plan from repository evidence and link it from the owning issue.
+2. Resolve that plan's numbered local decisions; update #23/#22 when a reusable decision/finding is approved.
+3. Review the concrete protected storage/API/authentication/dependency/logging/deployment boundary changes and record human approval in that plan.
+4. Implement one approved task/phase at a time; no source-code changes are authorized merely by staging this queue.
+5. Run the task's meaningful checks using repository scripts; record evidence and update task progress.
+6. Close the issue only after its complete implementation/research/decision deliverable and validation are satisfied. Set project Status to Done, remove the progress label, and update the epic/register.
+
+GitHub project Status and `status:in-progress` identify actual work, including implementation planning. #28/#26/#24 are closed and user-pushed; #25 is closed as completed with native project Done/progress-label removal verified, code local/uncommitted. The remaining active set is #18/#22/#23. Next is #27's passive topology implementation plan, informed by relevant #22/#23 findings. #27 stays queued until actual planning begins. Offline asset/validation requirements remain #42/#83/#37 without changing those queued statuses.
+
+Verification on 2026-10-08: all four draft plan bodies and the epic/decision summaries were synchronized to GitHub and read back, preserving existing labels and open state. Project #1 Status was changed and verified for #24/#25/#28; the temporary verification view showed all seven active items grouped In progress and was discarded afterward. Plan structure/local links and `git diff --check` passed. Runtime tests are not applicable to this documentation-only planning change; required implementation checks are specified per task.
+
+Implementation update on 2026-10-08: human approval authorized #28's concrete storage contract and implementation. Migration 9, acceptance/outcome aggregates, optional identity evidence and stable IDs are implemented locally; all 508 tests and lint pass. Issue-local decisions are reflected into #23, which remains open. Other plans require their own review before implementation. No commit, push, dependency upgrade or live hardware/RF operation has occurred.
+
+Completion synchronization: #28 is closed as completed, its progress label removed, and native project #1 Status Done verified. Updated #28/#23/#18 bodies were read back with scope labels preserved; the parent P1-07 child checkbox is checked. Existing Git ignore rules exclude the local release planning folder; no ignore rule was changed during implementation.
