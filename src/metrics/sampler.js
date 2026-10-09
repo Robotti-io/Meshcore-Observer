@@ -21,13 +21,16 @@ export class MetricsSampler extends EventEmitter {
   #retentionDays;
   #repeaterFingerprintPruneAfterDays;
   #runHistory;
+  #processMeasurements;
+  #runtimeEvents;
   #logger;
   #timer = null;
   #lastSnapshot = null;
   #lastPrunedAt = null;
 
-  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, runHistory?: object, logger: object}} options */
-  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0, runHistory = null, logger }) {
+  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, runHistory?: object, processMeasurements?: object, runtimeEvents?: object, logger: object}} options */
+  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0,
+    runHistory = null, processMeasurements = null, runtimeEvents = null, logger }) {
     super();
     this.#serviceHealth = serviceHealth;
     this.#metricsStore = metricsStore;
@@ -35,6 +38,8 @@ export class MetricsSampler extends EventEmitter {
     this.#retentionDays = retentionDays;
     this.#repeaterFingerprintPruneAfterDays = repeaterFingerprintPruneAfterDays;
     this.#runHistory = runHistory;
+    this.#processMeasurements = processMeasurements;
+    this.#runtimeEvents = runtimeEvents;
     this.#logger = logger;
   }
 
@@ -57,15 +62,36 @@ export class MetricsSampler extends EventEmitter {
 
   #tick() {
     const snapshot = this.#serviceHealth.snapshot();
+    try { this.#runtimeEvents?.observeSnapshot(snapshot); }
+    catch (error) { this.#logger.warn('services.runtimeEvents', 'failed to observe sampled readiness', { error: error.message }); }
+    this.flushProcessSample();
+    this.#recordSample(snapshot);
+    this.#maybePrune();
+    this.#lastSnapshot = snapshot;
+    this.emit('sample', snapshot);
+  }
+
+  /** Also called once after event listeners stop, before orderly service teardown. */
+  flushProcessSample() {
+    if (this.#processMeasurements && this.#runHistory) {
+      try {
+        const { measurements, unavailable } = this.#processMeasurements.collect();
+        if (unavailable.length) this.#logger.warn('services.processMetrics', 'process measurements unavailable', { measurements: unavailable });
+        const counts = this.#runtimeEvents?.pendingCounts() ?? { suppressedEvents: 0, failedEvents: 0 };
+        const checkpoint = this.#runHistory.checkpointEvidence();
+        this.#metricsStore.recordProcessSample({ runId: checkpoint.runId, sampleAt: checkpoint.observedAt,
+          ...measurements, ...counts }, checkpoint);
+        this.#runtimeEvents?.acknowledgeCounts(counts);
+        return;
+      } catch (error) {
+        this.#logger.warn('services.processMetrics', 'failed to persist process measurements', { error: error.message });
+      }
+    }
     try {
       this.#runHistory?.checkpoint();
     } catch (error) {
       this.#logger.warn('services.runHistory', 'failed to persist run checkpoint', { error: error.message });
     }
-    this.#recordSample(snapshot);
-    this.#maybePrune();
-    this.#lastSnapshot = snapshot;
-    this.emit('sample', snapshot);
   }
 
   #recordSample(snapshot) {

@@ -26,8 +26,9 @@ export class RunHistory {
     return { observedAt: this.#wallNow(), observedDurationMs: Math.floor(this.#monotonicNow() - this.#baseline) };
   }
   checkpoint() {
-    return this.#store.checkpointObserverRun({ runId: this.runId, ...this.#evidence() });
+    return this.#store.checkpointObserverRun(this.checkpointEvidence());
   }
+  checkpointEvidence() { return { runId: this.runId, ...this.#evidence() }; }
   finishClean(reason) {
     return this.#store.endObserverRun({ runId: this.runId, ...this.#evidence(), reason });
   }

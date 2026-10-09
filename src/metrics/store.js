@@ -6,6 +6,22 @@ import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
 import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
+import { processSampleSchema, processPageSchema, processHistorySchema, runtimeEventSchema, runtimeEventPageSchema } from './process-schemas.js';
+
+const validateProcessSample = compileSchema(processSampleSchema);
+const validateProcessPage = compileSchema(processPageSchema);
+const validateProcessHistory = compileSchema(processHistorySchema);
+const validateRuntimeEvent = compileSchema(runtimeEventSchema);
+const validateRuntimeEventPage = compileSchema(runtimeEventPageSchema);
+function assertProcessInput(validate, input) {
+  if (!validate(input)) throw new Error(`Invalid process history input: ${formatErrors(validate.errors)}`);
+  if (input.start !== undefined && input.start > input.end) throw new Error('Invalid process history input: start must not exceed end');
+}
+const PROCESS_COLUMNS = `id,run_id AS runId,sample_at AS sampleAt,interval_ms AS intervalMs,
+  cpu_user_us AS cpuUserUs,cpu_system_us AS cpuSystemUs,cpu_percent AS cpuPercent,
+  rss_bytes AS rssBytes,heap_total_bytes AS heapTotalBytes,heap_used_bytes AS heapUsedBytes,external_bytes AS externalBytes,
+  event_loop_active_ms AS eventLoopActiveMs,event_loop_idle_ms AS eventLoopIdleMs,event_loop_utilization AS eventLoopUtilization,
+  suppressed_events AS suppressedEvents,failed_events AS failedEvents`;
 
 const validateRunStart = compileSchema(runStartSchema);
 const validateRunCheckpoint = compileSchema(runCheckpointSchema);
@@ -476,6 +492,32 @@ const MIGRATIONS = [
       'CREATE INDEX idx_observer_runs_state_end ON observer_runs(state,ended_at,last_known_alive_at)',
       "CREATE UNIQUE INDEX idx_observer_runs_active ON observer_runs(state) WHERE state='running'"
     ]
+  },
+  {
+    version: 12,
+    statements: [
+      `CREATE TABLE process_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES observer_runs(id),
+        sample_at INTEGER NOT NULL,interval_ms REAL CHECK(interval_ms>0),
+        cpu_user_us INTEGER CHECK(cpu_user_us>=0),cpu_system_us INTEGER CHECK(cpu_system_us>=0),cpu_percent REAL CHECK(cpu_percent>=0),
+        rss_bytes INTEGER CHECK(rss_bytes>=0),heap_total_bytes INTEGER CHECK(heap_total_bytes>=0),
+        heap_used_bytes INTEGER CHECK(heap_used_bytes>=0),external_bytes INTEGER CHECK(external_bytes>=0),
+        event_loop_active_ms REAL CHECK(event_loop_active_ms>=0),event_loop_idle_ms REAL CHECK(event_loop_idle_ms>=0),
+        event_loop_utilization REAL CHECK(event_loop_utilization BETWEEN 0 AND 1),
+        suppressed_events INTEGER NOT NULL CHECK(suppressed_events>=0),failed_events INTEGER NOT NULL CHECK(failed_events>=0)
+      )`,
+      'CREATE INDEX idx_process_samples_at ON process_samples(sample_at)',
+      'CREATE INDEX idx_process_samples_run_at ON process_samples(run_id,sample_at)',
+      `CREATE TABLE runtime_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES observer_runs(id),observed_at INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('radio.connected','radio.disconnected','radio.connect-error','broker.state','bot.readiness')),
+        service_id TEXT,state TEXT CHECK(state IN ('connected','disconnected','ready','not-ready')),
+        precision TEXT NOT NULL CHECK(precision IN ('event','sample')),observation_window_ms REAL CHECK(observation_window_ms>=0)
+      )`,
+      'CREATE INDEX idx_runtime_events_at ON runtime_events(observed_at)',
+      'CREATE INDEX idx_runtime_events_run_at ON runtime_events(run_id,observed_at)',
+      'CREATE INDEX idx_runtime_events_kind_at ON runtime_events(kind,observed_at)'
+    ]
   }
 ];
 
@@ -775,6 +817,89 @@ export class MetricsStore {
     return { ...row, instanceId: instance?.instanceId ?? null,
       wallTimeAnomaly: Boolean(row.wallTimeAnomaly), durationIsLowerBound: row.uncleanRuns + row.runningRuns > 0,
       retainedHistoryOnly: true };
+  }
+
+  /** A resource observation and matching alive evidence succeed or roll back together. */
+  recordProcessSample(sample, checkpoint) {
+    assertProcessInput(validateProcessSample, sample);
+    assertRunInput(validateRunCheckpoint, checkpoint);
+    if (checkpoint.runId !== sample.runId || checkpoint.observedAt !== sample.sampleAt) {
+      throw new Error('Process sample and checkpoint must share run and observation time');
+    }
+    const run = this.getObserverRun({ runId: sample.runId });
+    if (sample.runId !== this.#activeRunId || run?.state !== 'running' || checkpoint.observedDurationMs < run.observedDurationMs) {
+      throw new Error('Process samples require the active owned run and non-regressing elapsed evidence');
+    }
+    this.#db.exec('BEGIN');
+    try {
+      this.checkpointObserverRun(checkpoint);
+      const result = this.#db.prepare(`INSERT INTO process_samples
+        (run_id,sample_at,interval_ms,cpu_user_us,cpu_system_us,cpu_percent,
+         rss_bytes,heap_total_bytes,heap_used_bytes,external_bytes,
+         event_loop_active_ms,event_loop_idle_ms,event_loop_utilization,suppressed_events,failed_events)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sample.runId,sample.sampleAt,sample.intervalMs,
+        sample.cpuUserUs,sample.cpuSystemUs,sample.cpuPercent,sample.rssBytes,sample.heapTotalBytes,sample.heapUsedBytes,sample.externalBytes,
+        sample.eventLoopActiveMs,sample.eventLoopIdleMs,sample.eventLoopUtilization,sample.suppressedEvents,sample.failedEvents);
+      this.#db.exec('COMMIT');
+      return Number(result.lastInsertRowid);
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
+  }
+
+  recordRuntimeEvent(event) {
+    assertProcessInput(validateRuntimeEvent, event);
+    if (event.runId !== this.#activeRunId || this.getObserverRun({ runId: event.runId })?.state !== 'running') {
+      throw new Error('Runtime events require the active owned run');
+    }
+    const result = this.#db.prepare(`INSERT INTO runtime_events
+      (run_id,observed_at,kind,service_id,state,precision,observation_window_ms) VALUES(?,?,?,?,?,?,?)`)
+      .run(event.runId,event.observedAt,event.kind,event.serviceId,event.state,event.precision,event.observationWindowMs);
+    return Number(result.lastInsertRowid);
+  }
+
+  queryProcessSamples(input) {
+    const page = { limit: 100, offset: 0, ...input };
+    assertProcessInput(validateProcessPage, page);
+    const where = 'WHERE sample_at>=? AND sample_at<? AND (? IS NULL OR run_id=?)';
+    const args = [page.start,page.end,page.runId ?? null,page.runId ?? null];
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM process_samples ${where}`).get(...args);
+    return { total: Number(total), samples: this.#db.prepare(`SELECT ${PROCESS_COLUMNS} FROM process_samples ${where}
+      ORDER BY sample_at DESC,id DESC LIMIT ? OFFSET ?`).all(...args,page.limit,page.offset).map((row) => ({ ...row })) };
+  }
+
+  /** Weight valid counter intervals; do not fill gaps or interpolate across runs. */
+  queryProcessHistory(input) {
+    const query = { maxBuckets: 180, sampleIntervalMs: 10000, ...input };
+    assertProcessInput(validateProcessHistory, query);
+    const bucketWidthMs = resolveBucketWidthMs({ rangeMs: query.end - query.start,
+      maxBuckets: query.maxBuckets, sampleIntervalMs: query.sampleIntervalMs });
+    const rows = this.#db.prepare(`SELECT CAST((sample_at-?)/? AS INTEGER) AS bucketIndex,
+      COUNT(*) AS sampleCount,MIN(sample_at) AS firstSampleAt,MAX(sample_at) AS lastSampleAt,
+      COUNT(DISTINCT run_id) AS runCount,CASE WHEN COUNT(DISTINCT run_id)=1 THEN MIN(run_id) ELSE NULL END AS runId,
+      COUNT(cpu_percent) AS cpuSampleCount,
+      100.0*SUM(cpu_user_us+cpu_system_us)/NULLIF(1000.0*SUM(CASE WHEN cpu_percent IS NOT NULL THEN interval_ms END),0) AS cpuPercent,
+      COUNT(rss_bytes) AS rssSampleCount,AVG(rss_bytes) AS rssBytes,MAX(rss_bytes) AS rssMaxBytes,
+      COUNT(heap_total_bytes) AS heapTotalSampleCount,AVG(heap_total_bytes) AS heapTotalBytes,
+      COUNT(heap_used_bytes) AS heapUsedSampleCount,AVG(heap_used_bytes) AS heapUsedBytes,MAX(heap_used_bytes) AS heapUsedMaxBytes,
+      COUNT(external_bytes) AS externalSampleCount,AVG(external_bytes) AS externalBytes,COUNT(event_loop_utilization) AS eventLoopSampleCount,
+      SUM(event_loop_active_ms)/NULLIF(SUM(event_loop_active_ms+event_loop_idle_ms),0) AS eventLoopUtilization,
+      SUM(suppressed_events) AS suppressedEvents,SUM(failed_events) AS failedEvents
+      FROM process_samples WHERE sample_at>=? AND sample_at<? AND (? IS NULL OR run_id=?)
+      GROUP BY bucketIndex ORDER BY bucketIndex LIMIT ?`).all(query.start,bucketWidthMs,query.start,query.end,
+      query.runId ?? null,query.runId ?? null,query.maxBuckets);
+    return rows.map(({ bucketIndex, ...row }) => ({ ...row, bucketStart: query.start + bucketIndex * bucketWidthMs, bucketWidthMs }));
+  }
+
+  queryRuntimeEvents(input) {
+    const page = { limit: 100, offset: 0, ...input };
+    assertProcessInput(validateRuntimeEventPage, page);
+    const where = `WHERE observed_at>=? AND observed_at<? AND (? IS NULL OR run_id=?)
+      AND (? IS NULL OR kind=?) AND (? IS NULL OR service_id=? COLLATE BINARY)`;
+    const args = [page.start,page.end,page.runId ?? null,page.runId ?? null,page.kind ?? null,page.kind ?? null,
+      page.serviceId ?? null,page.serviceId ?? null];
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM runtime_events ${where}`).get(...args);
+    return { total: Number(total), events: this.#db.prepare(`SELECT id,run_id AS runId,observed_at AS observedAt,
+      kind,service_id AS serviceId,state,precision,observation_window_ms AS observationWindowMs FROM runtime_events ${where}
+      ORDER BY observed_at DESC,id DESC LIMIT ? OFFSET ?`).all(...args,page.limit,page.offset).map((row) => ({ ...row })) };
   }
 
   /** Protect actual retained FK children, including future #25 datasets. Names
@@ -1581,11 +1706,13 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Shared history retention: samples, completed replies, advert events and ended unreferenced runs.
+  /** Shared history retention: samples, runtime events, completed replies, advert events and ended unreferenced runs.
    * Inventory, direct evidence, fingerprints, active runs and pending replies survive this cleanup. */
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {
+      this.#db.prepare('DELETE FROM process_samples WHERE sample_at < ?').run(cutoffMs);
+      this.#db.prepare('DELETE FROM runtime_events WHERE observed_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_sample_packet_types WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_sample_broker_deliveries WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);

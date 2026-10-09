@@ -2,7 +2,7 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Child issue register:** [Pillar 1 breakdown — 16 issues](pillar-1-child-issues.md), captured on 2026-10-07. #28/#26 are complete and user-pushed. #24 run identity/recovery/checkpoints, safe shutdown and retained runtime queries are implemented locally with 564 tests/CI coverage/lint passing, issue closed and native project Done verified. See the [implementation queue](pillar-1-implementation-queue.md); #25 resource/events is next.
+**Child issue register:** [Pillar 1 breakdown — 16 issues](pillar-1-child-issues.md), captured on 2026-10-07. #28/#26/#24 are complete and user-pushed. #25 resource/event history is implemented locally with 591 tests/CI coverage/lint passing, issue closed as completed, progress label removed and native project Done verified. See the [implementation queue](pillar-1-implementation-queue.md); next is the issue-local passive topology plan for #27, informed by #22/#23. #25 changes are local and uncommitted.
 
 **Offline/reliability direction — 2026-10-08:** Core local observation, durable lookup and insight must work without internet/cloud forwarding. Retain learned data by default; deliberate operator cleanup preserves identity/discovery and documents reporting limits. Favor transactional migration/writes, fail-fast configuration, observable failures and meaningful recovery/outage/storage tests. Existing chart asset dependence remains #42/#83; integrated local backend outage/recovery validation belongs to #37. This direction guides the remaining reviewed implementation plans without claiming queued features complete.
 

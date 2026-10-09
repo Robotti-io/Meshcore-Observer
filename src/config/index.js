@@ -133,6 +133,8 @@ function readNodeObservations(env) {
 }
 
 function readMetricsUi(env) {
+  const eventBudgetKey = 'PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE';
+  if (env[eventBudgetKey] === '') throw new ConfigError(`${eventBudgetKey} must be a whole number from 1 to 600`);
   return {
     enabled: readBoolean(env, 'PACKETCAPTURE_METRICS_UI_ENABLED', false),
     host: readString(env, 'PACKETCAPTURE_METRICS_UI_HOST', '127.0.0.1'),
@@ -141,7 +143,8 @@ function readMetricsUi(env) {
     dbPath: readString(env, 'PACKETCAPTURE_METRICS_UI_DB_PATH', 'data/metrics.sqlite3'),
     // 0 = keep persisted metrics samples/bot-command events forever.
     retentionDays: readInteger(env, 'PACKETCAPTURE_METRICS_UI_RETENTION_DAYS', 0),
-    maxChartBuckets: readInteger(env, 'PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS', 180)
+    maxChartBuckets: readInteger(env, 'PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS', 180),
+    runtimeEventMaxPerMinute: readInteger(env, eventBudgetKey, 60)
   };
 }
 

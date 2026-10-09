@@ -20,7 +20,7 @@ function environment() {
     PACKETCAPTURE_TCP_PORT: '1', PACKETCAPTURE_IATA: 'CVG', PACKETCAPTURE_BOTS_CONFIG_FILE: bots,
     PACKETCAPTURE_BROKERS_CONFIG_FILE: brokers, PACKETCAPTURE_METRICS_UI_ENABLED: 'false',
     PACKETCAPTURE_METRICS_UI_DB_PATH: join(dir, 'metrics.sqlite3'), PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '1000',
-    PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '0' };
+    PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '0', PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '60' };
 }
 function launch(env, mode = 'ordinary') {
   const process = spawn(globalThis.process.execPath, [resolve('test/fixtures/run-lifecycle-child.js'), mode],
@@ -52,6 +52,10 @@ test('offline entrypoint checkpoints and records clean completion only after del
   await new Promise((resolve) => setTimeout(resolve, 1100));
   const alive = await snapshot(child);
   assert.ok(alive.summary.observedDurationMs > initial.summary.observedDurationMs);
+  assert.equal(alive.resources.total, 1);
+  assert.equal(alive.resources.samples[0].runId, initial.snapshot.runs[0].runId);
+  assert.equal(alive.resources.samples[0].cpuPercent, null);
+  assert.ok(alive.resources.samples[0].rssBytes > 0);
   child.process.send({ action: 'stop' });
   const stopping = await snapshot(child);
   assert.equal(stopping.snapshot.runs[0].state, 'running');
@@ -62,6 +66,23 @@ test('offline entrypoint checkpoints and records clean completion only after del
     const run = store.getObserverRun({ runId: initial.snapshot.runs[0].runId });
     assert.equal(run.state, 'clean'); assert.equal(run.endReason, 'SIGINT');
     assert.equal(run.durationIsLowerBound, false); assert.ok(run.observedDurationMs >= alive.summary.observedDurationMs);
+    assert.equal(store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }).total, 2);
+  });
+});
+
+test('offline UI-disabled event storms are bounded and orderly stop flushes suppression with the correct run', async () => {
+  const env = { ...environment(), PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '2' };
+  const child = launch(env); await child.next();
+  child.process.send({ action: 'event-storm' }); assert.equal((await child.next()).storm, true);
+  const observed = await snapshot(child); assert.equal(observed.events.total, 2);
+  assert.doesNotMatch(JSON.stringify(observed.events), /secret/);
+  child.process.send({ action: 'stop' }); assert.equal((await child.exited).code, 0);
+  read(env, (store) => {
+    const resources = store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER });
+    assert.equal(resources.total, 1); assert.equal(resources.samples[0].suppressedEvents, 98);
+    assert.equal(resources.samples[0].failedEvents, 0);
+    assert.equal(resources.samples[0].runId, observed.snapshot.runs[0].runId);
+    assert.equal(store.queryObserverRuntimeSummary().cleanRuns, 1);
   });
 });
 
@@ -76,11 +97,12 @@ test('abrupt child death releases ownership and restart recovers a lower bound w
   assert.match(blockedOutput, /Stop the other Observer instance or close external SQLite tools\/scripts, then restart/);
   assert.match(blockedOutput, /Locks release automatically when the owning process exits/);
   assert.doesNotMatch(blockedOutput, /failed to open tcp connection|node:sqlite support is now a hard requirement/);
+  const lastKnown = await snapshot(first);
   first.process.kill('SIGKILL'); await first.exited;
   const second = launch(env); await second.next(); const recovered = await snapshot(second);
   const old = recovered.snapshot.runs.find((run) => run.runId === original.snapshot.runs[0].runId);
   assert.equal(old.state, 'unclean'); assert.equal(old.endedAt, null);
-  assert.equal(old.observedDurationMs, original.snapshot.runs[0].observedDurationMs);
+  assert.equal(old.observedDurationMs, lastKnown.snapshot.runs[0].observedDurationMs);
   assert.equal(recovered.summary.instanceId, original.summary.instanceId);
   assert.equal(recovered.summary.durationIsLowerBound, true);
   second.process.send({ action: 'stop' }); assert.equal((await second.exited).code, 0);

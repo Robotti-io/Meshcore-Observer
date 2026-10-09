@@ -1,4 +1,5 @@
 import { botConfigSchema } from '../bots/schemas.js';
+import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
@@ -85,7 +86,8 @@ export const configSchema = {
         'sampleIntervalMs',
         'dbPath',
         'retentionDays',
-        'maxChartBuckets'
+        'maxChartBuckets',
+        'runtimeEventMaxPerMinute'
       ],
       properties: {
         enabled: { type: 'boolean' },
@@ -95,7 +97,8 @@ export const configSchema = {
         dbPath: { type: 'string', minLength: 1 },
         // 0 = unlimited retention.
         retentionDays: { type: 'integer', minimum: 0 },
-        maxChartBuckets: { type: 'integer', minimum: 10, maximum: 1000 }
+        maxChartBuckets: { type: 'integer', minimum: 10, maximum: 1000 },
+        runtimeEventMaxPerMinute: runtimeEventBudgetSchema
       }
     },
     brokers: {

@@ -613,9 +613,59 @@ lifetime total. Shared `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` defaults to
 unlimited: clean runs expire by end time, recovered unclean runs by last-known
 alive time, strictly before the cutoff. Running runs, instance identity and
 parents referenced by retained SQLite foreign-key children survive cleanup.
-Future process datasets must expire children before parent cleanup. Public
-run reporting and dashboard integration remain #35/#36; process resource/events
-are #25.
+Process samples/events expire child-first before parent cleanup. Public
+run/resource reporting and dashboard integration remain #35/#36.
+
+Process resource history is always on, using the same configurable sample
+interval (default 10 seconds, minimum 1 second), even with the dashboard off
+or the internet unavailable. Migration 12 adds run-linked `process_samples`
+and selected `runtime_events`, with no fabricated legacy measurements.
+A process sample and matching run heartbeat commit together; optional
+measurement/write failures warn and preserve ordinary packet sampling and
+the existing heartbeat fallback. First resource observations, counter resets
+and unavailable intervals have null utilization, distinct from measured zero.
+
+CPU user/system deltas use microseconds over actual monotonic elapsed
+milliseconds. `cpuPercent = 100 * (userUs + systemUs) / (intervalMs * 1000)`
+means one logical CPU: 250,000 microseconds over one second is 25%; concurrent
+threads can exceed 100%. This is not a host/container-quota percentage. RSS,
+heap total, heap used and external memory are byte gauges. Built-in event-loop
+active/idle deltas use milliseconds, and utilization is a fraction from 0 to 1
+of time outside the event provider; it is separate from CPU utilization and
+does not measure event-loop delay. No delay histogram or extra timer is added.
+See [Node CPU/memory measurement](https://nodejs.org/docs/latest-v22.x/api/process.html#processcpuusagepreviousvalue)
+and [event-loop utilization](https://nodejs.org/docs/latest-v22.x/api/perf_hooks.html#performanceeventlooputilizationutilization1-utilization2).
+
+Selected event kinds are `radio.connected`, `radio.disconnected`,
+`radio.connect-error`, `broker.state` and `bot.readiness`. Radio observations
+use hook-reception time (`precision: event`); broker/bot transitions are
+observed between consecutive snapshots (`precision: sample`) and carry the
+actual monotonic observation window. First snapshots establish a baseline;
+stable states do not repeat, and flaps entirely between samples may be missed.
+Only configured logical service IDs, enum states and timing are stored;
+radio error text, credentials, packet/message bodies and configuration dumps
+are excluded.
+
+`PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE=60` limits event write attempts
+in a sliding monotonic 60-second window across all selected services. The
+validated operator override is a whole integer from 1 to 600; the example
+and omitted-value fallback both use 60. Failed writes consume the budget.
+Suppressed/failed-event counts accompany the next successful process sample
+and are acknowledged only after persistence. Orderly shutdown detaches
+collectors and flushes a final resource/count sample before service teardown.
+Counts are observed lower bounds: abrupt termination or failed final writes
+can lose counts not yet persisted. The budget bounds event volume per minute,
+not lifetime disk growth; unlimited retention remains the default.
+
+Internal `queryProcessSamples` and `queryRuntimeEvents` pages cap at 200 rows,
+with `[start,end)` observation ranges and optional run filters; event pages
+also filter by kind/logical service ID. `queryProcessHistory` caps at 1000
+buckets, weights CPU/ELU by valid raw counter intervals, reports gauge means
+and selected maxima with per-measurement counts, and leaves absent buckets
+empty. A bucket spanning multiple runs reports `runCount` and null `runId`;
+filter by run for separate histories. No downtime/interpolation or missing
+measurement is converted to zero. Shared day-based metrics retention expires
+these children by observation time, protecting any still-referenced run.
 
 The `HOST`/`PORT`/`MAX_CHART_BUCKETS` variables below only matter when the
 HTTP dashboard itself is enabled; `DB_PATH`/`SAMPLE_INTERVAL_MS`/
@@ -626,10 +676,11 @@ store and its sampling loop), regardless of `PACKETCAPTURE_METRICS_UI_ENABLED`.
 | --- | --- |
 | `PACKETCAPTURE_METRICS_UI_HOST` | Dashboard bind address; default `127.0.0.1` |
 | `PACKETCAPTURE_METRICS_UI_PORT` | Dashboard bind port; default `8090` |
-| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | How often health state is sampled and a packet sample persisted; default `10000` |
-| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for all persisted state (packet/broker-delivery/reply-lifecycle metrics, the `!lookup` repeater registry); default `data/metrics.sqlite3` |
+| `PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS` | Health/packet/resource sample and run-checkpoint cadence in milliseconds; default `10000`, minimum `1000` |
+| `PACKETCAPTURE_METRICS_UI_DB_PATH` | Local SQLite file for all persisted state, including run/resource/event history and the repeater registry; default `data/metrics.sqlite3` |
 | `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | Days of persisted historical metrics to keep; default `0` (unlimited - watch disk usage) |
 | `PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS` | Upper bound on buckets returned per history query (dashboard-only); default `180` |
+| `PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE` | Selected local event write attempts in a rolling 60 seconds; whole integer `1`–`600`, default `60`, dashboard-independent |
 
 ## Run
 

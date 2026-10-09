@@ -2,6 +2,8 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
 import { MetricsStore } from '../../src/metrics/store.js';
+import { RunHistory } from '../../src/metrics/run-history.js';
+import { ProcessMeasurements } from '../../src/metrics/process-measurements.js';
 
 const samplers = new Set();
 
@@ -48,6 +50,57 @@ function baseSnapshot(overrides = {}) {
     ...overrides
   };
 }
+
+test('process history is run-linked on the existing cadence without changing packet/SSE snapshots', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const baseline = Date.now(); const logger = silentLogger(); const snapshot = baseSnapshot();
+  const runHistory = new RunHistory({ store, startedAt: baseline, monotonicStartedAt: baseline,
+    monotonicNow: Date.now, metadata: { appVersion: '2.5.0', nodeVersion: process.version, platform: process.platform, architecture: process.arch } });
+  const processMeasurements = new ProcessMeasurements({ monotonicNow: Date.now, cpuUsage: () => ({ user: (Date.now() - baseline) * 250, system: 0 }),
+    memoryUsage: () => ({ rss: 100, heapTotal: 80, heapUsed: 60, external: 20 }),
+    eventLoopUsage: () => ({ active: 0, idle: 0, utilization: 0 }) });
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(snapshot), metricsStore: store, runHistory, processMeasurements,
+    sampleIntervalMs: 1000, retentionDays: 0, logger });
+  const emitted = []; sampler.on('sample', (value) => emitted.push(value));
+  try {
+    sampler.start(); await vi.advanceTimersByTimeAsync(2000); sampler.stop();
+    const rows = store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }).samples;
+    assert.equal(rows.length, 2); assert.equal(rows[0].runId, runHistory.runId);
+    assert.equal(rows[0].intervalMs, 1000); assert.equal(rows[0].cpuPercent, 25); assert.equal(rows[1].cpuPercent, null);
+    assert.equal(store.getObserverRun({ runId: runHistory.runId }).observedDurationMs, 2000);
+    assert.deepEqual(emitted, [snapshot, snapshot]);
+    assert.equal(Object.hasOwn(snapshot, 'cpuPercent'), false);
+    assert.equal(store.queryPacketTotals({ start: baseline, end: baseline + 3000 }).received, 1);
+  } finally { sampler.stop(); store.close(); }
+});
+
+test('optional process persistence failure preserves counts, falls back to heartbeat, and keeps packet sampling alive', async () => {
+  const logger = silentLogger(); let checkpoints = 0; let packets = 0; let writes = 0; let acknowledged = 0;
+  const runtimeEvents = { observeSnapshot() {}, pendingCounts: () => ({ suppressedEvents: 3, failedEvents: 2 }),
+    acknowledgeCounts: (counts) => { assert.deepEqual(counts, { suppressedEvents: 3, failedEvents: 2 }); acknowledged++; } };
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 1000, retentionDays: 0, logger,
+    runHistory: { checkpoint: () => checkpoints++, checkpointEvidence: () => ({ runId: 'test', observedAt: Date.now() }) },
+    processMeasurements: { collect: () => ({ measurements: {}, unavailable: ['memory'] }) }, runtimeEvents,
+    metricsStore: { recordPacketSample: () => packets++, recordProcessSample: (row) => {
+      assert.equal(row.suppressedEvents, 3); assert.equal(row.failedEvents, 2);
+      if (++writes === 1) throw new Error('disk full');
+    } } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(2000); sampler.stop();
+  assert.equal(checkpoints, 1); assert.equal(packets, 2); assert.equal(acknowledged, 1);
+  assert.ok(logger.calls.warn.some((item) => item.source === 'services.processMetrics' && /failed to persist/.test(item.message)));
+  assert.ok(logger.calls.warn.some((item) => item.message === 'process measurements unavailable'));
+});
+
+test('failed collector/readiness observation cannot stop heartbeat, packets or later collection', async () => {
+  const logger = silentLogger(); let packets = 0; let checkpoints = 0;
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 1000, retentionDays: 0, logger,
+    runHistory: { checkpoint: () => checkpoints++ }, processMeasurements: { collect: () => { throw new Error('measurement failed'); } },
+    runtimeEvents: { observeSnapshot: () => { throw new Error('snapshot failed'); } },
+    metricsStore: { recordPacketSample: () => packets++ } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(2000); sampler.stop();
+  assert.equal(packets, 2); assert.equal(checkpoints, 2);
+  assert.ok(logger.calls.warn.some((item) => item.source === 'services.runtimeEvents'));
+});
 
 test('emits "sample" with the fresh snapshot on every tick, and persists it', async () => {
   const persisted = [];

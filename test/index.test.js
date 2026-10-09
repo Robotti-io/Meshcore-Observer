@@ -138,3 +138,11 @@ test('does not start radio or network services when the required store cannot op
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test('invalid runtime event budget fails before database, radio or network startup', () => {
+  const result = spawnSync(process.execPath, [resolve('src/index.js')], { cwd: process.cwd(), encoding: 'utf8', timeout: 3000,
+    env: { ...process.env, PACKETCAPTURE_CONNECTION_TYPE: 'tcp', PACKETCAPTURE_TCP_HOST: '127.0.0.1',
+      PACKETCAPTURE_TCP_PORT: '1', PACKETCAPTURE_IATA: 'CVG', PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '601' } });
+  assert.equal(result.status, 1); assert.match(result.stderr, /Configuration error:.*runtimeEventMaxPerMinute/);
+  assert.doesNotMatch(result.stdout + result.stderr, /meshcore-observer starting|data store|ECONNREFUSED/);
+});

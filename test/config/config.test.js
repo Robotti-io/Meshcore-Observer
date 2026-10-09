@@ -480,7 +480,8 @@ test('defaults metricsUi to disabled and loopback-only', () => {
     sampleIntervalMs: 10000,
     dbPath: 'data/metrics.sqlite3',
     retentionDays: 0,
-    maxChartBuckets: 180
+    maxChartBuckets: 180,
+    runtimeEventMaxPerMinute: 60
   });
 });
 
@@ -493,7 +494,8 @@ test('reads metricsUi overrides from the environment', () => {
       PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '5000',
       PACKETCAPTURE_METRICS_UI_DB_PATH: 'var/custom-metrics.sqlite3',
       PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '30',
-      PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS: '90'
+      PACKETCAPTURE_METRICS_UI_MAX_CHART_BUCKETS: '90',
+      PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '120'
     })
   );
   assert.deepEqual(config.metricsUi, {
@@ -503,7 +505,8 @@ test('reads metricsUi overrides from the environment', () => {
     sampleIntervalMs: 5000,
     dbPath: 'var/custom-metrics.sqlite3',
     retentionDays: 30,
-    maxChartBuckets: 90
+    maxChartBuckets: 90,
+    runtimeEventMaxPerMinute: 120
   });
 });
 
@@ -512,6 +515,17 @@ test('rejects a negative metricsUi retention window', () => {
     () => loadConfig(baseEnv({ PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '-1' })),
     ConfigError
   );
+});
+
+test('runtime event budget defaults match the example and rejects invalid explicit values', () => {
+  const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+  const value = example.match(/^PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE=(\d+)$/m)?.[1];
+  assert.equal(Number(value), loadConfig(baseEnv()).metricsUi.runtimeEventMaxPerMinute);
+  for (const input of ['0', '-1', '601', '1.5', 'no', '']) {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: input })), ConfigError);
+  }
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '1' })).metricsUi.runtimeEventMaxPerMinute, 1);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '600' })).metricsUi.runtimeEventMaxPerMinute, 600);
 });
 
 test('rejects a metricsUi max chart bucket count below the schema minimum', () => {

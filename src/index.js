@@ -21,6 +21,8 @@ import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import { MetricsSampler } from './metrics/sampler.js';
 import { RunHistory, createRunShutdown } from './metrics/run-history.js';
+import { ProcessMeasurements } from './metrics/process-measurements.js';
+import { RuntimeEvents } from './metrics/runtime-events.js';
 import { performance } from 'node:perf_hooks';
 import packageInfo from '../package.json' with { type: 'json' };
 
@@ -257,6 +259,10 @@ async function main() {
     bots,
     replyQueue
   });
+  const runtimeEvents = new RuntimeEvents({ store: metricsStore, runId: runHistory.runId, logger,
+    maxPerMinute: config.metricsUi.runtimeEventMaxPerMinute });
+  runtimeEvents.attachRadio(radioManager);
+  runtimeEvents.observeSnapshot(serviceHealth.snapshot());
 
   // Fed the actual per-broker outcome of every publish attempt (see
   // MqttManager#publish), rather than serviceHealth inferring "published"
@@ -302,6 +308,8 @@ async function main() {
     retentionDays: config.metricsUi.retentionDays,
     repeaterFingerprintPruneAfterDays: config.nodeObservations.repeaterFingerprintPruneAfterDays,
     runHistory,
+    processMeasurements: new ProcessMeasurements(),
+    runtimeEvents,
     logger
   });
   metricsSampler.start();
@@ -331,6 +339,8 @@ async function main() {
       // Detach persistence input and stop checkpoints before asynchronous teardown.
       packetPipeline.off('packet', recordNodeObservation);
       metricsSampler.stop();
+      runtimeEvents.stop();
+      metricsSampler.flushProcessSample();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.
       repeatCheckSweeper.stop();

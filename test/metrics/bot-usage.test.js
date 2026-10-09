@@ -133,7 +133,8 @@ function makeV8(dbPath) {
   fresh.close();
   const db = new DatabaseSync(dbPath);
   try {
-    db.exec(`DROP TABLE observer_runs; DROP TABLE observer_instance;
+    db.exec(`DROP TABLE runtime_events; DROP TABLE process_samples;
+      DROP TABLE observer_runs; DROP TABLE observer_instance;
       DROP TABLE advert_events;
       DROP TABLE advert_fingerprints;
       ALTER TABLE nodes RENAME TO nodes_newer;
@@ -178,7 +179,7 @@ test('v8 migration preserves IDs, legacy unavailable evidence, other datasets an
   assert.ok(id > 42);
   const reopened = openStore(dbPath);
   assert.deepEqual(reopened.getReplyById(id), store.getReplyById(id));
-  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 11);
+  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 12);
 });
 
 test('a failed v9 migration rolls back its rebuild and version without losing old records', () => {

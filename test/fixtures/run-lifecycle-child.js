@@ -5,7 +5,7 @@ import { MetricsStore } from '../../src/metrics/store.js';
 import { advertSigner, signedAdvertPacket } from './signed-advert.js';
 
 const mode = process.argv[2];
-let store; let releaseStop; let releaseAdvert;
+let store; let radio; let releaseStop; let releaseAdvert;
 const originalBegin = MetricsStore.prototype.beginObserverRun;
 MetricsStore.prototype.beginObserverRun = function (input) {
   const result = originalBegin.call(this, input); store = this; return result;
@@ -20,6 +20,7 @@ if (mode === 'pending-advert') {
 }
 RadioManager.prototype.getDeviceInfo = () => ({ name: 'Offline Observer', publicKey: 'CD'.repeat(32) });
 RadioManager.prototype.start = function () {
+  radio = this;
   if (mode === 'pending-advert') {
     const packet = signedAdvertPacket(advertSigner().payload({ name: 'Saved before stop' }));
     this.emit('radio.packet', { raw: Buffer.from(packet.raw, 'hex'), lastSnr: -1, lastRssi: -100 });
@@ -34,7 +35,13 @@ MetricsStore.prototype.close = function () {
 };
 process.on('message', (message) => {
   if (message.action === 'snapshot') process.send({ snapshot: store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }),
-    summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER') });
+    summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER'),
+    resources: store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }),
+    events: store.queryRuntimeEvents({ start: 0, end: Number.MAX_SAFE_INTEGER }) });
+  if (message.action === 'event-storm') {
+    for (let index = 0; index < 100; index++) radio.emit('radio.error', { phase: 'connect', message: 'secret must not enter records' });
+    process.send({ storm: true });
+  }
   if (message.action === 'stop') process.emit('SIGINT');
   if (message.action === 'release') { releaseStop(); releaseAdvert(); }
 });
