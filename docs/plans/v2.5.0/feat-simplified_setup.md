@@ -1,5 +1,9 @@
 # Feature: Simplified Setup
 
+**GitHub epic:** [#19](https://github.com/Robotti-io/Meshcore-Observer/issues/19)
+
+**Child issue register:** [Pillar 2 breakdown — 17 issues](pillar-2-child-issues.md), captured on 2026-10-07; implementation planning pending.
+
 ## Summary
 
 Create a dramatically simpler installation, onboarding, configuration, and reconfiguration experience for MeshCore Observer.
@@ -796,6 +800,8 @@ The UI may generate or modify backend configuration such as:
 
 Runtime feature modules should continue receiving validated configuration through the application's central configuration boundary.
 
+Human direction on 2026-10-08: applicable operational settings should support validated operator overrides. Approved optional defaults and units must agree between example configuration and central code; omitted values use those central fallbacks, while invalid explicit values remain errors. Setup, doctor, and startup must share the interpretation and preserve valid overrides rather than replacing them with defaults. Required fields and secrets do not gain invented fallbacks. Include the approved 72-hour direct-heard eligibility default from Pillar 1 and verify example/code agreement during implementation. See #23, #68, and #74.
+
 The setup UI should not cause feature modules to begin reading configuration directly from web state or `process.env`.
 
 ---
@@ -1019,7 +1025,7 @@ This pillar is complete when the approved child features collectively satisfy th
 
 ## 12 Suggested Child Features
 
-This feature request should be implemented through separate child issues rather than as one large change.
+The concrete [child-issue breakdown](pillar-2-child-issues.md) is captured in GitHub epic #19. The thematic list below groups the source requirements; linked child issues track scoped execution and dependencies.
 
 Recommended breakdown:
 

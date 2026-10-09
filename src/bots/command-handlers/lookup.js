@@ -92,7 +92,7 @@ export function createLookupCommandHandler({ nodeRegistry }) {
 
       const result = nodeRegistry.findByPrefix(query, { type: 'REPEATER' });
       const outcome = result.status;
-      const name = result.node?.name ?? null;
+      const name = result.node ? result.node.name || 'Unnamed' : null;
       const matchCount = result.matchCount ?? null;
       const lastHeardAt = result.node?.lastHeardAt ?? null;
       const nodePrefix =

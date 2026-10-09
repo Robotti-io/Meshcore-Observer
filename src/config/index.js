@@ -121,6 +121,17 @@ function readFloodAdvert(env) {
   return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 47) };
 }
 
+function readNodeObservations(env) {
+  const key = 'PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS';
+  if (env[key] === '') throw new ConfigError(`${key} must be a positive whole number of hours`);
+  const pruneKey = 'PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS';
+  if (env[pruneKey] === '') throw new ConfigError(`${pruneKey} must be a whole number of days (0 disables pruning)`);
+  return {
+    directHeardWindowMs: readInteger(env, key, 72) * 3600000,
+    repeaterFingerprintPruneAfterDays: readInteger(env, pruneKey, 0)
+  };
+}
+
 function readMetricsUi(env) {
   return {
     enabled: readBoolean(env, 'PACKETCAPTURE_METRICS_UI_ENABLED', false),
@@ -229,7 +240,8 @@ export function loadConfig(env = process.env) {
     bots: readBots(env),
     metricsUi: readMetricsUi(env),
     botReplyQueue: readBotReplyQueue(env),
-    floodAdvert: readFloodAdvert(env)
+    floodAdvert: readFloodAdvert(env),
+    nodeObservations: readNodeObservations(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {

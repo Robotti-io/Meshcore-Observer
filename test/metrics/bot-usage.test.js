@@ -133,7 +133,14 @@ function makeV8(dbPath) {
   fresh.close();
   const db = new DatabaseSync(dbPath);
   try {
-    db.exec(`DROP TABLE bot_replies;
+    db.exec(`DROP TABLE advert_events;
+      DROP TABLE advert_fingerprints;
+      ALTER TABLE nodes RENAME TO nodes_newer;
+      CREATE TABLE nodes (public_key_hex TEXT PRIMARY KEY,name TEXT NOT NULL,type TEXT,
+        first_heard_at INTEGER NOT NULL,last_heard_at INTEGER NOT NULL);
+      INSERT INTO nodes SELECT public_key_hex,name,type,first_heard_at,last_heard_at FROM nodes_newer;
+      DROP TABLE nodes_newer;
+      DROP TABLE bot_replies;
       CREATE TABLE bot_replies (
         id INTEGER PRIMARY KEY, bot_name TEXT NOT NULL, channel TEXT, trigger TEXT NOT NULL,
         sender TEXT, hop_count INTEGER, path TEXT, hash TEXT,
@@ -170,7 +177,7 @@ test('v8 migration preserves IDs, legacy unavailable evidence, other datasets an
   assert.ok(id > 42);
   const reopened = openStore(dbPath);
   assert.deepEqual(reopened.getReplyById(id), store.getReplyById(id));
-  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 9);
+  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 10);
 });
 
 test('a failed v9 migration rolls back its rebuild and version without losing old records', () => {

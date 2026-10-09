@@ -1,6 +1,6 @@
 import { test, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadConfig, ConfigError } from '../../src/config/index.js';
@@ -74,6 +74,46 @@ test('normalizes a minimal valid serial configuration with defaults', () => {
   assert.deepEqual(config.floodAdvert, { intervalHours: 47 });
   assert.deepEqual(config.brokers, []);
   assert.deepEqual(config.bots, []);
+});
+
+test('direct-heard fallback matches the example; valid whole-hour overrides win with dashboard disabled', () => {
+  const key = 'PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS';
+  const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+  const hours = Number(example.match(/^PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS=(\d+)$/m)[1]);
+  const defaults = loadConfig(baseEnv());
+  assert.equal(hours, 72);
+  assert.equal(defaults.nodeObservations.directHeardWindowMs, hours * 3600000);
+  assert.equal(defaults.metricsUi.enabled, false);
+  for (const override of ['1', '96', '8760']) {
+    assert.equal(loadConfig(baseEnv({ [key]: override })).nodeObservations.directHeardWindowMs, Number(override) * 3600000);
+  }
+});
+
+test('fingerprint pruning defaults off in example and code; day overrides work without dashboard or brokers', () => {
+  const key = 'PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS';
+  const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+  const days = Number(example.match(/^PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS=(\d+)$/m)[1]);
+  const defaults = loadConfig(baseEnv());
+  assert.equal(days, 0);
+  assert.equal(defaults.nodeObservations.repeaterFingerprintPruneAfterDays, days);
+  assert.equal(defaults.metricsUi.enabled, false);
+  assert.deepEqual(defaults.brokers, []);
+  for (const override of ['0', '7', '36500']) {
+    assert.equal(loadConfig(baseEnv({ [key]: override })).nodeObservations.repeaterFingerprintPruneAfterDays, Number(override));
+  }
+});
+
+test('invalid explicit fingerprint pruning settings fail instead of silently selecting a default', () => {
+  const key = 'PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS';
+  for (const value of ['', ' ', '-1', '7.5', '36501', 'Infinity', 'seven']) {
+    assert.throws(() => loadConfig(baseEnv({ [key]: value })), ConfigError);
+  }
+});
+
+test('invalid explicit direct-heard windows fail configuration instead of silently using the fallback', () => {
+  for (const value of ['', ' ', '0', '-1', '8761', '1.5', '24hours', 'NaN', 'Infinity']) {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS: value })), ConfigError);
+  }
 });
 
 test('accepts startup-only and 47-to-168-hour flood advert intervals', () => {

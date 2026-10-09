@@ -1,5 +1,11 @@
 # Feature: Improved Telemetry & Reporting
 
+**GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
+
+**Child issue register:** [Pillar 1 breakdown — 16 issues](pillar-1-child-issues.md), captured on 2026-10-07. #28 is complete and user-committed. #26's verified advert collection/history/eligibility and optional days-based cleanup are implemented locally, validated with 544 tests/CI coverage/lint, and closed with project Done verified. See the [implementation queue](pillar-1-implementation-queue.md).
+
+**Offline/reliability direction — 2026-10-08:** Core local observation, durable lookup and insight must work without internet/cloud forwarding. Retain learned data by default; deliberate operator cleanup preserves identity/discovery and documents reporting limits. Favor transactional migration/writes, fail-fast configuration, observable failures and meaningful recovery/outage/storage tests. Existing chart asset dependence remains #42/#83; integrated local backend outage/recovery validation belongs to #37. This direction guides the remaining reviewed implementation plans without claiming queued features complete.
+
 ## Summary
 
 Expand MeshCore Observer's telemetry and reporting capabilities so that it provides a richer operational picture of:
@@ -8,10 +14,13 @@ Expand MeshCore Observer's telemetry and reporting capabilities so that it provi
 2. How channel bots are being used and by whom.
 3. Node-advert activity across additional MeshCore node types.
 4. The runtime history and resource performance of the Observer service itself.
+5. Declared flood-allowed regions of directly heard repeaters, including CoreScope-compatible publication through OBS-02.
 
 The intent of this feature is to evolve the Observer from primarily capturing packets and reporting repeater presence into a broader source of operational intelligence about the local mesh, its users, its devices, and the Observer process itself.
 
 This work should build on the persisted SQLite metrics architecture introduced in previous releases while minimizing unnecessary RF traffic and preserving the Observer's existing reliability and safety characteristics.
+
+On 2026-10-07, explicit human direction included [OBS-02: Repeater Region Discovery for CoreScope](../feat-repeater_region_discovery.md) in v2.5.0 under this pillar. That document remains the detailed source for discovery eligibility, anonymous requests, answer semantics, persistence, and MQTT publication. Release inclusion authorizes planning; implementation and protected-boundary changes still require separate approval.
 
 ---
 
@@ -27,6 +36,7 @@ This work should build on the persisted SQLite metrics architecture introduced i
 - Persist Observer process-session and performance information so operators can understand runtime duration, restart history, CPU use, memory use, and meaningful runtime events.
 - Keep historical reporting compatible with the dashboard's existing reporting-range model where practical.
 - Preserve strict validation, centralized configuration, structured logging, and SQLite ownership boundaries already established by the project.
+- Discover declared regions from recently direct-heard verified repeaters without telemetry or management credentials, persist successful answers, and publish them to explicitly enabled CoreScope-compatible brokers as defined by OBS-02.
 
 ---
 
@@ -306,7 +316,11 @@ The implementation should evaluate whether operators should be able to inspect i
 
 If this level of drill-down is included, retention and privacy implications should be explicitly reviewed because it exposes more detailed user activity than aggregate reporting.
 
-Aggregate reporting is required; individual-event browsing can be separately scoped if necessary.
+Aggregate reporting is required. By human direction on 2026-10-07, v2.5.0 also includes durable individual interaction records and backend support for future browsing; the browsing interface itself is deferred. Reuse or extend existing reply records where sufficient rather than introducing duplicate storage. Bot interaction history follows the same runtime-configurable retention duration as other key historical metrics, using shared metrics retention configuration. Pending replies must remain protected from history pruning. Concrete schema and cutoff details remain implementation-plan decisions.
+
+Usage means an eligible command accepted after duplicate filtering, counted at acceptance time. Successful replies and other completed outcomes are separate measures counted at resolution time. Sender reporting uses original distinct sender names unless reliable message-to-sender identity evidence is available; ordinary channel messages provide no reliable sender public key, so duplicate names remain ambiguous. Do not attribute public keys through name-only advert/contact matching.
+
+See [Pillar 1 decision record](pillar-1-decisions.md) for settled decisions, worked examples, protocol evidence, and remaining questions.
 
 ---
 
@@ -372,6 +386,14 @@ Known companions observed:      31
 ```
 
 ---
+
+### 3.3.3 Settled decisions — 2026-10-07
+
+Human direction approves separate distinct advert-event and distinct-node counts, with nodes identified by full public key. Count the same signed advert once despite relayed copies, while preserving useful reception/path/direct-heard evidence separately. A fresh distinct advert from a known node counts as a re-hear; do not collapse every advert from that node into one sample-period event.
+
+Include verified unnamed nodes by public key with an `Unnamed` display fallback. Malformed or unverified adverts remain outside trusted reporting and direct-discovery eligibility. Initial reporting begins with Companion and Repeater nodes. Renames do not create new public-key identities, and existing first/last-heard inventory must not be presented as complete historical advert records.
+
+On 2026-10-08, human direction approved shared runtime-configurable retention for historical advert events while preserving full-public-key inventory, known name/type, and first/last-heard information across event pruning. Returning known nodes remain re-hears; inventory does not reconstruct pruned events or establish current reachability. Direct-heard eligibility rules are also agreed: a configured reception-time window refreshed only by verified zero-hop repeater observations; expiry stops region-query scheduling while preserving inventory/successful answers. The default is **72 hours**, with a validated operator override and matching example/central-code fallback when omitted. Exact validation bounds and concrete timestamp/cutoff/schema details remain implementation-plan work under #23/#26. See [decision record](pillar-1-decisions.md).
 
 ### 3.4 Persistence Requirements
 
@@ -533,6 +555,22 @@ Historical process metrics should follow existing retention rules or a clearly d
 
 ---
 
+## Scope 5: Repeater Region Discovery for CoreScope (OBS-02)
+
+The detailed requirements and acceptance criteria live in [OBS-02](../feat-repeater_region_discovery.md), which is included in this pillar for v2.5.0.
+
+Initial discovery is opt-in and limited to recently verified zero-hop repeater adverts with a full public key. General registry presence, relayed path observations, and telemetry-radius eligibility do not establish direct-discovery eligibility.
+
+Anonymous region requests must use supported Companion/library capabilities, an appropriate direct contact route, a zero-hop reply, and correlation through the request tag. Coordinate remote-request ownership through the complete response/timeout/disconnect lifecycle with telemetry and other radio work, reusing the existing command queue and airtime coordinator. Do not silently mutate operator-managed contacts or routes.
+
+Persist successful declarations and their observation timestamps in the always-on `MetricsStore`. Preserve a successful empty list as a measured answer; failures must remain distinguishable from empty answers and must not replace prior successful declarations. Preserve region-name case and wildcard semantics, and document the possibility of incomplete answers without a wire truncation signal.
+
+Publish strictly validated CoreScope-compatible answers to `meshcore/client/{PUBLIC_KEY}/regions` only for explicitly enabled brokers with the required permissions. Preserve observation timestamps when publication is delayed, and keep capture operating when discovery or publication fails.
+
+Region discovery is separate from telemetry authentication and Pillar 3's outbound bot scope policy. Detailed contact handling, schema/migrations, dependency integration, MQTT contract, retry behavior, and retention are decisions for the approved child implementation plans.
+
+---
+
 ## 5 Cross-Cutting Requirements
 
 ### 5.1 Reporting Range
@@ -576,6 +614,8 @@ All new configuration must continue to flow through the centralized configuratio
 Feature modules must not read `process.env` directly.
 
 Invalid configuration must fail before radio or network side effects occur.
+
+Human direction on 2026-10-08: favor operator overrides for applicable operational settings. Approved optional defaults and units must be documented in example configuration and defined identically in central configuration code when values are omitted. Valid explicit values take precedence; invalid explicit values must not silently fall back. Required configuration and secrets retain their validation requirements. Implementation validation must cover missing values, overrides, invalid values, and example/code default agreement. Setup and doctor must share the authoritative interpretation. This includes the approved 72-hour direct-heard eligibility default; concrete names/units/bounds are selected during planning.
 
 Likely configuration categories include:
 
@@ -695,7 +735,14 @@ This pillar is complete when the approved child features collectively satisfy th
 - Selected meaningful runtime events can be associated with the run in which they occurred.
 - Process telemetry collection does not materially affect Observer performance.
 
-### 6.5 Quality
+### 6.5 Repeater region discovery (OBS-02)
+
+- OBS-02's acceptance criteria are satisfied for recently direct-heard verified repeaters, including direct routing, request-tag correlation, durable answers, CoreScope publication, and bounded scheduling.
+- Successful empty answers, unknown/failure states, and possibly incomplete declarations retain their distinct meanings.
+- Unsupported firmware, missing/full contacts, reconnects, and broker failures do not disrupt capture or silently broaden routing.
+- Discovery and telemetry share coordinated radio/remote-request ownership while retaining separate eligibility and authentication semantics.
+
+### 6.6 Quality
 
 - All new configuration is centrally parsed and strictly validated.
 - All new inbound structured data is validated at trust boundaries.
@@ -708,7 +755,7 @@ This pillar is complete when the approved child features collectively satisfy th
 
 ## 7 Suggested Child Features
 
-This feature request should be implemented through separate child issues rather than as one large change.
+The concrete [child-issue breakdown](pillar-1-child-issues.md) is captured in GitHub epic #18. The thematic list below groups the source requirements; linked child issues track the scoped execution and dependencies.
 
 Recommended breakdown:
 
@@ -722,6 +769,7 @@ Recommended breakdown:
 8. **Observer CPU, Memory & Runtime Performance Metrics**
 9. **Dashboard / API Reporting Integration**
 10. **Operational Validation & RF Impact Review**
+11. **OBS-02: Repeater Region Discovery for CoreScope** — break down protocol/contact eligibility, shared scheduling, durable answer semantics, and per-broker publication after research.
 
 Some of these may be combined after research clarifies the implementation boundaries.
 
@@ -749,22 +797,33 @@ These should be resolved during feature planning rather than guessed during impl
 
 ### 8.2 Bot reporting
 
-- Is aggregate per-user reporting sufficient for v2.5.0?
-- Should individual command interactions be browsable?
-- How long should sender-level interaction history be retained?
-- Should sender values be shown exactly as received or normalized for reporting?
-- Should usage mean command received, command accepted, reply queued, or reply successfully sent?
-- Should the dashboard expose both invocation counts and successful-reply counts to make that distinction explicit?
+- Settled on 2026-10-07: aggregate sender/command/bot/range reporting is required. Individual interaction records/backend support are included, while the browsing interface is deferred.
+- Settled: sender-level interaction history uses the same runtime-configurable retention duration as other key historical metrics. Exact cutoff/pruning semantics remain implementation-plan details.
+- Settled: preserve original sender names; use reliable sender identifiers only when supported by actual attribution evidence. Ordinary channel messages cannot distinguish duplicate-name senders by public key.
+- Settled: usage means an eligible command accepted after duplicate filtering, timed at acceptance. Successful replies and other completed outcomes are separate measures timed at resolution.
+- Remaining: concrete schema/migrations/query design and any additional stored content beyond existing validated handler context. See [decision record](pillar-1-decisions.md).
 
 ### 8.3 Node adverts
 
 - Which MeshCore node types should be included in v2.5.0 beyond Companion and Repeater?
-- Should historical reporting count every advert event, unique nodes, or expose both?
-- Which advert types contain names or other fields that can be safely persisted?
-- Should re-heard counts represent every verified advert or only one re-hear per node within a sampling period?
+- Settled on 2026-10-07: expose both distinct advert events and distinct full-public-key nodes, beginning with Companion and Repeater.
+- Settled: include verified unnamed nodes by key with an `Unnamed` display fallback; malformed/unverified adverts do not enter trusted reporting.
+- Settled: relayed copies of the same signed advert count once, retaining reception evidence separately; each fresh distinct advert from a known node is a re-hear, without sample-period collapsing.
+- Settled on 2026-10-08: historical advert events use shared runtime-configurable metrics retention; full-key inventory, known name/type, and first/last-heard information survive pruning, without implying current reachability or fabricating expired event history.
+- Settled on 2026-10-08: direct-heard freshness uses a runtime-configurable Observer-reception-time window refreshed only by verified zero-hop repeater adverts. Expiry stops scheduling region queries while preserving inventory and successful answers. Cadence varies; one-hour local and 47-hour flood intervals are supplied guidance, not fixed deployment assumptions.
+- Settled on 2026-10-08: direct-heard default is 72 hours with an operator override and matching example/central-code fallback for omitted values. Remaining: exact units/window bounds and concrete timestamp/cutoff/schema/historical name/type handling in the implementation plan.
 - Should current node inventory eventually expose all supported node types or remain separated into focused views?
 
-### 8.4 Process telemetry
+### 8.4 Repeater region discovery
+
+- Which released package or separately approved integration approach provides the anonymous-request API proposed in [MeshCore.js PR #44](https://github.com/meshcore-dev/meshcore.js/pull/44)?
+- Can direct contact routing be guaranteed without changing operator-managed contact state?
+- What are the direct-heard freshness window, refresh cadence, timeout/retry budget, answer-retention model, and publication retry policy?
+- Which configured brokers support and permit CoreScope's client region contract?
+- How should discovery and telemetry coordinate remote-request ownership without starving bot replies or other existing radio operations?
+- Resolve the additional detailed questions in [OBS-02](../feat-repeater_region_discovery.md) during its child-feature planning.
+
+### 8.5 Process telemetry
 
 - What process-performance sampling interval provides sufficient resolution without unnecessary database growth?
 - Which Node.js runtime metrics provide actionable information beyond CPU and memory?
@@ -780,7 +839,7 @@ These should be resolved during feature planning rather than guessed during impl
 
 ## 9 Release Intent
 
-This pillar should make MeshCore Observer substantially better at answering four classes of operational questions.
+This pillar should make MeshCore Observer substantially better at answering five classes of operational questions.
 
 ### 9.1 What is happening on the mesh?
 
@@ -798,4 +857,23 @@ Who is invoking commands, which commands are useful, and how frequently are they
 
 How often has it restarted, how long has it run, what resources has it consumed, and what significant runtime events occurred?
 
+### 9.5 Which regions do directly heard repeaters declare?
+
+Which flood-allowed regions have eligible repeaters reported, how fresh are those answers, and can CoreScope receive them without disrupting normal observation?
+
 Together, these capabilities move MeshCore Observer from packet observation toward a richer operational intelligence platform while preserving the project's core constraints around RF efficiency, local-first persistence, explicit configuration, and predictable runtime behavior.
+
+## Implementation Plan
+
+Implementation planning started on 2026-10-08 by human direction. Use the [Pillar 1 planning queue](pillar-1-implementation-queue.md) for readiness, sequencing, remaining plan work, and issue-local dependency gates. Concrete plans are maintained in the owning feature issue records so each can be reviewed, approved, implemented and validated independently.
+
+The first four code-grounded plans are:
+
+1. [P1-07 / #28 — bot usage and interaction history](pillar-1-issues/p1-07.md#implementation-plan) — approved and implemented locally, 2026-10-08; 508 tests and lint pass.
+2. [P1-05 / #26 — advert history and direct-heard evidence](pillar-1-issues/p1-05.md#implementation-plan).
+3. [P1-03 / #24 — run and shutdown history](pillar-1-issues/p1-03.md#implementation-plan).
+4. [P1-04 / #25 — process resources and typed events](pillar-1-issues/p1-04.md#implementation-plan).
+
+Each draft lists current architecture, proposed changes, impacted files, five small tasks with completion/validation criteria, risks, numbered review decisions and execution order. Draft proposals are not approved requirements. Relevant #23 decisions unlock their consuming issue without requiring closure of unrelated topics. These plans and public issue descriptions remain subject to concrete protected-boundary review before implementation; no source code is changed by staging them.
+
+#28's acceptance/outcome reads and durable interaction evidence are now implemented in migration 9 with shared completion-time retention and pending protection. The other three plans remain drafts. Future API/dashboard exposure remains #35/#36; this backend slice adds no public browsing surface. See #28's implementation results for exact contracts and validation.

@@ -504,6 +504,72 @@ database and are not reused after pruning. Migration 9 preserves existing
 records and adds attribution fields and an acceptance-time index; it does
 not archive message or reply bodies.
 
+Verified node adverts also persist independently of the dashboard. Inventory
+uses each node's full public key, including verified unnamed nodes displayed
+as `Unnamed`. It keeps the latest known name when a later advert omits one.
+Separate advert history initially covers Companion (`CHAT`) and Repeater
+nodes, with the received name/type preserved for each distinct signed payload.
+Three fresh adverts from one new key count as three events, one distinct node,
+one discovery and two re-hears. Copies along different paths count once.
+Observer reception time determines ranges and recency; asynchronous signature
+verification cannot move the latest name or timestamps backward.
+
+`queryAdvertTotals`, `queryAdvertTypeTotals` and bounded `queryAdvertNodeCounts`
+provide internal `[start, end)` reporting reads. `earliestEventAt` reports the
+earliest retained event for the selected type independently of the requested
+range. Migration 10 preserves current inventory and existing metrics/bot state;
+it does not invent events or direct evidence for legacy nodes. The existing
+HTTP dashboard continues to show its current inventory views; new event views
+are tracked in #35/#36.
+
+Detailed advert events use shared metrics retention, by first reception time.
+History cleanup preserves inventory, first discovery and direct-heard evidence,
+and SHA-256 identity fingerprints retained indefinitely by default prevent a
+pruned advert's replay from recreating history. This fingerprint ledger stores a 32-byte digest and
+an inventory association, with no raw frame or message body. A 20,000-entry
+test measured about 43 bytes per fingerprint in SQLite pages (roughly 43 MB
+per million); actual size varies with database page usage and node IDs.
+
+For optional space recovery, set
+`PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS` to whole days of repeater
+inactivity (`0` default disables cleanup; accepted range `0`–`36500`). For
+example, `7` selects repeaters whose last verified reception was at least seven
+days ago, including duplicate receptions as activity. Local maintenance runs
+at most daily, even with the dashboard off or MQTT unavailable. It removes
+only fingerprints whose detailed events have already expired, and always
+protects the original discovery fingerprint. Inventory identities, known
+names/types, first/last-heard and direct evidence survive indefinitely. Other
+node types are unaffected. Cleanup failure is logged without stopping sampling.
+SQLite marks deleted pages reusable; cleanup does not automatically shrink the
+database file.
+
+After operator-enabled fingerprint cleanup, a previously pruned non-discovery
+advert heard again can become a retained re-hear event. A returning known key
+never becomes newly discovered merely because cleanup ran; retained history
+still deduplicates its signed payloads. Keep pruning disabled when permanent
+cross-pruning event deduplication matters more than reclaiming ledger space.
+If shared history retention is also unlimited, fingerprints remain protected
+by their retained events and this setting removes nothing.
+
+Local radio observation, SQLite persistence, lookup and internal reporting
+reads do not require internet or a successful broker publication. Broker
+forwarding is an independent consumer, so connectivity loss cannot stop trusted
+local advert collection. The existing dashboard still loads Chart.js from a
+CDN, so full browser operation without internet is a remaining dashboard
+delivery requirement. The default favors preserving learned information for
+offline operation; this feature does not provide a raw-packet archive or the
+additional reporting views planned in #35/#36.
+
+`PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS` defaults to `72` when omitted and
+accepts whole hours from `1` through `8760`. Only a verified zero-hop Repeater
+reception refreshes the durable direct timestamp, including a zero-hop copy
+of an already recorded advert. Relayed adverts still refresh general activity.
+Eligibility expires exactly at the configured window; future evidence is
+ineligible until the clock catches up, and restarting never renews its age.
+Inventory persistence therefore does not imply continued region-query
+eligibility. This release issue provides evidence for #31; it sends no region
+queries itself.
+
 The `HOST`/`PORT`/`MAX_CHART_BUCKETS` variables below only matter when the
 HTTP dashboard itself is enabled; `DB_PATH`/`SAMPLE_INTERVAL_MS`/
 `RETENTION_DAYS` are always in effect (they configure the always-on data

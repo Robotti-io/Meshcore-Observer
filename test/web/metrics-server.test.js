@@ -327,6 +327,20 @@ test('GET /api/nodes returns a page of the current node contact list, most-recen
   });
 });
 
+test('GET /api/nodes preserves an unnamed node as null and allows full-key lookup', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.recordVerifiedAdvert({ publicKeyHex: 'AA'.repeat(32), name: null, type: 'REPEATER',
+    receivedAt: 1000, hopCount: 0, eventDigest: 'ab'.repeat(32) });
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/nodes?q=AA&type=REPEATER`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.total, 1);
+    assert.equal(body.nodes[0].name, null);
+    assert.equal(body.nodes[0].publicKeyHex, 'AA'.repeat(32));
+  });
+});
+
 test('GET /api/nodes filters by q (name substring or public-key prefix) and type', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
   metricsStore.upsertNode({ publicKeyHex: 'AA'.repeat(32), name: 'Summit Repeater', type: 'REPEATER', heardAt: 1000 });

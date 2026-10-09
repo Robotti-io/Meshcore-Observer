@@ -69,6 +69,16 @@ test('lookup matching stores validated input and defers registry action until di
   assert.deepEqual(action.values, { query: 'E8', name: null, matchCount: null, lastHeard: 'unknown', nodePrefix: 'E8', repeaterCount: 7 });
 });
 
+test('lookup renders missing names as Unnamed without storing a fabricated received name', () => {
+  const node = { publicKeyHex: 'AA'.repeat(32), name: null, lastHeardAt: 1000 };
+  const handler = createLookupCommandHandler({ nodeRegistry: {
+    findByPrefix: () => ({ status: 'found', query: 'AA', node })
+  } });
+  const action = handler.execute({ command: { foundResponse: '{name}' }, data: { query: 'AA' }, now: 1000 });
+  assert.equal(action.values.name, 'Unnamed');
+  assert.equal(node.name, null);
+});
+
 test('handler state restoration rejects malformed, mismatched, unsupported, and extra-property state', () => {
   const restore = createExactCommandHandler().restore;
   assert.throws(() => restore('{'), /not valid JSON/);

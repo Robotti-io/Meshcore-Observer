@@ -3,11 +3,26 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
+import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 
 const validateBotInteraction = compileSchema(botInteractionSchema);
 const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
 const validateBotUsageRange = compileSchema(botUsageRangeSchema);
 const validateBotUsagePage = compileSchema(botUsagePageSchema);
+const validateAdvert = compileSchema(verifiedAdvertSchema);
+const validateAdvertRange = compileSchema(advertRangeSchema);
+const validateAdvertPage = compileSchema(advertPageSchema);
+const validateDirectHeardQuery = compileSchema(directHeardQuerySchema);
+const validateFingerprintPrune = compileSchema(fingerprintPruneSchema);
+
+function assertAdvertQuery(validate, query) {
+  if (!validate(query)) {
+    throw new Error(`Invalid advert query: ${formatErrors(validate.errors)}`);
+  }
+  if (query.start !== undefined && query.start > query.end) {
+    throw new Error('Invalid advert query: start must not exceed end');
+  }
+}
 
 function assertBotQuery(validate, query) {
   if (!validate(query)) {
@@ -372,6 +387,43 @@ const MIGRATIONS = [
       'CREATE INDEX idx_bot_replies_bot_status_resolved ON bot_replies(bot_name, status, resolved_at)',
       'CREATE INDEX idx_bot_replies_accepted ON bot_replies(enqueued_at, bot_name) WHERE enqueued_at IS NOT NULL'
     ]
+  },
+  {
+    version: 10,
+    statements: [
+      `CREATE TABLE nodes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        public_key_hex TEXT NOT NULL UNIQUE,
+        name TEXT, type TEXT,
+        first_heard_at INTEGER NOT NULL, last_heard_at INTEGER NOT NULL,
+        name_heard_at INTEGER, name_digest TEXT,
+        type_heard_at INTEGER, type_digest TEXT,
+        discovery_digest BLOB,
+        last_direct_heard_at INTEGER
+      )`,
+      `INSERT INTO nodes_new (public_key_hex,name,type,first_heard_at,last_heard_at,name_heard_at,type_heard_at)
+        SELECT public_key_hex,name,type,first_heard_at,last_heard_at,
+          CASE WHEN name IS NOT NULL THEN last_heard_at END,
+          CASE WHEN type IS NOT NULL THEN last_heard_at END FROM nodes`,
+      'DROP TABLE nodes',
+      'ALTER TABLE nodes_new RENAME TO nodes',
+      'CREATE INDEX idx_nodes_first_heard_at ON nodes(first_heard_at)',
+      'CREATE INDEX idx_nodes_last_heard_at ON nodes(last_heard_at)',
+      `CREATE TABLE advert_fingerprints (
+        digest BLOB PRIMARY KEY CHECK(length(digest)=32),
+        node_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE
+      ) WITHOUT ROWID`,
+      `CREATE TABLE advert_events (
+        digest BLOB PRIMARY KEY CHECK(length(digest)=32),
+        public_key_hex TEXT NOT NULL,
+        received_at INTEGER NOT NULL, last_received_at INTEGER NOT NULL,
+        name TEXT, type TEXT NOT NULL CHECK(type IN ('CHAT','REPEATER')),
+        is_new INTEGER NOT NULL CHECK(is_new IN (0,1)),
+        first_hops INTEGER NOT NULL, min_hops INTEGER NOT NULL
+      ) WITHOUT ROWID`,
+      'CREATE INDEX idx_advert_events_at ON advert_events(received_at)',
+      'CREATE INDEX idx_advert_events_type_at ON advert_events(type,received_at)'
+    ]
   }
 ];
 
@@ -494,12 +546,14 @@ export class MetricsStore {
       VALUES (?, ?, ?, ?)
     `);
     this.#upsertNodeStmt = this.#db.prepare(`
-      INSERT INTO nodes (public_key_hex, name, type, first_heard_at, last_heard_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO nodes (public_key_hex, name, type, first_heard_at, last_heard_at, name_heard_at, type_heard_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(public_key_hex) DO UPDATE SET
         name = excluded.name,
         type = excluded.type,
-        last_heard_at = excluded.last_heard_at
+        last_heard_at = excluded.last_heard_at,
+        name_heard_at = excluded.name_heard_at,
+        type_heard_at = excluded.type_heard_at
     `);
     this.#insertBotReplyStmt = this.#db.prepare(`
       INSERT INTO bot_replies (
@@ -968,16 +1022,138 @@ export class MetricsStore {
   }
 
   /**
-   * Upserts one node's current state - called from NodeRegistry's
-   * `recordNode` hook every time a verified named advert is heard, for
-   * both a brand-new public key and a re-heard one. `heardAt` becomes
+   * Legacy inventory-only seam. Live verified receptions use
+   * recordVerifiedAdvert; this method does not manufacture history or
+   * qualifying direct evidence. `heardAt` becomes
    * `first_heard_at` only on the first call for a given `publicKeyHex`
    * (a later call never moves it); `last_heard_at` is refreshed every time.
    *
    * @param {{publicKeyHex: string, name: string, type: string|null, heardAt: number}} node
    */
   upsertNode({ publicKeyHex, name, type, heardAt }) {
-    this.#upsertNodeStmt.run(publicKeyHex, name, type ?? null, heardAt, heardAt);
+    this.#upsertNodeStmt.run(publicKeyHex, name, type ?? null, heardAt, heardAt,
+      name === null ? null : heardAt, type == null ? null : heardAt);
+  }
+
+  /** Atomic verified-reception write. Caller verifies authenticity; AJV guards the DTO. */
+  recordVerifiedAdvert(observation) {
+    if (!validateAdvert(observation)) throw new Error(`Invalid verified advert: ${formatErrors(validateAdvert.errors)}`);
+    const { publicKeyHex, eventDigest, name, type, receivedAt, hopCount } = observation;
+    const digest = Buffer.from(eventDigest, 'hex');
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.#db.prepare('SELECT * FROM nodes WHERE public_key_hex=?').get(publicKeyHex);
+      const earlierDiscovery = previous?.discovery_digest != null &&
+        (receivedAt < previous.first_heard_at || (receivedAt === previous.first_heard_at &&
+          Buffer.compare(digest, previous.discovery_digest) < 0));
+      const isNew = !previous || earlierDiscovery ||
+        (previous.discovery_digest != null && Buffer.compare(digest, previous.discovery_digest) === 0);
+      const chooseName = name !== null && (!previous || previous.name_heard_at === null ||
+        receivedAt > previous.name_heard_at || (receivedAt === previous.name_heard_at && eventDigest > (previous.name_digest ?? '')));
+      const chooseType = type !== null && (!previous || previous.type_heard_at === null ||
+        receivedAt > previous.type_heard_at || (receivedAt === previous.type_heard_at && eventDigest > (previous.type_digest ?? '')));
+      const directAt = type === 'REPEATER' && hopCount === 0
+        ? Math.max(receivedAt, previous?.last_direct_heard_at ?? 0) : previous?.last_direct_heard_at ?? null;
+      this.#db.prepare(`INSERT INTO nodes (public_key_hex,name,type,first_heard_at,last_heard_at,
+        name_heard_at,name_digest,type_heard_at,type_digest,discovery_digest,last_direct_heard_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(public_key_hex) DO UPDATE SET
+        name=excluded.name,type=excluded.type,first_heard_at=excluded.first_heard_at,last_heard_at=excluded.last_heard_at,
+        name_heard_at=excluded.name_heard_at,name_digest=excluded.name_digest,
+        type_heard_at=excluded.type_heard_at,type_digest=excluded.type_digest,
+        discovery_digest=excluded.discovery_digest,last_direct_heard_at=excluded.last_direct_heard_at
+      `).run(publicKeyHex, chooseName ? name : previous?.name ?? null, chooseType ? type : previous?.type ?? null,
+        Math.min(receivedAt, previous?.first_heard_at ?? receivedAt), Math.max(receivedAt, previous?.last_heard_at ?? receivedAt),
+        chooseName ? receivedAt : previous?.name_heard_at ?? null, chooseName ? eventDigest : previous?.name_digest ?? null,
+        chooseType ? receivedAt : previous?.type_heard_at ?? null, chooseType ? eventDigest : previous?.type_digest ?? null,
+        !previous || earlierDiscovery ? digest : previous.discovery_digest, directAt);
+      const { id } = this.#db.prepare('SELECT id FROM nodes WHERE public_key_hex=?').get(publicKeyHex);
+      let eventRecorded = false;
+      if (type === 'CHAT' || type === 'REPEATER') {
+        const inserted = this.#db.prepare('INSERT OR IGNORE INTO advert_fingerprints(digest,node_id) VALUES (?,?)').run(digest, id);
+        const newFingerprint = Number(inserted.changes) === 1;
+        if (earlierDiscovery) {
+          this.#db.prepare('UPDATE advert_events SET is_new=0 WHERE digest=?').run(previous.discovery_digest);
+        }
+        if (newFingerprint) {
+          const eventInsert = this.#db.prepare(`INSERT INTO advert_events
+            (digest,public_key_hex,received_at,last_received_at,name,type,is_new,first_hops,min_hops)
+            VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(digest) DO NOTHING
+          `).run(digest, publicKeyHex, receivedAt, receivedAt, name, type, isNew ? 1 : 0, hopCount, hopCount);
+          eventRecorded = Number(eventInsert.changes) === 1;
+        }
+        // Reception evidence updates even when the advert identity is a duplicate.
+        // Shared history pruning cannot recreate an event while its fingerprint
+        // survives. Operator-enabled fingerprint cleanup deliberately bounds
+        // that guarantee for inactive repeaters, preserving original discovery.
+        this.#db.prepare(`UPDATE advert_events SET
+          first_hops=CASE WHEN ? < received_at THEN ? ELSE first_hops END,
+          received_at=MIN(received_at,?),last_received_at=MAX(last_received_at,?),min_hops=MIN(min_hops,?),
+          is_new=CASE WHEN ? THEN 1 ELSE is_new END WHERE digest=?
+        `).run(receivedAt, hopCount, receivedAt, receivedAt, hopCount, isNew ? 1 : 0, digest);
+      } else if (earlierDiscovery) {
+        this.#db.prepare('UPDATE advert_events SET is_new=0 WHERE digest=?').run(previous.discovery_digest);
+      }
+      this.#db.exec('COMMIT');
+      return { eventRecorded, newlyDiscovered: !previous };
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
+  }
+
+  /** Direct evidence is reception based, independent of general last-heard or event retention. */
+  queryDirectHeardEligibility(query) {
+    assertAdvertQuery(validateDirectHeardQuery, query);
+    const node = this.#db.prepare('SELECT type,last_direct_heard_at AS lastDirectHeardAt FROM nodes WHERE public_key_hex=?')
+      .get(query.publicKeyHex);
+    const lastDirectHeardAt = node?.lastDirectHeardAt ?? null;
+    return { lastDirectHeardAt, eligible: node?.type === 'REPEATER' && lastDirectHeardAt !== null &&
+      query.now >= lastDirectHeardAt && query.now - lastDirectHeardAt < query.windowMs };
+  }
+
+  /** Opt-in local cleanup. Preserve inventory, retained event identities and original discovery.
+   * One DELETE is atomic; validation precedes all side effects. Cutoff equality is inactive. */
+  pruneInactiveRepeaterFingerprints(query) {
+    assertAdvertQuery(validateFingerprintPrune, query);
+    const result = this.#db.prepare(`DELETE FROM advert_fingerprints AS f
+      WHERE EXISTS (SELECT 1 FROM nodes AS n WHERE n.id=f.node_id
+        AND n.type='REPEATER' AND n.last_heard_at<=?
+        AND (n.discovery_digest IS NULL OR f.digest!=n.discovery_digest))
+      AND NOT EXISTS (SELECT 1 FROM advert_events AS e WHERE e.digest=f.digest)
+    `).run(query.cutoffMs);
+    return Number(result.changes);
+  }
+
+  /** Half-open retained event counts. Companion is the library's CHAT type. */
+  queryAdvertTotals(query) {
+    assertAdvertQuery(validateAdvertRange, query);
+    const row = this.#db.prepare(`SELECT COUNT(*) AS events,COUNT(DISTINCT public_key_hex) AS distinctNodes,
+      COALESCE(SUM(is_new),0) AS newDiscoveries FROM advert_events
+      WHERE received_at>=? AND received_at<? AND (? IS NULL OR type=?)
+    `).get(query.start, query.end, query.type ?? null, query.type ?? null);
+    const earliest = this.#db.prepare('SELECT MIN(received_at) AS at FROM advert_events WHERE (? IS NULL OR type=?)')
+      .get(query.type ?? null, query.type ?? null);
+    return { events: Number(row.events), distinctNodes: Number(row.distinctNodes),
+      newDiscoveries: Number(row.newDiscoveries), rehears: Number(row.events - row.newDiscoveries), earliestEventAt: toNumberOrNull(earliest.at) };
+  }
+
+  /** Fixed two-type breakdown; each unique count uses that type's event snapshots. */
+  queryAdvertTypeTotals(query) {
+    assertAdvertQuery(validateAdvertRange, query);
+    return ['CHAT', 'REPEATER'].filter((type) => query.type === undefined || query.type === type)
+      .map((type) => ({ type, ...this.queryAdvertTotals({ ...query, type }) }));
+  }
+
+  /** Bounded full-key/type groups using event snapshots, independent of current inventory type. */
+  queryAdvertNodeCounts(query) {
+    const page = { limit: 100, offset: 0, ...query };
+    assertAdvertQuery(validateAdvertPage, page);
+    const where = 'WHERE received_at>=? AND received_at<? AND (? IS NULL OR type=?)';
+    const args = [page.start, page.end, page.type ?? null, page.type ?? null];
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM
+      (SELECT 1 FROM advert_events ${where} GROUP BY public_key_hex,type)`).get(...args);
+    const rows = this.#db.prepare(`SELECT public_key_hex AS publicKeyHex,type,COUNT(*) AS events,
+      SUM(is_new) AS newDiscoveries,MIN(received_at) AS firstEventAt,MAX(received_at) AS lastEventAt
+      FROM advert_events ${where} GROUP BY public_key_hex,type
+      ORDER BY events DESC,type,public_key_hex LIMIT ? OFFSET ?`).all(...args,page.limit,page.offset);
+    return { total: Number(total), nodes: rows.map((row) => ({ ...row, rehears: Number(row.events - row.newDiscoveries) })) };
   }
 
   /**
@@ -1240,7 +1416,8 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Deletes samples and resolved (never pending) interactions strictly before `cutoffMs`, by completion time for replies. */
+  /** Shared history retention: samples, completed replies and advert events strictly before cutoff.
+   * Inventory, direct evidence and fingerprints survive this cleanup. Pending replies are protected. */
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {
@@ -1248,6 +1425,7 @@ export class MetricsStore {
       this.#db.prepare('DELETE FROM metrics_sample_broker_deliveries WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare("DELETE FROM bot_replies WHERE status != 'pending' AND resolved_at < ?").run(cutoffMs);
+      this.#db.prepare('DELETE FROM advert_events WHERE received_at < ?').run(cutoffMs);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

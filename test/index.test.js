@@ -77,6 +77,31 @@ test('logs a clean shutdown when SIGINT is received', async () => {
   assert.equal(process.exitCode, 0);
 });
 
+test('an invalid direct-heard override terminates before store or network startup', () => {
+  const result = spawnSync(process.execPath, [resolve('src/index.js')], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, PACKETCAPTURE_CONNECTION_TYPE: 'tcp',
+      PACKETCAPTURE_TCP_HOST: '127.0.0.1', PACKETCAPTURE_TCP_PORT: '1', PACKETCAPTURE_IATA: 'CVG',
+      PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS: '0' }
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Configuration error:.*directHeardWindowMs/);
+  assert.doesNotMatch(result.stdout + result.stderr, /meshcore-observer starting|failed to open tcp connection/);
+});
+
+test('an invalid fingerprint prune override terminates before store or network startup', () => {
+  const result = spawnSync(process.execPath, [resolve('src/index.js')], {
+    cwd: process.cwd(), encoding: 'utf8', timeout: 5000,
+    env: { ...process.env, PACKETCAPTURE_CONNECTION_TYPE: 'tcp',
+      PACKETCAPTURE_TCP_HOST: '127.0.0.1', PACKETCAPTURE_TCP_PORT: '1', PACKETCAPTURE_IATA: 'CVG',
+      PACKETCAPTURE_REPEATER_FINGERPRINT_PRUNE_AFTER_DAYS: '-1' }
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Configuration error:.*repeaterFingerprintPruneAfterDays/);
+  assert.doesNotMatch(result.stdout, /meshcore-observer starting/);
+  assert.doesNotMatch(result.stderr, /ECONNREFUSED|data store/);
+});
+
 test('does not start radio or network services when the required store cannot open', () => {
   const tempDir = mkdtempSync(join(tmpdir(), 'meshcore-store-startup-failure-'));
   const botsConfigPath = join(tempDir, 'bots.config.json');

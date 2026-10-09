@@ -1,6 +1,10 @@
 import { Packet, Advert } from '@liamcottle/meshcore.js';
+import { createHash } from 'node:crypto';
+import { compileSchema } from '../validation/ajv.js';
+import { advertFrameSchema } from './schemas.js';
 
 const PAYLOAD_TYPE_ADVERT = 0x04;
+const validateFrame = compileSchema(advertFrameSchema);
 
 /**
  * Extracts a meshcore.js `Advert` instance from one already-decoded packet
@@ -18,6 +22,14 @@ const PAYLOAD_TYPE_ADVERT = 0x04;
  * @returns {import('@liamcottle/meshcore.js').Advert | null}
  */
 export function parseAdvertFromPacket(decodedPacket) {
+  return parseAdvertReceptionFromPacket(decodedPacket)?.advert ?? null;
+}
+
+/** Parse local reception evidence; caller still MUST verify the advert. */
+export function parseAdvertReceptionFromPacket(decodedPacket) {
+  const frame = { raw: decodedPacket.raw };
+  if (decodedPacket.packet_type !== undefined) frame.packet_type = decodedPacket.packet_type;
+  if (!validateFrame(frame)) return null;
   // PacketPipeline has already decoded the payload type. Most receptions
   // are not adverts, so avoid rebuilding and reparsing their frame here.
   // Keep the fallback for callers that provide only `raw`; the parsed packet
@@ -37,8 +49,16 @@ export function parseAdvertFromPacket(decodedPacket) {
     return null;
   }
 
+  // Hash size 4 is reserved. Do not interpret a malformed path as evidence
+  // of zero recorded hops even if its claimed advert signature is valid.
+  if (packet.getPathHashSize() > 3 || packet.payload.length < 101) return null;
+
   try {
-    return Advert.fromBytes(Buffer.from(packet.payload));
+    return {
+      advert: Advert.fromBytes(Buffer.from(packet.payload)),
+      eventDigest: createHash('sha256').update(packet.payload).digest('hex'),
+      hopCount: packet.getPathHashCount()
+    };
   } catch {
     return null;
   }

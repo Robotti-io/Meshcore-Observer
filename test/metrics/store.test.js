@@ -810,7 +810,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 10);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
     assert.ok(columns.includes('handler_state_json'));
     assert.ok(!columns.includes('lookup_outcome'));
@@ -830,6 +830,11 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
 
     const v7Db = new DatabaseSync(dbPath);
     v7Db.exec(`
+      DROP TABLE advert_events;
+      DROP TABLE advert_fingerprints;
+      DROP TABLE nodes;
+      CREATE TABLE nodes (public_key_hex TEXT PRIMARY KEY,name TEXT NOT NULL,type TEXT,
+        first_heard_at INTEGER NOT NULL,last_heard_at INTEGER NOT NULL);
       DROP INDEX idx_bot_replies_status_enqueued;
       DROP INDEX idx_bot_replies_status_resolved;
       DROP INDEX idx_bot_replies_bot_status_resolved;
@@ -885,7 +890,7 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
     migratedStore.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 9);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 10);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
     assert.deepEqual(columns, [
       'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',

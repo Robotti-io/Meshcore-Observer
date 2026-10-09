@@ -1,10 +1,15 @@
 # Feature: Repeater Region Discovery for CoreScope
 
-- **Status:** Backlog / unscheduled
+- **Status:** Included in v2.5.0 scope; child issues captured, implementation planning pending
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06
-- **Release:** Unassigned
-- **Approval scope:** Feature request documentation only. Implementation and protected-boundary changes require separate approval.
+- **Release:** v2.5.0
+- **Parent pillar:** [Pillar 1: Improved Telemetry & Reporting](v2.5.0/feat-improved_telemetry_and_reporting.md)
+- **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
+- **Feature issues:** [#30: durable answers](https://github.com/Robotti-io/Meshcore-Observer/issues/30), [#31: direct-heard querying](https://github.com/Robotti-io/Meshcore-Observer/issues/31), [#32: CoreScope publication](https://github.com/Robotti-io/Meshcore-Observer/issues/32)
+- **Shared prerequisites:** [Pillar 1 child issue register](v2.5.0/pillar-1-child-issues.md)
+- **Scope decision:** Included in v2.5.0 by explicit human direction on 2026-10-07.
+- **Approval scope:** Release inclusion and planning documentation. Implementation and protected-boundary changes require separate approval.
 
 ## Summary
 
@@ -29,6 +34,7 @@ The observer `/neighbors` MQTT report is the built-in observer path used by repe
 
 - Begin with verified, zero-hop repeater adverts carrying a full public key. A stored repeater name or its appearance in a relayed packet is not sufficient evidence of current direct reachability.
 - Track direct-heard recency separately from the registry's general last-heard time, with an operator-configurable eligibility window.
+- Agreed on 2026-10-08: measure that window from Observer reception time, refreshing it only for verified repeater adverts received with zero recorded relay hops. On expiry stop scheduling region queries until qualifying evidence returns, retaining inventory and previous successful answers. Actual advert cadence varies; the approved default is **72 hours**, with a validated operator override and matching example/central-code fallback when omitted, under #23/#26. Exact units/validation bounds remain implementation-plan details. A flood advert heard before any relay hops can qualify; later relayed copies do not refresh direct eligibility.
 - Ensure outbound requests actually use a direct route and request a zero-hop reply. The repeater ignores flooded region requests.
 - Inspect the Companion's send acknowledgement to detect an unexpectedly flooded request.
 - Account for saved contact paths and contact-table capacity. Recent Companion firmware can create a contact for an unknown target, but this can still fail when the table is full.
@@ -46,6 +52,7 @@ The observer `/neighbors` MQTT report is the built-in observer path used by repe
 ### Scheduling and response semantics
 
 - Make active discovery opt-in. Parse configuration centrally and validate it before hardware or network activity.
+- Document approved optional discovery defaults and units in example configuration and define matching fallbacks in central code. Valid explicit operator overrides take precedence; invalid explicit values fail instead of silently using defaults. Validate omitted/override/invalid cases and example/code agreement during implementation.
 - Reuse `RadioManager.runCommand()` and `AirtimeCoordinator`; define scheduling priority so discovery cannot starve existing bot or radio work.
 - Use bounded request timeouts, per-target backoff, refresh intervals, and bounded transient state. Pause on disconnection and discard pending correlation state when the connection changes.
 - Parse the repeater clock and region-name CSV from a matched answer, removing trailing encryption NUL padding before validating normalized data.
@@ -108,7 +115,11 @@ The observer `/neighbors` MQTT report is the built-in observer path used by repe
 
 ## Relationship to Other Backlog Work
 
-The [Improved Telemetry & Reporting request](v2.5.0/feat-improved_telemetry_and_reporting.md) proposes passive topology learning and scheduled repeater telemetry. Region discovery can share approved eligibility and scheduling infrastructure, but uses an anonymous request and must remain independent of telemetry credentials. This feature is not assigned to v2.5.0 by this backlog entry.
+OBS-02 is included in v2.5.0 under [Pillar 1: Improved Telemetry & Reporting](v2.5.0/feat-improved_telemetry_and_reporting.md), following explicit human direction on 2026-10-07. Region discovery can share approved eligibility and scheduling infrastructure with passive topology learning and scheduled repeater telemetry, but uses an anonymous request and must remain independent of telemetry credentials. Its initial zero-hop eligibility also remains narrower than telemetry's configurable hop radius.
+
+Pillar 1 owns declared-region discovery, persisted answers, and CoreScope-compatible publication. Pillar 3 owns outbound bot region policy and scoped transmission; discovery does not itself authorize a particular bot scope. CoreScope publication is included in the release feature intent, while its concrete MQTT contract, broker permissions, persistence changes, and dependency integration remain subject to implementation-plan approval.
+
+[MeshCore.js PR #44](https://github.com/meshcore-dev/meshcore.js/pull/44) supplies the proposed upstream anonymous-request API. Validate the available package/artifact, required firmware, direct contact routing, remote-request serialization, and response limitations during planning. A merged PR alone does not guarantee the API is available in the installed dependency.
 
 ## Research References
 

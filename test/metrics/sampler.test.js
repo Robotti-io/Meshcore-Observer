@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
+import { MetricsStore } from '../../src/metrics/store.js';
 
 const samplers = new Set();
 
@@ -228,4 +229,85 @@ test('stop() actually halts ticking - no further samples after stop', async () =
   await vi.advanceTimersByTimeAsync(40);
 
   assert.equal(persisted.length, countAtStop);
+});
+
+test('fingerprint cleanup is off by default even when history retention is configured', async () => {
+  const removed = [];
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 10,
+    retentionDays: 7, logger: silentLogger(), metricsStore: {
+      recordPacketSample() {}, pruneOlderThan() {}, pruneInactiveRepeaterFingerprints: (query) => removed.push(query)
+    } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(30);
+  assert.equal(removed.length, 0);
+});
+
+test('days-based fingerprint cleanup runs locally with unlimited history and at most once a day', async () => {
+  const DAY = 86400000; const removed = []; const history = [];
+  const now = 30 * DAY;
+  vi.setSystemTime(now);
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 10,
+    retentionDays: 0, repeaterFingerprintPruneAfterDays: 7, logger: silentLogger(), metricsStore: {
+      recordPacketSample() {}, pruneOlderThan: (cutoff) => history.push(cutoff),
+      pruneInactiveRepeaterFingerprints: (query) => { removed.push(query); return 0; }
+    } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(30);
+  assert.deepEqual(removed, [{ cutoffMs: now + 10 - 7 * DAY }]);
+  assert.equal(history.length, 0);
+  vi.setSystemTime(now + DAY);
+  await vi.advanceTimersByTimeAsync(30);
+  assert.equal(removed.length, 2);
+  assert.equal(history.length, 0);
+});
+
+test('cleanup failures are isolated and reported, and saved history protects fingerprints after history failure', async () => {
+  const order = []; const logger = silentLogger();
+  vi.setSystemTime(30 * 86400000);
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 10,
+    retentionDays: 14, repeaterFingerprintPruneAfterDays: 7, logger, metricsStore: {
+      recordPacketSample() {}, pruneOlderThan() { order.push('history'); throw new Error('history locked'); },
+      pruneInactiveRepeaterFingerprints() { order.push('fingerprints'); throw new Error('fingerprints locked'); }
+    } });
+  const samples = []; sampler.on('sample', (sample) => samples.push(sample));
+  sampler.start(); await vi.advanceTimersByTimeAsync(30);
+  assert.deepEqual(order, ['history', 'fingerprints']);
+  assert.equal(logger.calls.warn.length, 2);
+  assert.equal(samples.length, 3);
+});
+
+test('clock rollback delays cleanup and never supplies a negative fingerprint cutoff', async () => {
+  const calls = [];
+  vi.setSystemTime(1000);
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 10,
+    retentionDays: 0, repeaterFingerprintPruneAfterDays: 7, logger: silentLogger(), metricsStore: {
+      recordPacketSample() {}, pruneInactiveRepeaterFingerprints: (query) => { calls.push(query); return 0; }
+    } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(20);
+  assert.equal(calls.length, 0);
+  vi.setSystemTime(30 * 86400000); await vi.advanceTimersByTimeAsync(10);
+  assert.equal(calls.length, 1);
+  vi.setSystemTime(29 * 86400000); await vi.advanceTimersByTimeAsync(30);
+  assert.equal(calls.length, 1);
+});
+
+test('always-on local maintenance preserves offline lookup and direct evidence using the real store', async () => {
+  const DAY = 86400000; const KEY = 'AB'.repeat(32);
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  let sampler;
+  try {
+    for (let i = 1; i <= 2; i++) store.recordVerifiedAdvert({ publicKeyHex: KEY, name: 'Offline Summit',
+      type: 'REPEATER', eventDigest: String(i).repeat(64), receivedAt: i * DAY, hopCount: 0 });
+    vi.setSystemTime(30 * DAY);
+    sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot({ mqtt: {}, radioConnected: false })),
+      metricsStore: store, sampleIntervalMs: 10, retentionDays: 14,
+      repeaterFingerprintPruneAfterDays: 7, logger: silentLogger() });
+    sampler.start(); await vi.advanceTimersByTimeAsync(10); sampler.stop();
+    assert.equal(store.findNodesByPublicKeyPrefix(KEY)[0].name, 'Offline Summit');
+    assert.equal(store.findNodesByPublicKeyPrefix(KEY)[0].firstHeardAt, DAY);
+    assert.deepEqual(store.queryDirectHeardEligibility({ publicKeyHex: KEY, now: Date.now(), windowMs: 72 * 3600000 }),
+      { lastDirectHeardAt: 2 * DAY, eligible: false });
+    assert.equal(store.queryAdvertTotals({ start: 0, end: Date.now() }).events, 0);
+    assert.equal(store.recordVerifiedAdvert({ publicKeyHex: KEY, name: null, type: 'REPEATER',
+      eventDigest: '1'.repeat(64), receivedAt: Date.now(), hopCount: 1 }).eventRecorded, false);
+    assert.equal(store.findNodesByPublicKeyPrefix(KEY)[0].name, 'Offline Summit');
+  } finally { sampler?.stop(); store.close(); }
 });

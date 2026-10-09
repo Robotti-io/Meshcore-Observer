@@ -1,5 +1,6 @@
-import { test } from 'vitest';
+import { test, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { NodeRegistry } from '../../src/nodes/node-registry.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 
@@ -22,13 +23,13 @@ function fakeAdvert({ publicKeyHex, name, type = 'REPEATER', verified = true }) 
   };
 }
 
-// Every test injects its own `parseAdvert` (a decoded-packet -> advert
-// stub) rather than real over-the-air bytes - node-registry.js's own
-// contract with advert-parser.js is exercised separately in
-// advert-parser.test.js, and real ed25519-signed fixtures aren't needed to
-// test the registry's storage/lookup logic in isolation.
+// Isolated lookup fixtures. Genuine ed25519 reception/verification and
+// asynchronous chronology are exercised in verified-reception.test.js.
 function stubParseAdvert(decodedPacket) {
-  return decodedPacket.__advert ?? null;
+  const advert = decodedPacket.__advert;
+  if (!advert) return null;
+  return { advert, hopCount: decodedPacket.__hops ?? 0,
+    eventDigest: createHash('sha256').update(advert.publicKey).update(JSON.stringify(advert.parsed)).digest('hex') };
 }
 
 function sequentialClock(startMs = Date.parse('2026-01-01T00:00:00.000Z')) {
@@ -41,19 +42,28 @@ function sequentialClock(startMs = Date.parse('2026-01-01T00:00:00.000Z')) {
 }
 
 // A real MetricsStore (:memory:), not a hand-rolled fake - NodeRegistry is
-// now a thin wrapper over its `upsertNode`/`findNodesByPublicKeyPrefix`
+// now a thin wrapper over its `recordVerifiedAdvert`/`findNodesByPublicKeyPrefix`
 // (persisted metrics/state are a core observer capability independent of
 // the dashboard - see AGENTS.md's "Persistence" section), so exercising it
 // against the real SQL contract is both simpler and more representative
 // than maintaining a second, parallel in-memory implementation of prefix
 // matching/type filtering/ambiguity resolution that could drift from it.
+const registryStores = new Set();
+afterEach(() => { for (const store of registryStores) store.close(); registryStores.clear(); });
+
 function newRegistry({ store = new MetricsStore({ dbPath: ':memory:' }), ...overrides } = {}) {
+  if (store instanceof MetricsStore) registryStores.add(store);
+  const receivedClock = sequentialClock();
   return {
     store,
     registry: new NodeRegistry({
       logger: silentLogger(),
-      parseAdvert: stubParseAdvert,
+      parseAdvert: (packet) => {
+        packet.timestamp ??= new Date(receivedClock()).toISOString();
+        return stubParseAdvert(packet);
+      },
       now: sequentialClock(),
+      directHeardWindowMs: 72 * 3600000,
       store,
       ...overrides
     })
@@ -70,10 +80,11 @@ test('ignores a packet that is not a parseable advert', async () => {
   assert.equal(allNodes(store).length, 0);
 });
 
-test('ignores an advert with no name set', async () => {
+test('stores a verified unnamed advert with an actual null name', async () => {
   const { registry, store } = newRegistry();
   await registry.recordFromDecodedPacket({ __advert: fakeAdvert({ publicKeyHex: 'E85C'.repeat(16), name: null }) });
-  assert.equal(allNodes(store).length, 0);
+  assert.equal(allNodes(store).length, 1);
+  assert.equal(allNodes(store)[0].name, null);
 });
 
 test('drops and warns on an advert with a name whose signature does not verify', async () => {
@@ -205,7 +216,7 @@ test('findByPrefix ambiguity is decided after any type filter is applied', async
 test('a store failure while recording an advert is caught and logged, never thrown', async () => {
   const logger = silentLogger();
   const throwingStore = {
-    upsertNode: () => {
+    recordVerifiedAdvert: () => {
       throw new Error('disk full');
     }
   };

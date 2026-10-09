@@ -19,18 +19,20 @@ export class MetricsSampler extends EventEmitter {
   #metricsStore;
   #sampleIntervalMs;
   #retentionDays;
+  #repeaterFingerprintPruneAfterDays;
   #logger;
   #timer = null;
   #lastSnapshot = null;
   #lastPrunedAt = null;
 
-  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, logger: object}} options */
-  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, logger }) {
+  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, logger: object}} options */
+  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0, logger }) {
     super();
     this.#serviceHealth = serviceHealth;
     this.#metricsStore = metricsStore;
     this.#sampleIntervalMs = sampleIntervalMs;
     this.#retentionDays = retentionDays;
+    this.#repeaterFingerprintPruneAfterDays = repeaterFingerprintPruneAfterDays;
     this.#logger = logger;
   }
 
@@ -74,9 +76,9 @@ export class MetricsSampler extends EventEmitter {
     }
   }
 
-  /** Prunes persisted metrics older than the configured retention window, at most once per day. */
+  /** Independent opt-in local history/fingerprint cleanup, at most once per day. */
   #maybePrune() {
-    if (this.#retentionDays <= 0) {
+    if (this.#retentionDays <= 0 && this.#repeaterFingerprintPruneAfterDays <= 0) {
       return;
     }
     const now = Date.now();
@@ -84,10 +86,21 @@ export class MetricsSampler extends EventEmitter {
       return;
     }
     this.#lastPrunedAt = now;
-    try {
-      this.#metricsStore.pruneOlderThan(now - this.#retentionDays * ONE_DAY_MS);
-    } catch (err) {
-      this.#logger.warn('services.metricsUi', 'failed to prune persisted metrics', { error: err.message });
+    if (this.#retentionDays > 0) {
+      try {
+        this.#metricsStore.pruneOlderThan(now - this.#retentionDays * ONE_DAY_MS);
+      } catch (err) {
+        this.#logger.warn('services.metricsUi', 'failed to prune persisted metrics', { error: err.message });
+      }
+    }
+    const fingerprintCutoff = now - this.#repeaterFingerprintPruneAfterDays * ONE_DAY_MS;
+    if (this.#repeaterFingerprintPruneAfterDays > 0 && fingerprintCutoff >= 0) {
+      try {
+        const removed = this.#metricsStore.pruneInactiveRepeaterFingerprints({ cutoffMs: fingerprintCutoff });
+        if (removed > 0) this.#logger.info('services.nodeRegistry', 'pruned inactive repeater fingerprints', { removed });
+      } catch (err) {
+        this.#logger.warn('services.nodeRegistry', 'failed to prune inactive repeater fingerprints', { error: err.message });
+      }
     }
   }
 }

@@ -518,7 +518,7 @@ function renderNodesList(nodesResponse) {
     body.innerHTML = '';
     for (const node of nodesResponse.nodes) {
       const row = body.insertRow();
-      row.insertCell().textContent = node.name;
+      row.insertCell().textContent = node.name || 'Unnamed';
       const keyCell = row.insertCell();
       keyCell.textContent = formatPublicKeyCell(node.publicKeyHex);
       keyCell.title = node.publicKeyHex;

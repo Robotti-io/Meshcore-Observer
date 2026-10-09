@@ -1,5 +1,9 @@
 # Feature: UI/UX Refinement & Robotti Design-System Alignment
 
+**GitHub epic:** [#21](https://github.com/Robotti-io/Meshcore-Observer/issues/21)
+
+**Child issue register:** [Pillar 4 breakdown — 15 issues](pillar-4-child-issues.md), captured on 2026-10-07; implementation planning pending.
+
 ## Summary
 
 Refine the MeshCore Observer frontend so that the dashboard is easier to understand, more consistent to operate, more accessible across devices, and visually aligned with the established Robotti Design System.
@@ -1304,7 +1308,7 @@ This pillar is complete when the approved child features collectively satisfy th
 
 ## 12 Suggested Child Features
 
-This feature request should be implemented through separate child issues rather than as one large visual rewrite.
+The concrete [child-issue breakdown](pillar-4-child-issues.md) is captured in GitHub epic #21. The thematic list below groups the source requirements; linked child issues track scoped execution and dependencies.
 
 Recommended breakdown:
 

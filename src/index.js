@@ -99,7 +99,8 @@ async function main() {
   // only reads from it later (once a quiet window is actually observed),
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
-  const nodeRegistry = new NodeRegistry({ logger, store: metricsStore });
+  const nodeRegistry = new NodeRegistry({ logger, store: metricsStore,
+    directHeardWindowMs: config.nodeObservations.directHeardWindowMs });
   const statsReporter = new StatsReporter({ store: metricsStore });
   const airtimeCoordinator = new AirtimeCoordinator({ quietMs: config.botReplyQueue.quietMs });
   const replyQueue = new ReplyQueue({
@@ -250,7 +251,8 @@ async function main() {
       });
   });
   // Independent of the MQTT-publish listener above: an ADVERT with a
-  // verified signature and a name updates the node registry that
+  // verified signature updates inventory and local advert history, including
+  // unnamed nodes. The node registry is what
   // ChannelBot's `!lookup`-kind commands read from (see
   // docs/plans/feat-bot_command_to_lookup_repeater_name.md). Fire-and-
   // forget with a caught/logged rejection, matching the publish listener's
@@ -274,6 +276,7 @@ async function main() {
     metricsStore,
     sampleIntervalMs: config.metricsUi.sampleIntervalMs,
     retentionDays: config.metricsUi.retentionDays,
+    repeaterFingerprintPruneAfterDays: config.nodeObservations.repeaterFingerprintPruneAfterDays,
     logger
   });
   metricsSampler.start();

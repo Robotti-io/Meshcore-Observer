@@ -4,7 +4,7 @@ export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations'],
   properties: {
     radio: {
       type: 'object',
@@ -66,6 +66,13 @@ export const configSchema = {
           type: 'integer',
           anyOf: [{ const: 0 }, { minimum: 47, maximum: 168 }]
         }
+      }
+    },
+    nodeObservations: {
+      type: 'object', additionalProperties: false, required: ['directHeardWindowMs', 'repeaterFingerprintPruneAfterDays'],
+      properties: {
+        directHeardWindowMs: { type: 'integer', minimum: 3600000, maximum: 8760 * 3600000, multipleOf: 3600000 },
+        repeaterFingerprintPruneAfterDays: { type: 'integer', minimum: 0, maximum: 36500 }
       }
     },
     metricsUi: {

@@ -1,5 +1,9 @@
 # Feature: Enhanced Bots
 
+**GitHub epic:** [#20](https://github.com/Robotti-io/Meshcore-Observer/issues/20)
+
+**Child issue register:** [Pillar 3 breakdown — 14 issues](pillar-3-child-issues.md), captured on 2026-10-07; implementation planning pending.
+
 ## Summary
 
 Expand MeshCore Observer's bot capabilities so that bots behave more intelligently and efficiently on the mesh.
@@ -1024,7 +1028,7 @@ is processed only by the Observer whose Companion identity matches the supplied 
 
 ## 7 Suggested Child Features
 
-This feature request should be implemented through separate child issues rather than as one large change.
+The concrete [child-issue breakdown](pillar-3-child-issues.md) is captured in GitHub epic #20. The thematic list below groups the source requirements; linked child issues track scoped execution and dependencies.
 
 Recommended breakdown:
 
