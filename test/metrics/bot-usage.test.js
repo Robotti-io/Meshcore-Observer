@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { MetricsStore } from '../../src/metrics/store.js';
+import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
 
 const resources = [];
 afterEach(() => {
@@ -133,7 +134,7 @@ function makeV8(dbPath) {
   fresh.close();
   const db = new DatabaseSync(dbPath);
   try {
-    db.exec(`DROP TABLE runtime_events; DROP TABLE process_samples;
+    db.exec(`${dropTopologySchema} DROP TABLE runtime_events; DROP TABLE process_samples;
       DROP TABLE observer_runs; DROP TABLE observer_instance;
       DROP TABLE advert_events;
       DROP TABLE advert_fingerprints;
@@ -179,7 +180,7 @@ test('v8 migration preserves IDs, legacy unavailable evidence, other datasets an
   assert.ok(id > 42);
   const reopened = openStore(dbPath);
   assert.deepEqual(reopened.getReplyById(id), store.getReplyById(id));
-  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 12);
+  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 13);
 });
 
 test('a failed v9 migration rolls back its rebuild and version without losing old records', () => {

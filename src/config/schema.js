@@ -1,12 +1,14 @@
 import { botConfigSchema } from '../bots/schemas.js';
 import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
+import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology'],
   properties: {
+    topology: topologyConfigSchema,
     radio: {
       type: 'object',
       additionalProperties: false,

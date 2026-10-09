@@ -1,6 +1,6 @@
 # Passive topology protocol subset for #27
 
-Reviewed 2026-10-08. Owning research: [#22](https://github.com/Robotti-io/Meshcore-Observer/issues/22). Consuming plan: [#27](pillar-1-issues/p1-06.md#implementation-plan). This is the passive header-path subset, not the complete telemetry/regions/authentication/contact capability assessment.
+Reviewed 2026-10-08. Owning research: [#22](https://github.com/Robotti-io/Meshcore-Observer/issues/22). Consuming plan: [#27](pillar-1-issues/p1-06.md#implementation-plan), now approved and implemented locally with passing parser/storage/collector/query/retention/offline fixtures. This is the passive header-path subset, not the complete telemetry/regions/authentication/contact capability assessment.
 
 ## Verified references and local baseline
 

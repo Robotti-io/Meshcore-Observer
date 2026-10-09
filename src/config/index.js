@@ -148,6 +148,14 @@ function readMetricsUi(env) {
   };
 }
 
+function readTopology(env) {
+  const keys = ['PACKETCAPTURE_TOPOLOGY_FRESHNESS_HOURS', 'PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE',
+    'PACKETCAPTURE_TOPOLOGY_PRUNE_AFTER_DAYS'];
+  for (const key of keys) if (env[key] === '') throw new ConfigError(`${key} must be a whole number; omit it to use the default`);
+  return { freshnessWindowMs: readInteger(env, keys[0], 72) * 3600000,
+    maxObservationsPerMinute: readInteger(env, keys[1], 600), pruneAfterDays: readInteger(env, keys[2], 0) };
+}
+
 /**
  * Brokers are configured via a JSON file (an array of independent broker
  * definitions), the same pattern as readBots() below, rather than flat env
@@ -244,7 +252,8 @@ export function loadConfig(env = process.env) {
     metricsUi: readMetricsUi(env),
     botReplyQueue: readBotReplyQueue(env),
     floodAdvert: readFloodAdvert(env),
-    nodeObservations: readNodeObservations(env)
+    nodeObservations: readNodeObservations(env),
+    topology: readTopology(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {

@@ -37,10 +37,19 @@ process.on('message', (message) => {
   if (message.action === 'snapshot') process.send({ snapshot: store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }),
     summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER'),
     resources: store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }),
+    topology: store.queryTopologyPaths(),
+    topologyDetails: store.queryTopologyObservations({ start: 0, end: Number.MAX_SAFE_INTEGER }),
+    topologyCoverage: store.queryTopologyCoverage({ start: 0, end: Number.MAX_SAFE_INTEGER }),
     events: store.queryRuntimeEvents({ start: 0, end: Number.MAX_SAFE_INTEGER }) });
   if (message.action === 'event-storm') {
     for (let index = 0; index < 100; index++) radio.emit('radio.error', { phase: 'connect', message: 'secret must not enter records' });
     process.send({ storm: true });
+  }
+  if (message.action === 'topology-storm') {
+    for (let index = 0; index < 100; index++) radio.emit('radio.packet', {
+      raw: Buffer.from('0D43AC019905E85C01020304', 'hex'), lastSnr: -1, lastRssi: -100 });
+    radio.emit('radio.packet', { raw: Buffer.from('0D0001020304', 'hex'), lastSnr: -1, lastRssi: -100 });
+    process.send({ topologyStorm: true });
   }
   if (message.action === 'stop') process.emit('SIGINT');
   if (message.action === 'release') { releaseStop(); releaseAdvert(); }

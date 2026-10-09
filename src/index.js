@@ -20,6 +20,7 @@ import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import { MetricsSampler } from './metrics/sampler.js';
+import { TopologyObserver } from './nodes/topology-observer.js';
 import { RunHistory, createRunShutdown } from './metrics/run-history.js';
 import { ProcessMeasurements } from './metrics/process-measurements.js';
 import { RuntimeEvents } from './metrics/runtime-events.js';
@@ -292,6 +293,9 @@ async function main() {
     pending.then(() => pendingNodeObservations.delete(pending), () => pendingNodeObservations.delete(pending));
   };
   packetPipeline.on('packet', recordNodeObservation);
+  const topologyObserver = new TopologyObserver({ store: metricsStore, runId: runHistory.runId,
+    getDeviceInfo: () => radioManager.getDeviceInfo(), logger, config: config.topology });
+  topologyObserver.attach(packetPipeline);
 
   const healthLogTimer = setInterval(() => {
     logger.info('app.health', 'health snapshot', serviceHealth.snapshot());
@@ -310,6 +314,8 @@ async function main() {
     runHistory,
     processMeasurements: new ProcessMeasurements(),
     runtimeEvents,
+    topologyObserver,
+    topologyPruneAfterDays: config.topology.pruneAfterDays,
     logger
   });
   metricsSampler.start();
@@ -338,9 +344,11 @@ async function main() {
     teardown: async () => {
       // Detach persistence input and stop checkpoints before asynchronous teardown.
       packetPipeline.off('packet', recordNodeObservation);
+      topologyObserver.stop();
       metricsSampler.stop();
       runtimeEvents.stop();
       metricsSampler.flushProcessSample();
+      metricsSampler.flushTopologyCoverage();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.
       repeatCheckSweeper.stop();

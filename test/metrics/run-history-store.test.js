@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
+import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
 
 const stores = new Set(); const dirs = new Set();
 afterEach(() => {
@@ -134,7 +135,7 @@ test('migration 11 preserves existing data and rolls back a late failure', () =>
   store.upsertNode({ publicKeyHex: 'AB'.repeat(32), name: 'Offline', type: 'REPEATER', heardAt: 1000 });
   store.requestFloodAdvert(1000); close(store);
   let db = new DatabaseSync(file);
-  db.exec('DROP TABLE runtime_events; DROP TABLE process_samples; DROP TABLE observer_runs; DROP TABLE observer_instance; PRAGMA user_version=10');
+  db.exec(`${dropTopologySchema} DROP TABLE runtime_events; DROP TABLE process_samples; DROP TABLE observer_runs; DROP TABLE observer_instance; PRAGMA user_version=10`);
   db.exec('CREATE INDEX idx_observer_runs_active ON nodes(last_heard_at)'); db.close();
   assert.throws(() => open(file), /idx_observer_runs_active/);
   db = new DatabaseSync(file);

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { createHandlerStateCodec } from '../../src/bots/command-handlers/handler-state.js';
 import { MetricsStore, resolveBucketWidthMs } from '../../src/metrics/store.js';
+import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
 
 function openStore() {
   return new MetricsStore({ dbPath: ':memory:' });
@@ -810,7 +811,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 13);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
     assert.ok(columns.includes('handler_state_json'));
     assert.ok(!columns.includes('lookup_outcome'));
@@ -830,6 +831,7 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
 
     const v7Db = new DatabaseSync(dbPath);
     v7Db.exec(`
+      ${dropTopologySchema}
       DROP TABLE runtime_events; DROP TABLE process_samples;
       DROP TABLE observer_runs; DROP TABLE observer_instance;
       DROP TABLE advert_events;
@@ -892,7 +894,7 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
     migratedStore.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 12);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 13);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
     assert.deepEqual(columns, [
       'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',

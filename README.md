@@ -755,6 +755,63 @@ the script before running it.
 
 ## Architecture
 
+### Passive topology evidence
+
+The always-on local store records supported header paths from traffic already
+received, independently of the dashboard and internet access. Flood paths
+describe observed relays: `AC01 → 9905 → E85C → Observer` gives distances
+3, 2 and 1. Direct paths contain remaining forwarding instructions and have
+no proximity distance. TRACE, unsupported formats and malformed paths are
+excluded; empty paths have a separate no-relay coverage count. No discovery
+traffic, contact updates, reverse routes, raw frames or message bodies are
+introduced by this feature.
+
+Compact entries are leading public-key bytes. Resolution uses all current
+inventory identities before checking repeater type. Unknown entries stay
+unknown; collisions select no target, and repeated-prefix paths are excluded
+from automatic proximity. A unique local match remains an unverified prefix
+association. Observed proximity never proves outbound routing or reachability.
+Later telemetry dispatch must recheck freshness, identity, radius, contacts,
+routing and backoff. Replacing the Observer radio does not transfer another
+radio's proximity evidence.
+
+Configuration defaults are also in `.env.example` and central code:
+
+| Setting | Default | Valid whole units / effect |
+| --- | --- | --- |
+| `PACKETCAPTURE_TOPOLOGY_FRESHNESS_HOURS` | 72 | 1–8760 hours; separate from direct-advert freshness |
+| `PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE` | 600 | 1–6000 write attempts per rolling monotonic minute, including failed attempts |
+| `PACKETCAPTURE_TOPOLOGY_PRUNE_AFTER_DAYS` | 0 | 0–36500 days; 0 disables inactive path catalog pruning |
+
+Each successfully stored physical reception adds one count, including repeated
+copies. This measures receptions, not distinct messages or successful routes.
+Admission suppression never refreshes a path. Coverage records separately
+count accepted, suppressed, failed, malformed, unsupported and no-relay
+observations on the existing sampler cadence, with a final flush after listener
+detachment. These counts describe the decoded packet consumer; frames rejected
+earlier in capture are outside its coverage. An unknown Observer identity,
+abrupt death or failed final coverage write can leave gaps, so coverage is a
+lower bound. Failed coverage writes keep counters pending for retry.
+
+Expiry at the freshness boundary excludes candidates while retaining history;
+future evidence is ineligible. Queries guard against wall-clock rollback using
+their high water and retained run/coverage clocks. Restart preserves original
+reception times. The route summary's cumulative persisted count survives
+detail pruning; selected `[start,end)` counts use retained reception records
+and cannot reconstruct expired details. Internal pages cap at 200, path views
+at 63 positions, and candidates at three alternate path references. Public
+reporting and dashboard presentation are separate release features.
+
+Reception detail and coverage use `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS`
+(0/unlimited by default). Path summaries/hops remain indefinitely unless
+inactive-path pruning is explicitly enabled. Cleanup removes a path only after
+its last reception reaches the configured age and no retained detail refers
+to it; inventory and other evidence survive. Unlimited detail retention
+normally prevents catalog deletion. Purged routes start new route history if
+heard again. Cleanup makes SQLite pages reusable without automatically
+shrinking the file. Rate, path and result bounds are **not a lifetime disk
+ceiling**; monitor disk usage under unlimited retention.
+
 For development workflow, see [CONTRIBUTING.md](CONTRIBUTING.md). For the
 current architecture and configuration contract, this README and the source
 are authoritative; `docs/project_plan.spec.md` is the original replacement

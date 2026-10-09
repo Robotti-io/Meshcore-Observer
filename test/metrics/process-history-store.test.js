@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { ProcessMeasurements } from '../../src/metrics/process-measurements.js';
+import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
 
 const stores = new Set(); const dirs = new Set();
 afterEach(() => {
@@ -131,7 +132,7 @@ test('migration 12 adds empty histories, preserves old run/node state and rolls 
   const file = path(); let store = open(file); const run = start(store);
   store.upsertNode({ publicKeyHex: 'AB'.repeat(32), name: 'Offline', type: 'REPEATER', heardAt: 1000 }); close(store);
   let db = new DatabaseSync(file);
-  db.exec('DROP TABLE runtime_events; DROP TABLE process_samples; PRAGMA user_version=11');
+  db.exec(`${dropTopologySchema} DROP TABLE runtime_events; DROP TABLE process_samples; PRAGMA user_version=11`);
   db.exec('CREATE INDEX idx_runtime_events_kind_at ON nodes(last_heard_at)'); db.close();
   assert.throws(() => open(file), /idx_runtime_events_kind_at/);
   db = new DatabaseSync(file);

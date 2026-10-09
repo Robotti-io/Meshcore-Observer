@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
+import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
 
 const HOUR = 3600000;
 const KEY = 'AB'.repeat(32);
@@ -43,6 +44,7 @@ function inspect(path, read) {
 function makeV9(path) {
   close(open(path));
   inspect(path, (db) => db.exec(`
+    ${dropTopologySchema}
     DROP TABLE runtime_events; DROP TABLE process_samples;
     DROP TABLE observer_runs; DROP TABLE observer_instance;
     DROP TABLE advert_events; DROP TABLE advert_fingerprints;
@@ -217,7 +219,7 @@ test('migration 10 preserves legacy data without inventing history or direct evi
   store.recordVerifiedAdvert(evidence('fresh', { name: null }));
   assert.equal(store.queryNodes({ limit: 100, offset: 0 }).nodes[0].name, 'Legacy');
   assert.equal(store.queryAdvertTotals(RANGE).newDiscoveries, 0);
-  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 12);
+  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 13);
 });
 
 test('late migration failure rolls back the node rebuild and all new tables', () => {

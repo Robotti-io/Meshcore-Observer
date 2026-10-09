@@ -61,6 +61,25 @@ function baseEnv(overrides = {}) {
   };
 }
 
+test('topology settings default independently, match example configuration and accept whole-unit overrides', () => {
+  assert.deepEqual(loadConfig(baseEnv()).topology, { freshnessWindowMs: 72 * 3600000, maxObservationsPerMinute: 600, pruneAfterDays: 0 });
+  assert.deepEqual(loadConfig(baseEnv({ PACKETCAPTURE_TOPOLOGY_FRESHNESS_HOURS: '96',
+    PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE: '6000', PACKETCAPTURE_TOPOLOGY_PRUNE_AFTER_DAYS: '7' })).topology,
+  { freshnessWindowMs: 96 * 3600000, maxObservationsPerMinute: 6000, pruneAfterDays: 7 });
+  const example = readFileSync('.env.example', 'utf8');
+  for (const setting of ['PACKETCAPTURE_TOPOLOGY_FRESHNESS_HOURS=72', 'PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE=600',
+    'PACKETCAPTURE_TOPOLOGY_PRUNE_AFTER_DAYS=0']) assert.ok(example.includes(setting));
+});
+test('topology configuration rejects explicit blanks, fractions, unsafe values and bounds', () => {
+  for (const [key, invalid] of [
+    ['PACKETCAPTURE_TOPOLOGY_FRESHNESS_HOURS', ['0', '8761']],
+    ['PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE', ['0', '6001']],
+    ['PACKETCAPTURE_TOPOLOGY_PRUNE_AFTER_DAYS', ['-1', '36501']]
+  ]) for (const value of ['', ' ', '1.5', 'text', '90071992547409999', ...invalid]) {
+    assert.throws(() => loadConfig(baseEnv({ [key]: value })), ConfigError);
+  }
+});
+
 test('normalizes a minimal valid serial configuration with defaults', () => {
   const config = loadConfig(baseEnv());
 

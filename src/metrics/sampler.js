@@ -23,6 +23,8 @@ export class MetricsSampler extends EventEmitter {
   #runHistory;
   #processMeasurements;
   #runtimeEvents;
+  #topologyObserver;
+  #topologyPruneAfterDays;
   #logger;
   #timer = null;
   #lastSnapshot = null;
@@ -30,7 +32,8 @@ export class MetricsSampler extends EventEmitter {
 
   /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, runHistory?: object, processMeasurements?: object, runtimeEvents?: object, logger: object}} options */
   constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0,
-    runHistory = null, processMeasurements = null, runtimeEvents = null, logger }) {
+    runHistory = null, processMeasurements = null, runtimeEvents = null,
+    topologyObserver = null, topologyPruneAfterDays = 0, logger }) {
     super();
     this.#serviceHealth = serviceHealth;
     this.#metricsStore = metricsStore;
@@ -40,6 +43,8 @@ export class MetricsSampler extends EventEmitter {
     this.#runHistory = runHistory;
     this.#processMeasurements = processMeasurements;
     this.#runtimeEvents = runtimeEvents;
+    this.#topologyObserver = topologyObserver;
+    this.#topologyPruneAfterDays = topologyPruneAfterDays;
     this.#logger = logger;
   }
 
@@ -65,6 +70,7 @@ export class MetricsSampler extends EventEmitter {
     try { this.#runtimeEvents?.observeSnapshot(snapshot); }
     catch (error) { this.#logger.warn('services.runtimeEvents', 'failed to observe sampled readiness', { error: error.message }); }
     this.flushProcessSample();
+    this.flushTopologyCoverage();
     this.#recordSample(snapshot);
     this.#maybePrune();
     this.#lastSnapshot = snapshot;
@@ -94,6 +100,11 @@ export class MetricsSampler extends EventEmitter {
     }
   }
 
+  flushTopologyCoverage() {
+    try { this.#topologyObserver?.flushCoverage(); }
+    catch { this.#logger.warn('services.topology', 'failed to flush topology coverage'); }
+  }
+
   #recordSample(snapshot) {
     const sample = computeSampleDelta({
       prevSnapshot: this.#lastSnapshot,
@@ -111,7 +122,7 @@ export class MetricsSampler extends EventEmitter {
 
   /** Independent opt-in local history/fingerprint cleanup, at most once per day. */
   #maybePrune() {
-    if (this.#retentionDays <= 0 && this.#repeaterFingerprintPruneAfterDays <= 0) {
+    if (this.#retentionDays <= 0 && this.#repeaterFingerprintPruneAfterDays <= 0 && this.#topologyPruneAfterDays <= 0) {
       return;
     }
     const now = Date.now();
@@ -134,6 +145,13 @@ export class MetricsSampler extends EventEmitter {
       } catch (err) {
         this.#logger.warn('services.nodeRegistry', 'failed to prune inactive repeater fingerprints', { error: err.message });
       }
+    }
+    const topologyCutoff = now - this.#topologyPruneAfterDays * ONE_DAY_MS;
+    if (this.#topologyPruneAfterDays > 0 && topologyCutoff >= 0) {
+      try {
+        const removed = this.#metricsStore.pruneInactiveTopologyPaths({ cutoffMs: topologyCutoff });
+        if (removed > 0) this.#logger.info('services.topology', 'pruned inactive topology paths', { removed });
+      } catch { this.#logger.warn('services.topology', 'failed to prune inactive topology paths'); }
     }
   }
 }

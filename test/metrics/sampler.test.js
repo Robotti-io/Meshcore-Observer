@@ -51,6 +51,19 @@ function baseSnapshot(overrides = {}) {
   };
 }
 
+test('topology cadence/final flush and opt-in daily maintenance isolate failures from ordinary samples', async () => {
+  const logger = silentLogger(); let topologyFlushes = 0; let pathsPruned = 0; let packets = 0; let history = 0; let fingerprints = 0;
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot()), sampleIntervalMs: 1000,
+    retentionDays: 1, repeaterFingerprintPruneAfterDays: 1, topologyPruneAfterDays: 7, logger,
+    topologyObserver: { flushCoverage() { topologyFlushes++; throw new Error('fail'); } },
+    metricsStore: { recordPacketSample() { packets++; }, pruneOlderThan() { history++; throw new Error('history failure'); },
+      pruneInactiveRepeaterFingerprints() { fingerprints++; throw new Error('fingerprint failure'); },
+      pruneInactiveTopologyPaths({ cutoffMs }) { pathsPruned++; assert.ok(cutoffMs <= Date.now() - 7 * 86400000); throw new Error('topology failure'); } } });
+  sampler.start(); await vi.advanceTimersByTimeAsync(2000); sampler.stop(); sampler.flushTopologyCoverage();
+  assert.equal(topologyFlushes, 3); assert.equal(packets, 2); assert.equal(history, 1); assert.equal(fingerprints, 1); assert.equal(pathsPruned, 1);
+  assert.ok(logger.calls.warn.some((item) => item.message === 'failed to prune inactive topology paths'));
+});
+
 test('process history is run-linked on the existing cadence without changing packet/SSE snapshots', async () => {
   const store = new MetricsStore({ dbPath: ':memory:' });
   const baseline = Date.now(); const logger = silentLogger(); const snapshot = baseSnapshot();

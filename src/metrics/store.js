@@ -7,6 +7,8 @@ import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUs
 import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
 import { processSampleSchema, processPageSchema, processHistorySchema, runtimeEventSchema, runtimeEventPageSchema } from './process-schemas.js';
+import { topologyMigration } from './topology-migration.js';
+import { createTopologyHistory } from './topology-history.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -518,7 +520,8 @@ const MIGRATIONS = [
       'CREATE INDEX idx_runtime_events_run_at ON runtime_events(run_id,observed_at)',
       'CREATE INDEX idx_runtime_events_kind_at ON runtime_events(kind,observed_at)'
     ]
-  }
+  },
+  topologyMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -593,6 +596,7 @@ export function resolveBucketWidthMs({ rangeMs, maxBuckets, sampleIntervalMs }) 
  */
 export class MetricsStore {
   #db;
+  #topology;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -622,6 +626,11 @@ export class MetricsStore {
       this.#db.exec('PRAGMA journal_mode = WAL');
       this.#db.exec('PRAGMA foreign_keys = ON');
       this.#runMigrations();
+      this.#topology = createTopologyHistory(this.#db, (runId) => {
+        if (this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
+          throw new Error('Topology writes require the active owned run');
+        }
+      });
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1711,6 +1720,8 @@ export class MetricsStore {
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {
+      this.#db.prepare('DELETE FROM topology_observations WHERE received_at < ?').run(cutoffMs);
+      this.#db.prepare('DELETE FROM topology_capture_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM process_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM runtime_events WHERE observed_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_sample_packet_types WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
@@ -1729,4 +1740,15 @@ export class MetricsStore {
   close() {
     this.#db.close();
   }
+
+  recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
+  recordTopologyCoverage(sample) { return this.#topology.recordCoverage(sample); }
+  queryTopologyPaths(query) { return this.#topology.paths(query); }
+  getTopologyPath(query) { return this.#topology.path(query); }
+  queryTopologyPrefixIdentities(query) { return this.#topology.identities(query); }
+  queryTopologyObservations(query) { return this.#topology.observations(query); }
+  queryTopologyRouteCounts(query) { return this.#topology.counts(query); }
+  queryTopologyCoverage(query) { return this.#topology.coverage(query); }
+  queryObservedProximity(query) { return this.#topology.proximity(query); }
+  pruneInactiveTopologyPaths(query) { return this.#topology.prune(query); }
 }

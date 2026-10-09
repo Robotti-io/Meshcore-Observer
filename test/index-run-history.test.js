@@ -1,7 +1,7 @@
 import { test, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MetricsStore } from '../src/metrics/store.js';
@@ -22,6 +22,33 @@ function environment() {
     PACKETCAPTURE_METRICS_UI_DB_PATH: join(dir, 'metrics.sqlite3'), PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS: '1000',
     PACKETCAPTURE_METRICS_UI_RETENTION_DAYS: '0', PACKETCAPTURE_RUNTIME_EVENT_MAX_PER_MINUTE: '60' };
 }
+
+test('invalid topology configuration fails before database/hardware/network startup', () => {
+  const env = { ...environment(), PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE: '0' };
+  const result = spawnSync(process.execPath, [resolve('src/index.js')], { env, cwd: process.cwd(), encoding: 'utf8', timeout: 3000 });
+  assert.equal(result.status, 1); assert.match(result.stdout + result.stderr, /Invalid configuration/);
+  assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH), false);
+  assert.doesNotMatch(result.stdout + result.stderr, /failed to open tcp connection/);
+});
+test('offline dashboard-disabled topology persists bounded duplicate receptions and final coverage, then survives restart unchanged', async () => {
+  const env = { ...environment(), PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE: '2' };
+  const child = launch(env); await child.next();
+  child.process.send({ action: 'topology-storm' }); assert.equal((await child.next()).topologyStorm, true);
+  const observed = await snapshot(child);
+  assert.equal(observed.topology.total, 1); assert.equal(observed.topology.paths[0].receptionCount, 2);
+  assert.equal(observed.topologyDetails.total, 2);
+  child.process.send({ action: 'stop' }); assert.equal((await child.exited).code, 0);
+  read(env, (store) => {
+    const samples = store.queryTopologyCoverage({ start: 0, end: Number.MAX_SAFE_INTEGER }).samples;
+    assert.equal(samples.reduce((sum, row) => sum + row.accepted, 0), 2);
+    assert.equal(samples.reduce((sum, row) => sum + row.suppressed, 0), 98);
+    assert.equal(samples.reduce((sum, row) => sum + row.noRelay, 0), 1);
+    assert.equal(samples[0].runId, observed.snapshot.runs[0].runId);
+  });
+  const restarted = launch(env); await restarted.next(); const after = await snapshot(restarted);
+  assert.deepEqual(after.topology, observed.topology); assert.equal(after.topologyDetails.total, 2);
+  restarted.process.send({ action: 'stop' }); assert.equal((await restarted.exited).code, 0);
+});
 function launch(env, mode = 'ordinary') {
   const process = spawn(globalThis.process.execPath, [resolve('test/fixtures/run-lifecycle-child.js'), mode],
     { cwd: globalThis.process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });

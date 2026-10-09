@@ -2,8 +2,8 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — #28/#26/#24/#25 are complete and user-pushed; #25 is pushed in a903e0e. The backend baseline passes 591 tests, CI coverage and lint. #27's concrete passive topology plan is staged and native project In progress verified for planning. Its new storage/configuration contract awaits implementation approval. Research #22 and remaining decisions #23 stay active.
-The first four backend plans have approved protected storage/configuration scope and pass their full acceptance. #27 now has five ordered tasks, a verified passive protocol subset and concrete conservative identity/freshness/retention/budget recommendations. Current changes are #27 planning and its #22/#23/epic/queue documentation; feature acceptance and the P1-06 child checkbox remain open.
+**Stage:** In progress — #28/#26/#24/#25 are complete and user-pushed. User "Proceed" approves #27's finalized five-task storage/configuration plan; passive topology is fully implemented and validated locally with all 61 files / 620 tests, coverage thresholds, lint and whitespace checks passing. Research #22 and remaining telemetry/region decisions #23 stay active.
+Five backend features now satisfy their scoped acceptance. #27 adds migration 13, transactional path/reception/coverage history, bounded passive collection, strict configuration, conservative indexed proximity and save-first retention. Runtime changes are local for review/commit/push; public reporting, dashboard and active discovery/telemetry remain in their owning issues.
 
 ## Operator outcome
 
@@ -28,7 +28,7 @@ Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acce
 - [x] [P1-03: Persist Observer run and shutdown history](https://github.com/Robotti-io/Meshcore-Observer/issues/24)
 - [x] [P1-04: Sample process resources and selected runtime events](https://github.com/Robotti-io/Meshcore-Observer/issues/25)
 - [x] [P1-05: Persist verified node adverts and direct-heard evidence](https://github.com/Robotti-io/Meshcore-Observer/issues/26)
-- [ ] [P1-06: Persist passive topology and path evidence](https://github.com/Robotti-io/Meshcore-Observer/issues/27)
+- [x] [P1-06: Persist passive topology and path evidence](https://github.com/Robotti-io/Meshcore-Observer/issues/27)
 - [x] [P1-07: Aggregate bot usage by sender and command](https://github.com/Robotti-io/Meshcore-Observer/issues/28)
 - [ ] [P1-08: Coordinate remote requests and conservative radio scheduling](https://github.com/Robotti-io/Meshcore-Observer/issues/29)
 - [ ] [P1-09: OBS-02: Persist region answers and freshness](https://github.com/Robotti-io/Meshcore-Observer/issues/30)
@@ -59,7 +59,7 @@ Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime a
 ## Epic acceptance
 
 - [ ] Supported telemetry is collected only for eligible repeaters with bounded scheduling and secure credential handling.
-- [ ] Passive path evidence is persisted without treating observed paths as guaranteed outbound routes.
+- [x] Passive path evidence is persisted without treating observed paths as guaranteed outbound routes.
 - [ ] Aggregate bot reporting distinguishes usage and delivery, follows reporting ranges, and exposes approved sender-level information.
 - [ ] Historical advert events and unique-node/current-inventory counts retain distinct meanings.
 - [x] Run history and resource samples survive restart; abrupt shutdown reporting does not invent an exact stop time.
@@ -81,7 +81,7 @@ Recommended first main delivery pillar. Establish runtime measurements and obser
 
 ## Planning status and approval boundaries
 
-This is a v2.5.0 parent tracking epic with 16 child issues. #28/#26 are complete and user-pushed. #24 is fully implemented locally: migration 11, database/run UUIDs, exclusive ownership, monotonic checkpoints, conservative crash recovery, guarded bounded clean shutdown, retained reads and referenced-parent pruning. All 564 tests, CI coverage and lint pass; child-process offline/crash/ownership/advert-drain fixtures are included. Research #22, decisions #23 and #25 planning remain in progress. #25 is next; its concrete resource/events plan still requires its own implementation approval. Unrelated decisions do not reopen completed features. Epic reporting acceptance remains open until #35/#36 deliver the approved presentation. Offline asset work and integrated validation remain #42/#83/#37; they are not implemented here.
+This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 are complete, with #27 changes local for review and earlier implementations user-pushed. Research #22 and remaining decisions #23 remain In progress. The next planning slice is the remaining remote capability assessment and #29 shared request coordination, followed by OBS-02 storage/query/publication #30–#32. Concrete protected-boundary plans still need their own approval. Unrelated decisions do not reopen completed features. Epic reporting acceptance remains open until #35/#36 deliver presentation. Offline asset work and integrated validation remain #42/#83/#37.
 
 Set active work to `In progress` in the [release project's Status field](https://github.com/orgs/Robotti-io/projects/1), alongside the supplemental `status:in-progress` issue label. Project #1 statuses for #18, #22, #23, and #26 were updated and verified on 2026-10-07. Check off completed decision/research acceptance items as evidence is recorded, and close each issue as completed only when its full deliverable and validation are satisfied. Verify project Status is `Done`, remove the progress label on closure, and synchronize this epic's child checklist and local register. Epic completion requires completion of its required children and epic acceptance outcomes.
 
