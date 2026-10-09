@@ -2,8 +2,8 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — five backend features #28/#26/#24/#25/#27 are complete and user-pushed at cae9a48/migration 13; capability research #22 is complete. The user approved #29's finalized plan on 2026-10-09. T1 strict read-request/response contracts are complete locally with 63 files / 636 tests and coverage/lint passing; T2–T5 remain approved pending tasks. Remaining telemetry/region decisions #23 stay active.
-Research records versioned capabilities and deployment limits. Approved #29 builds a minimal internal seam with configurable limits and bounded ACK recovery; T1 adds only strict pure contracts/fixtures, with no polling or entrypoint integration. Public reporting, dashboard and active discovery/telemetry remain in their owning issues.
+**Stage:** In progress — five backend features #28/#26/#24/#25/#27 are complete and user-pushed at cae9a48/migration 13; capability research #22 is complete. The user approved #29's finalized plan on 2026-10-09. T1 strict read-request/response contracts are user-pushed at a2f3558. T2 connection generation guards and recovery are complete locally with 63 files / 655 tests and coverage/lint passing; T3–T5 remain approved pending tasks. Remaining telemetry/region decisions #23 stay active.
+Research records versioned capabilities and deployment limits. Approved #29 builds a minimal internal seam with configurable limits and bounded ACK recovery; T1 supplies strict pure contracts/fixtures and T2 supplies internal connection guards and confirmed-close recovery. T3 remote transaction ownership is next; polling and entrypoint integration remain pending. Public reporting, dashboard and active discovery/telemetry remain in their owning issues.
 
 ## Operator outcome
 
@@ -44,7 +44,7 @@ Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime a
 
 ## Dependencies and unresolved decisions
 
-- Update 2026-10-09: [capability notes](remote-capability-notes.md) distinguish inspected/released source from unknown deployed firmware; no live radio check occurred. [#29 plan](pillar-1-issues/p1-08.md#implementation-plan) and REMOTE-PLAN-01–04 are approved by "Approved to proceed according to plan." T1 pure protocol contracts/fixtures pass 636 tests/coverage/lint; T2 generation/recovery is next. Whole-feature acceptance remains unchecked; #29 uses project In progress. Research #22 is completed/project Done; #23 remains open.
+- Update 2026-10-09: [capability notes](remote-capability-notes.md) distinguish inspected/released source from unknown deployed firmware; no live radio check occurred. [#29 plan](pillar-1-issues/p1-08.md#implementation-plan) and REMOTE-PLAN-01–04 are approved by "Approved to proceed according to plan." T1 is user-pushed at a2f3558; T2 generation/recovery is complete locally with 655 tests/coverage/lint passing. T3 remote transaction ownership is next. Whole-feature acceptance remains unchecked; #29 uses project In progress. Research #22 is completed/project Done; #23 remains open.
 
 - Planning wave started on 2026-10-08: `docs/plans/v2.5.0/pillar-1-implementation-queue.md` links the four code-grounded draft plans and maps remaining issue-local gates. Review recommendation is #28, #26, #24, then #25. Relevant approved decisions unlock each issue; completion of all #23 discussions is not a global prerequisite for planning or an otherwise-ready approved implementation slice.
 
@@ -83,7 +83,7 @@ Recommended first main delivery pillar. Establish runtime measurements and obser
 
 ## Planning status and approval boundaries
 
-This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 are complete and user-pushed; #22 research is complete. #29's finalized plan is approved and T1 is complete locally; T2–T5 remain pending. #18/#23/#29 stay In progress. OBS-02 storage/query/publication #30–#32 follow coordination and require their own concrete protected-boundary plans. Unrelated decisions do not reopen completed features. Epic reporting acceptance remains open until #35/#36 deliver presentation. Offline asset work and integrated validation remain #42/#83/#37.
+This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 are complete and user-pushed; #22 research is complete. #29's finalized plan is approved, T1 is user-pushed at a2f3558, and T2 is complete locally with 655 tests/coverage/lint passing; T3–T5 remain pending. #18/#23/#29 stay In progress. OBS-02 storage/query/publication #30–#32 follow coordination and require their own concrete protected-boundary plans. Unrelated decisions do not reopen completed features. Epic reporting acceptance remains open until #35/#36 deliver presentation. Offline asset work and integrated validation remain #42/#83/#37.
 
 Set active work to `In progress` in the [release project's Status field](https://github.com/orgs/Robotti-io/projects/1), alongside the supplemental `status:in-progress` issue label. Project #1 statuses for #18, #22, #23, and #26 were updated and verified on 2026-10-07. Check off completed decision/research acceptance items as evidence is recorded, and close each issue as completed only when its full deliverable and validation are satisfied. Verify project Status is `Done`, remove the progress label on closure, and synchronize this epic's child checklist and local register. Epic completion requires completion of its required children and epic acceptance outcomes.
 
