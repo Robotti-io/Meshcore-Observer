@@ -1,9 +1,42 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
 import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
+import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
+
+const validateRunStart = compileSchema(runStartSchema);
+const validateRunCheckpoint = compileSchema(runCheckpointSchema);
+const validateRunEnd = compileSchema(runEndSchema);
+const validateRunIdentity = compileSchema(runIdentitySchema);
+const validateRunPage = compileSchema(runPageSchema);
+
+function assertRunInput(validate, value) {
+  if (!validate(value)) throw new Error(`Invalid run history input: ${formatErrors(validate.errors)}`);
+  if (value.start !== undefined && value.start > value.end) throw new Error('Invalid run history input: start must not exceed end');
+}
+function wallTimeAnomaly(startedAt, previousAt, { observedAt, observedDurationMs }) {
+  return observedAt < previousAt || Math.abs(observedAt - startedAt - observedDurationMs) > 1000;
+}
+const RUN_COLUMNS = `id AS runId, instance_id AS instanceId, started_at AS startedAt,
+  last_known_alive_at AS lastKnownAliveAt, observed_duration_ms AS observedDurationMs,
+  ended_at AS endedAt, end_reason AS endReason, state, wall_time_anomaly AS wallTimeAnomaly,
+  app_version AS appVersion, node_version AS nodeVersion, platform, architecture`;
+function mapRun(row) {
+  return row ? { ...row, wallTimeAnomaly: Boolean(row.wallTimeAnomaly), durationIsLowerBound: row.state !== 'clean' } : null;
+}
+
+function explainDatabaseLock(error) {
+  // SQLite extended result codes retain the primary code in the low byte.
+  // SQLITE_BUSY (5) and SQLITE_LOCKED (6) identify contention, not corruption
+  // or missing runtime support. Preserve the original error for diagnostics.
+  if (!Number.isInteger(error.errcode) || ![5, 6].includes(error.errcode & 0xff)) return error;
+  const explained = new Error('Observer database is locked by another connection. Only one Observer can use this database at a time. Stop the other Observer instance or close external SQLite tools/scripts, then restart. Stop Observer before using external database tools. Locks release automatically when the owning process exits.', { cause: error });
+  explained.code = 'OBSERVER_DATABASE_IN_USE';
+  return explained;
+}
 
 const validateBotInteraction = compileSchema(botInteractionSchema);
 const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
@@ -424,6 +457,25 @@ const MIGRATIONS = [
       'CREATE INDEX idx_advert_events_at ON advert_events(received_at)',
       'CREATE INDEX idx_advert_events_type_at ON advert_events(type,received_at)'
     ]
+  },
+  {
+    version: 11,
+    statements: [
+      `CREATE TABLE observer_instance (id INTEGER PRIMARY KEY CHECK(id=1), instance_id TEXT NOT NULL UNIQUE)`,
+      `CREATE TABLE observer_runs (
+        id TEXT PRIMARY KEY, instance_id TEXT NOT NULL REFERENCES observer_instance(instance_id),
+        started_at INTEGER NOT NULL, last_known_alive_at INTEGER NOT NULL,
+        observed_duration_ms INTEGER NOT NULL CHECK(observed_duration_ms>=0),
+        ended_at INTEGER, end_reason TEXT, state TEXT NOT NULL CHECK(state IN ('running','clean','unclean')),
+        wall_time_anomaly INTEGER NOT NULL CHECK(wall_time_anomaly IN (0,1)),
+        app_version TEXT NOT NULL, node_version TEXT NOT NULL, platform TEXT NOT NULL, architecture TEXT NOT NULL,
+        CHECK((state='clean' AND ended_at IS NOT NULL AND end_reason IN ('SIGINT','SIGTERM'))
+          OR (state IN ('running','unclean') AND ended_at IS NULL AND end_reason IS NULL))
+      )`,
+      'CREATE INDEX idx_observer_runs_started ON observer_runs(started_at)',
+      'CREATE INDEX idx_observer_runs_state_end ON observer_runs(state,ended_at,last_known_alive_at)',
+      "CREATE UNIQUE INDEX idx_observer_runs_active ON observer_runs(state) WHERE state='running'"
+    ]
   }
 ];
 
@@ -499,6 +551,8 @@ export function resolveBucketWidthMs({ rangeMs, maxBuckets, sampleIntervalMs }) 
  */
 export class MetricsStore {
   #db;
+  #activeRunId = null;
+  #ownsRuns = false;
   #insertSampleStmt;
   #insertPacketTypeStmt;
   #insertBrokerDeliveryStmt;
@@ -521,14 +575,14 @@ export class MetricsStore {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
 
-    this.#db = new DatabaseSync(dbPath);
-    this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA foreign_keys = ON');
     try {
+      this.#db = new DatabaseSync(dbPath);
+      this.#db.exec('PRAGMA journal_mode = WAL');
+      this.#db.exec('PRAGMA foreign_keys = ON');
       this.#runMigrations();
     } catch (error) {
-      this.#db.close();
-      throw error;
+      this.#db?.close();
+      throw explainDatabaseLock(error);
     }
 
     this.#insertSampleStmt = this.#db.prepare(`
@@ -623,6 +677,117 @@ export class MetricsStore {
         throw err;
       }
     }
+  }
+
+  /** Exclusive connection ownership survives commits and releases automatically
+   * when the process/store closes. No guessed lease or host identity is involved. */
+  #acquireRunOwnership() {
+    if (this.#ownsRuns) return;
+    try {
+      this.#db.exec('PRAGMA busy_timeout=0');
+      this.#db.exec('PRAGMA locking_mode=EXCLUSIVE');
+      this.#db.exec('BEGIN EXCLUSIVE');
+      this.#db.exec('COMMIT');
+      this.#ownsRuns = true;
+    } catch (error) {
+      this.#db.exec('PRAGMA locking_mode=NORMAL');
+      const explained = explainDatabaseLock(error);
+      if (explained !== error) throw explained;
+      throw new Error('Cannot acquire exclusive Observer database ownership; stop other database users before starting', { cause: error });
+    }
+  }
+
+  /** Recover unknown prior endings and start one run atomically, before services. */
+  beginObserverRun(input) {
+    assertRunInput(validateRunStart, input);
+    if (this.#activeRunId !== null) {
+      if (this.#activeRunId === input.runId) return this.getObserverRun({ runId: input.runId });
+      throw new Error('This store already owns an Observer run');
+    }
+    this.#acquireRunOwnership();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      let instance = this.#db.prepare('SELECT instance_id FROM observer_instance WHERE id=1').get();
+      if (!instance) {
+        instance = { instance_id: randomUUID() };
+        this.#db.prepare('INSERT INTO observer_instance(id,instance_id) VALUES(1,?)').run(instance.instance_id);
+      }
+      this.#db.exec("UPDATE observer_runs SET state='unclean' WHERE state='running'");
+      this.#db.prepare(`INSERT INTO observer_runs
+        (id,instance_id,started_at,last_known_alive_at,observed_duration_ms,state,wall_time_anomaly,
+         app_version,node_version,platform,architecture) VALUES(?,?,?,?,?,'running',?,?,?,?,?)
+      `).run(input.runId, instance.instance_id, input.startedAt, input.observedAt, input.observedDurationMs,
+        wallTimeAnomaly(input.startedAt, input.startedAt, input) ? 1 : 0,
+        input.appVersion, input.nodeVersion, input.platform, input.architecture);
+      this.#db.exec('COMMIT');
+      this.#activeRunId = input.runId;
+      return this.getObserverRun({ runId: input.runId });
+    } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
+  }
+
+  checkpointObserverRun(input) {
+    assertRunInput(validateRunCheckpoint, input);
+    if (input.runId !== this.#activeRunId) return false;
+    const previous = this.getObserverRun({ runId: input.runId });
+    if (!previous || previous.state !== 'running' || input.observedDurationMs <= previous.observedDurationMs) return false;
+    const result = this.#db.prepare(`UPDATE observer_runs SET last_known_alive_at=?,observed_duration_ms=?,
+      wall_time_anomaly=MAX(wall_time_anomaly,?) WHERE id=? AND state='running'
+    `).run(input.observedAt, input.observedDurationMs,
+      wallTimeAnomaly(previous.startedAt, previous.lastKnownAliveAt, input) ? 1 : 0, input.runId);
+    return Number(result.changes) === 1;
+  }
+
+  endObserverRun(input) {
+    assertRunInput(validateRunEnd, input);
+    if (input.runId !== this.#activeRunId) return false;
+    const previous = this.getObserverRun({ runId: input.runId });
+    if (!previous || previous.state !== 'running' || input.observedDurationMs < previous.observedDurationMs) return false;
+    const result = this.#db.prepare(`UPDATE observer_runs SET state='clean',last_known_alive_at=?,
+      observed_duration_ms=?,ended_at=?,end_reason=?,wall_time_anomaly=MAX(wall_time_anomaly,?)
+      WHERE id=? AND state='running'
+    `).run(input.observedAt, input.observedDurationMs, input.observedAt, input.reason,
+      wallTimeAnomaly(previous.startedAt, previous.lastKnownAliveAt, input) ? 1 : 0, input.runId);
+    return Number(result.changes) === 1;
+  }
+
+  getObserverRun(input) {
+    assertRunInput(validateRunIdentity, input);
+    return mapRun(this.#db.prepare(`SELECT ${RUN_COLUMNS} FROM observer_runs WHERE id=?`).get(input.runId));
+  }
+
+  /** Pages select bootstrap starts, never prorated duration over uncertain wall intervals. */
+  queryObserverRuns(input) {
+    const page = { limit: 100, offset: 0, ...input };
+    assertRunInput(validateRunPage, page);
+    const where = 'WHERE started_at>=? AND started_at<? AND (? IS NULL OR state=?)';
+    const args = [page.start, page.end, page.state ?? null, page.state ?? null];
+    const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM observer_runs ${where}`).get(...args);
+    return { total: Number(total), runs: this.#db.prepare(`SELECT ${RUN_COLUMNS} FROM observer_runs ${where}
+      ORDER BY started_at DESC,id LIMIT ? OFFSET ?`).all(...args,page.limit,page.offset).map(mapRun) };
+  }
+
+  queryObserverRuntimeSummary() {
+    const row = this.#db.prepare(`SELECT COUNT(*) AS runs,COALESCE(SUM(observed_duration_ms),0) AS observedDurationMs,
+      MIN(started_at) AS earliestRunStartedAt,COALESCE(SUM(state='clean'),0) AS cleanRuns,
+      COALESCE(SUM(state='unclean'),0) AS uncleanRuns,COALESCE(SUM(state='running'),0) AS runningRuns,
+      COALESCE(MAX(wall_time_anomaly),0) AS wallTimeAnomaly FROM observer_runs`).get();
+    const instance = this.#db.prepare('SELECT instance_id AS instanceId FROM observer_instance WHERE id=1').get();
+    return { ...row, instanceId: instance?.instanceId ?? null,
+      wallTimeAnomaly: Boolean(row.wallTimeAnomaly), durationIsLowerBound: row.uncleanRuns + row.runningRuns > 0,
+      retainedHistoryOnly: true };
+  }
+
+  /** Protect actual retained FK children, including future #25 datasets. Names
+   * come from SQLite schema metadata and are quoted as identifiers, never values. */
+  #pruneEndedRuns(cutoffMs) {
+    const references = this.#db.prepare(`SELECT m.name AS tableName,f."from" AS columnName
+      FROM sqlite_schema AS m JOIN pragma_foreign_key_list(m.name) AS f
+      WHERE m.type='table' AND f."table"='observer_runs' AND (f."to"='id' OR f."to" IS NULL)`).all();
+    const quoteIdentifier = (name) => '"' + name.replaceAll('"', '""') + '"';
+    const guards = references.map((ref) => `AND NOT EXISTS(SELECT 1 FROM ${quoteIdentifier(ref.tableName)} AS child
+      WHERE child.${quoteIdentifier(ref.columnName)}=observer_runs.id)`).join(' ');
+    this.#db.prepare(`DELETE FROM observer_runs WHERE
+      ((state='clean' AND ended_at<?) OR (state='unclean' AND last_known_alive_at<?)) ${guards}`).run(cutoffMs, cutoffMs);
   }
 
   /**
@@ -1416,8 +1581,8 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Shared history retention: samples, completed replies and advert events strictly before cutoff.
-   * Inventory, direct evidence and fingerprints survive this cleanup. Pending replies are protected. */
+  /** Shared history retention: samples, completed replies, advert events and ended unreferenced runs.
+   * Inventory, direct evidence, fingerprints, active runs and pending replies survive this cleanup. */
   pruneOlderThan(cutoffMs) {
     this.#db.exec('BEGIN');
     try {
@@ -1426,6 +1591,7 @@ export class MetricsStore {
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare("DELETE FROM bot_replies WHERE status != 'pending' AND resolved_at < ?").run(cutoffMs);
       this.#db.prepare('DELETE FROM advert_events WHERE received_at < ?').run(cutoffMs);
+      this.#pruneEndedRuns(cutoffMs);
       this.#db.exec('COMMIT');
     } catch (err) {
       this.#db.exec('ROLLBACK');

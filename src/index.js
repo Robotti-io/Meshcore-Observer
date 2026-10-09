@@ -20,6 +20,8 @@ import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
 import { MetricsServer } from './web/metrics-server.js';
 import { MetricsSampler } from './metrics/sampler.js';
+import { RunHistory, createRunShutdown } from './metrics/run-history.js';
+import { performance } from 'node:perf_hooks';
 import packageInfo from '../package.json' with { type: 'json' };
 
 // src/metrics/store.js is imported dynamically - it statically imports
@@ -43,6 +45,8 @@ const SHUTDOWN_TIMEOUT_MS = 10000;
 const HEALTH_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
 async function main() {
+  const bootstrapStartedAt = Date.now();
+  const bootstrapMonotonicStartedAt = performance.now();
   let config;
   try {
     config = loadConfig();
@@ -74,9 +78,25 @@ async function main() {
   } catch (err) {
     logger.error(
       'services.metricsUi',
-      'failed to open the persisted data store - Node >=22.13.0 with node:sqlite support is now a hard requirement for this observer (see README\'s Requirements section)',
+      err.code === 'OBSERVER_DATABASE_IN_USE' ? err.message
+        : 'failed to open the persisted data store - Node >=22.13.0 with node:sqlite support is now a hard requirement for this observer (see README\'s Requirements section)',
       { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
     );
+    process.exitCode = 1;
+    return;
+  }
+
+  let runHistory;
+  try {
+    runHistory = new RunHistory({ store: metricsStore, startedAt: bootstrapStartedAt,
+      monotonicStartedAt: bootstrapMonotonicStartedAt,
+      metadata: { appVersion: packageInfo.version, nodeVersion: process.version,
+        platform: process.platform, architecture: process.arch } });
+    logger.info('services.runHistory', 'observer run started', { runId: runHistory.runId, instanceId: runHistory.instanceId });
+  } catch (error) {
+    logger.error('services.runHistory', error.code === 'OBSERVER_DATABASE_IN_USE' ? error.message
+      : 'failed to start durable Observer run history', { dbPath: config.metricsUi.dbPath, error: error.message });
+    metricsStore.close();
     process.exitCode = 1;
     return;
   }
@@ -257,11 +277,15 @@ async function main() {
   // docs/plans/feat-bot_command_to_lookup_repeater_name.md). Fire-and-
   // forget with a caught/logged rejection, matching the publish listener's
   // own pattern - a registry failure must never affect packet capture/MQTT.
-  packetPipeline.on('packet', (packet) => {
-    nodeRegistry.recordFromDecodedPacket(packet).catch((err) => {
+  const pendingNodeObservations = new Set();
+  const recordNodeObservation = (packet) => {
+    const pending = nodeRegistry.recordFromDecodedPacket(packet).catch((err) => {
       logger.warn('services.nodeRegistry', 'failed to process a possible advert', { error: err.message });
     });
-  });
+    pendingNodeObservations.add(pending);
+    pending.then(() => pendingNodeObservations.delete(pending), () => pendingNodeObservations.delete(pending));
+  };
+  packetPipeline.on('packet', recordNodeObservation);
 
   const healthLogTimer = setInterval(() => {
     logger.info('app.health', 'health snapshot', serviceHealth.snapshot());
@@ -277,6 +301,7 @@ async function main() {
     sampleIntervalMs: config.metricsUi.sampleIntervalMs,
     retentionDays: config.metricsUi.retentionDays,
     repeaterFingerprintPruneAfterDays: config.nodeObservations.repeaterFingerprintPruneAfterDays,
+    runHistory,
     logger
   });
   metricsSampler.start();
@@ -301,55 +326,33 @@ async function main() {
 
   radioManager.start();
 
-  let shuttingDown = false;
-  async function shutdown(signal) {
-    if (shuttingDown) {
-      return;
+  const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
+    teardown: async () => {
+      // Detach persistence input and stop checkpoints before asynchronous teardown.
+      packetPipeline.off('packet', recordNodeObservation);
+      metricsSampler.stop();
+      // Unsubscribe bots first, then stop outbound schedulers while storage
+      // remains available to work already in progress.
+      repeatCheckSweeper.stop();
+      for (const { bot } of bots) bot.stop();
+      await floodAdvertScheduler.stop();
+      await replyQueue.stop();
+
+      clearInterval(healthLogTimer);
+      for (const stop of stopTokenRefreshLoops) stop();
+      if (metricsServer) await metricsServer.stop();
+
+      const deviceInfo = radioManager.getDeviceInfo();
+      if (deviceInfo && mqttManager.hasAnyConnected()) {
+        await observerPublisher.publishStatus(deviceInfo, 'offline').catch((err) => {
+          logger.warn('services.mqtt', 'failed to publish offline status', { error: err.message });
+        });
+      }
+      await mqttManager.closeAll();
+      await radioManager.stop();
+      await Promise.allSettled([...pendingNodeObservations]);
     }
-    shuttingDown = true;
-    logger.info('app.bootstrap', 'shutdown signal received', { signal });
-
-    const timeout = setTimeout(() => {
-      logger.warn('app.bootstrap', 'shutdown exceeded bounded duration, forcing exit');
-      process.exit(1);
-    }, SHUTDOWN_TIMEOUT_MS);
-    timeout.unref();
-
-    // Stop accepting bot work first (docs/project_plan.spec.md Section 22):
-    // unsubscribe every bot from radio events so no new trigger can be
-    // matched, then stop both outbound schedulers so queued work cannot
-    // start while MQTT/radio are closing below.
-    repeatCheckSweeper.stop();
-    for (const { bot } of bots) {
-      bot.stop();
-    }
-    await floodAdvertScheduler.stop();
-    await replyQueue.stop();
-
-    clearInterval(healthLogTimer);
-    for (const stop of stopTokenRefreshLoops) {
-      stop();
-    }
-    if (metricsServer) {
-      await metricsServer.stop();
-    }
-    metricsSampler.stop();
-    metricsStore.close();
-
-    const deviceInfo = radioManager.getDeviceInfo();
-    if (deviceInfo && mqttManager.hasAnyConnected()) {
-      await observerPublisher.publishStatus(deviceInfo, 'offline').catch((err) => {
-        logger.warn('services.mqtt', 'failed to publish offline status', { error: err.message });
-      });
-    }
-
-    await mqttManager.closeAll();
-    await radioManager.stop();
-
-    clearTimeout(timeout);
-    logger.info('app.bootstrap', 'meshcore-observer stopped');
-    process.exitCode = 0;
-  }
+  });
 
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));

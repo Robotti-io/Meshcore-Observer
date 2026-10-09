@@ -311,3 +311,18 @@ test('always-on local maintenance preserves offline lookup and direct evidence u
     assert.equal(store.findNodesByPublicKeyPrefix(KEY)[0].name, 'Offline Summit');
   } finally { sampler?.stop(); store.close(); }
 });
+
+test('run checkpoints share sampling cadence and failures do not stop sample persistence or broadcast', async () => {
+  let checkpoints = 0; let samples = 0; let broadcasts = 0;
+  const log = silentLogger();
+  const sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot({ mqtt: {}, radioConnected: false })),
+    sampleIntervalMs: 10, retentionDays: 0, logger: log,
+    metricsStore: { recordPacketSample() { samples++; } },
+    runHistory: { checkpoint() { checkpoints++; if (checkpoints === 1) throw new Error('disk locked'); } } });
+  sampler.on('sample', () => broadcasts++);
+  sampler.start(); sampler.start(); await vi.advanceTimersByTimeAsync(30); sampler.stop();
+  await vi.advanceTimersByTimeAsync(30);
+  assert.equal(checkpoints, 3); assert.equal(samples, 3); assert.equal(broadcasts, 3);
+  assert.equal(log.calls.warn.length, 1);
+  assert.equal(log.calls.warn[0].source, 'services.runHistory');
+});

@@ -43,6 +43,7 @@ function inspect(path, read) {
 function makeV9(path) {
   close(open(path));
   inspect(path, (db) => db.exec(`
+    DROP TABLE observer_runs; DROP TABLE observer_instance;
     DROP TABLE advert_events; DROP TABLE advert_fingerprints;
     ALTER TABLE nodes RENAME TO nodes_v10;
     CREATE TABLE nodes(public_key_hex TEXT PRIMARY KEY,name TEXT NOT NULL,type TEXT,
@@ -215,7 +216,7 @@ test('migration 10 preserves legacy data without inventing history or direct evi
   store.recordVerifiedAdvert(evidence('fresh', { name: null }));
   assert.equal(store.queryNodes({ limit: 100, offset: 0 }).nodes[0].name, 'Legacy');
   assert.equal(store.queryAdvertTotals(RANGE).newDiscoveries, 0);
-  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 10);
+  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 11);
 });
 
 test('late migration failure rolls back the node rebuild and all new tables', () => {

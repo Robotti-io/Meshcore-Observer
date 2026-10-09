@@ -1,0 +1,41 @@
+// Test-only entrypoint harness: no hardware, broker or internet connection.
+import { RadioManager } from '../../src/radio/radio-manager.js';
+import { NodeRegistry } from '../../src/nodes/node-registry.js';
+import { MetricsStore } from '../../src/metrics/store.js';
+import { advertSigner, signedAdvertPacket } from './signed-advert.js';
+
+const mode = process.argv[2];
+let store; let releaseStop; let releaseAdvert;
+const originalBegin = MetricsStore.prototype.beginObserverRun;
+MetricsStore.prototype.beginObserverRun = function (input) {
+  const result = originalBegin.call(this, input); store = this; return result;
+};
+const stopGate = new Promise((resolve) => { releaseStop = resolve; });
+const advertGate = new Promise((resolve) => { releaseAdvert = resolve; });
+if (mode === 'pending-advert') {
+  const originalRecord = NodeRegistry.prototype.recordFromDecodedPacket;
+  NodeRegistry.prototype.recordFromDecodedPacket = async function (packet) {
+    await advertGate; return originalRecord.call(this, packet);
+  };
+}
+RadioManager.prototype.getDeviceInfo = () => ({ name: 'Offline Observer', publicKey: 'CD'.repeat(32) });
+RadioManager.prototype.start = function () {
+  if (mode === 'pending-advert') {
+    const packet = signedAdvertPacket(advertSigner().payload({ name: 'Saved before stop' }));
+    this.emit('radio.packet', { raw: Buffer.from(packet.raw, 'hex'), lastSnr: -1, lastRssi: -100 });
+  }
+  process.send({ ready: true });
+};
+RadioManager.prototype.stop = async () => { if (mode === 'delayed-stop') await stopGate; };
+const originalClose = MetricsStore.prototype.close;
+MetricsStore.prototype.close = function () {
+  originalClose.call(this);
+  if (store === this && process.connected) process.disconnect();
+};
+process.on('message', (message) => {
+  if (message.action === 'snapshot') process.send({ snapshot: store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }),
+    summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER') });
+  if (message.action === 'stop') process.emit('SIGINT');
+  if (message.action === 'release') { releaseStop(); releaseAdvert(); }
+});
+await import('../../src/index.js');

@@ -570,6 +570,53 @@ Inventory persistence therefore does not imply continued region-query
 eligibility. This release issue provides evidence for #31; it sends no region
 queries itself.
 
+Observer process history is also always on. Migration 11 adds a database-local
+instance UUID and per-start run UUID without manufacturing legacy run history.
+Each run records application/Node versions, platform/architecture, bootstrap
+start, last successful alive checkpoint and observed elapsed milliseconds.
+It stores no host identity, PID, credentials or configuration dump. A copied
+database copies its instance/history; a new database starts a new identity.
+
+Elapsed runtime uses a monotonic clock, including validated bootstrap time.
+Wall timestamps label observations; backward timestamps or drift greater than
+one second between wall time and monotonic elapsed time flag a discontinuity.
+That flag is evidence of uncertainty rather than an inferred exact timeline.
+The existing configurable sample interval also checkpoints runs, with no extra
+timer, and failures log a warning while preserving the previous checkpoint.
+Local run collection continues with the dashboard off and without brokers.
+
+Only successful bounded teardown records a `clean` end (`SIGINT`/`SIGTERM`),
+after schedulers/services and pending advert verification finish, before storage
+closes. A failed or timed-out teardown does not claim success; the ten-second
+shutdown bound remains in effect. On restart, an unclosed run becomes `unclean`
+with its end time left null. Its persisted duration is a lower bound, not an
+invented death time; downtime between runs is never added.
+
+One active Observer per database is enforced by SQLite exclusive connection
+ownership before run recovery. The operating system releases ownership on
+process death, without a lease, network coordination or manual stale-lock-file
+cleanup. **External SQLite tools/readers require the Observer stopped** before
+opening the same file; the optional dashboard uses the owning connection.
+If startup encounters a database lock, its error explains the single-Observer
+limit and asks you to stop the other instance or close external SQLite
+tools/scripts before restarting. It also explains that ownership releases
+automatically when the owning process exits.
+Keep SQLite on storage that supports its normal local locking/WAL guarantees.
+This change does not add an online database backup/export interface.
+
+Internal `queryObserverRuns` pages select bootstrap starts in `[start,end)` with
+a 200-row maximum; they do not prorate runtime across uncertain wall-clock
+intervals. `queryObserverRuntimeSummary` reports retained observed duration,
+earliest retained start, clean/unclean/running counts and lower-bound/clock flags.
+It always labels its scope as retained history, never an all-installation
+lifetime total. Shared `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` defaults to
+unlimited: clean runs expire by end time, recovered unclean runs by last-known
+alive time, strictly before the cutoff. Running runs, instance identity and
+parents referenced by retained SQLite foreign-key children survive cleanup.
+Future process datasets must expire children before parent cleanup. Public
+run reporting and dashboard integration remain #35/#36; process resource/events
+are #25.
+
 The `HOST`/`PORT`/`MAX_CHART_BUCKETS` variables below only matter when the
 HTTP dashboard itself is enabled; `DB_PATH`/`SAMPLE_INTERVAL_MS`/
 `RETENTION_DAYS` are always in effect (they configure the always-on data

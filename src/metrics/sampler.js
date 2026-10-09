@@ -20,19 +20,21 @@ export class MetricsSampler extends EventEmitter {
   #sampleIntervalMs;
   #retentionDays;
   #repeaterFingerprintPruneAfterDays;
+  #runHistory;
   #logger;
   #timer = null;
   #lastSnapshot = null;
   #lastPrunedAt = null;
 
-  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, logger: object}} options */
-  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0, logger }) {
+  /** @param {{serviceHealth: object, metricsStore: object, sampleIntervalMs: number, retentionDays: number, repeaterFingerprintPruneAfterDays?: number, runHistory?: object, logger: object}} options */
+  constructor({ serviceHealth, metricsStore, sampleIntervalMs, retentionDays, repeaterFingerprintPruneAfterDays = 0, runHistory = null, logger }) {
     super();
     this.#serviceHealth = serviceHealth;
     this.#metricsStore = metricsStore;
     this.#sampleIntervalMs = sampleIntervalMs;
     this.#retentionDays = retentionDays;
     this.#repeaterFingerprintPruneAfterDays = repeaterFingerprintPruneAfterDays;
+    this.#runHistory = runHistory;
     this.#logger = logger;
   }
 
@@ -55,6 +57,11 @@ export class MetricsSampler extends EventEmitter {
 
   #tick() {
     const snapshot = this.#serviceHealth.snapshot();
+    try {
+      this.#runHistory?.checkpoint();
+    } catch (error) {
+      this.#logger.warn('services.runHistory', 'failed to persist run checkpoint', { error: error.message });
+    }
     this.#recordSample(snapshot);
     this.#maybePrune();
     this.#lastSnapshot = snapshot;
