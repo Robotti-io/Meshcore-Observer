@@ -21,6 +21,11 @@ export class AirtimeCoordinator {
     this.#lastActivityAt = this.#now();
   }
 
+  /** Read-only admission check; actual reservation still occurs at dispatch. */
+  canRunWhenQuiet() {
+    return !this.#sending && this.#now() - this.#lastActivityAt >= this.#quietMs;
+  }
+
   /**
    * Starts one outbound operation if the shared channel has been quiet long
    * enough and no other transmission owns the reservation. Returns null
@@ -35,7 +40,7 @@ export class AirtimeCoordinator {
    * @returns {Promise<T>|null}
    */
   tryRunWhenQuiet(send) {
-    if (this.#sending || this.#now() - this.#lastActivityAt < this.#quietMs) {
+    if (!this.canRunWhenQuiet()) {
       return null;
     }
 

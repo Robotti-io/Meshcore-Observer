@@ -15,6 +15,7 @@ import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
+import { RemoteRequestCoordinator } from './radio/remote-request-coordinator.js';
 import { NodeRegistry } from './nodes/node-registry.js';
 import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
@@ -146,6 +147,17 @@ async function main() {
     intervalHours: config.floodAdvert.intervalHours
   });
   floodAdvertScheduler.start();
+
+  // One idle owner shared by future discovery/telemetry producers. There is
+  // no polling here; pending durable foreground work wins every admission.
+  const remoteRequestCoordinator = new RemoteRequestCoordinator({
+    radio: radioManager, airtimeCoordinator, logger, ...config.remoteRequests,
+    hasForegroundWork: () => {
+      if (replyQueue.size > 0) return true;
+      const status = metricsStore.getFloodAdvertState().status;
+      return status === 'pending' || status === 'sending';
+    }
+  });
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
   // JWT auth seam, kept separate from generic MQTT connection code per
@@ -349,6 +361,9 @@ async function main() {
       runtimeEvents.stop();
       metricsSampler.flushProcessSample();
       metricsSampler.flushTopologyCoverage();
+      // Cancel background ownership before outbound schedulers await commands,
+      // then retire the radio later under the existing shutdown deadline.
+      await remoteRequestCoordinator.stop();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.
       repeatCheckSweeper.stop();

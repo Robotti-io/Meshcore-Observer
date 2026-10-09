@@ -3,6 +3,8 @@ import { RadioManager } from '../../src/radio/radio-manager.js';
 import { NodeRegistry } from '../../src/nodes/node-registry.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { advertSigner, signedAdvertPacket } from './signed-advert.js';
+import { RemoteRequestCoordinator } from '../../src/radio/remote-request-coordinator.js';
+import { RemoteRequestBudget } from '../../src/radio/remote-request-budget.js';
 
 const mode = process.argv[2];
 let store; let radio; let releaseStop; let releaseAdvert;
@@ -12,6 +14,28 @@ MetricsStore.prototype.beginObserverRun = function (input) {
 };
 const stopGate = new Promise((resolve) => { releaseStop = resolve; });
 const advertGate = new Promise((resolve) => { releaseAdvert = resolve; });
+if (mode === 'remote-lifecycle') {
+  const originalTry = RemoteRequestCoordinator.prototype.tryRequest;
+  const originalStop = RemoteRequestCoordinator.prototype.stop;
+  let automaticRequests = 0;
+  RemoteRequestCoordinator.prototype.tryRequest = function (...args) { automaticRequests++; return originalTry.call(this, ...args); };
+  // Probe the actual entrypoint foreground closure without waiting one
+  // minute or permitting a send. Every probe has pending foreground work.
+  RemoteRequestBudget.prototype.canAttempt = () => true;
+  RadioManager.prototype.getConnectionSnapshot = () => ({ generation: 1, ready: true, observerPublicKey: 'CD'.repeat(32) });
+  RemoteRequestCoordinator.prototype.stop = async function () {
+    const dto = { requestId: '12345678-1234-4abc-8def-123456789abc', targetPublicKey: 'AC'.repeat(32), operation: 'status', params: {} };
+    const count = MetricsStore.prototype.countPendingReplyItems;
+    MetricsStore.prototype.countPendingReplyItems = () => 1;
+    const replies = await originalTry.call(this, dto);
+    MetricsStore.prototype.countPendingReplyItems = count;
+    store.requestFloodAdvert(Date.now()); const pending = await originalTry.call(this, dto);
+    store.startFloodAdvertAttempt(Date.now()); const sending = await originalTry.call(this, dto);
+    await originalStop.call(this);
+    process.send({ remoteStopping: true, automaticRequests, replies: replies.reason, pending: pending.reason, sending: sending.reason });
+    await stopGate;
+  };
+}
 if (mode === 'pending-advert') {
   const originalRecord = NodeRegistry.prototype.recordFromDecodedPacket;
   NodeRegistry.prototype.recordFromDecodedPacket = async function (packet) {
@@ -27,7 +51,10 @@ RadioManager.prototype.start = function () {
   }
   process.send({ ready: true });
 };
-RadioManager.prototype.stop = async () => { if (mode === 'delayed-stop') await stopGate; };
+RadioManager.prototype.stop = async () => {
+  if (mode === 'delayed-stop') await stopGate;
+  if (mode === 'remote-lifecycle') process.send({ radioStopping: true });
+};
 const originalClose = MetricsStore.prototype.close;
 MetricsStore.prototype.close = function () {
   originalClose.call(this);

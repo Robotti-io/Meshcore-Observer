@@ -4,7 +4,8 @@ import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { assertRemoteRequest, prepareRemoteRequest } from './remote-request.js';
 import { parseRemoteResponseFrame } from './remote-response-parser.js';
 import { remoteResponseFrameSchema } from './remote-request-schemas.js';
-import { remoteCoordinatorLimitsSchema, remoteDispatchOptionsSchema, remoteBinaryHeaderSchema } from './remote-coordinator-schemas.js';
+import { remoteCoordinatorLimitsSchema, remoteDispatchOptionsSchema, remoteBinaryHeaderSchema, REMOTE_REQUEST_DEFAULTS } from './remote-coordinator-schemas.js';
+import { RemoteRequestBudget } from './remote-request-budget.js';
 
 const limitsValid = compileSchema(remoteCoordinatorLimitsSchema);
 const optionsValid = compileSchema(remoteDispatchOptionsSchema);
@@ -13,7 +14,7 @@ const binaryHeaderValid = compileSchema(remoteBinaryHeaderSchema);
 const recoveryStatuses = new Set(['reset', 'stale-generation', 'close-failed', 'close-timeout']);
 
 /** One remote lease, separate from the command queue's short ACK transaction.
- * No polls, automatic retries, contacts, storage or application wiring here.
+ * No polls, automatic retries, contacts or storage ownership here.
  */
 export class RemoteRequestCoordinator {
   #radio;
@@ -26,15 +27,33 @@ export class RemoteRequestCoordinator {
   #retired = new Map();
   #stopped = false;
   #recoveryFailed = false;
+  #airtime;
+  #hasForegroundWork;
+  #budget;
+  #logger;
 
-  constructor({ radio, ackTimeoutMs, responseTimeoutMaxMs,
-    now = () => performance.now(), uniquenessBytes = () => Array.from(randomBytes(4)) }) {
-    const limits = { ackTimeoutMs, responseTimeoutMaxMs };
+  constructor({ radio, airtimeCoordinator, hasForegroundWork, logger,
+    ackTimeoutMs = REMOTE_REQUEST_DEFAULTS.ackTimeoutMs,
+    responseTimeoutMaxMs = REMOTE_REQUEST_DEFAULTS.responseTimeoutMaxMs,
+    minIntervalMs = REMOTE_REQUEST_DEFAULTS.minIntervalMs, maxPerMinute = REMOTE_REQUEST_DEFAULTS.maxPerMinute,
+    now = () => performance.now(), uniquenessBytes = () => Array.from(randomBytes(4)), budget }) {
+    const limits = { ackTimeoutMs, responseTimeoutMaxMs, minIntervalMs, maxPerMinute };
     if (!limitsValid(limits)) throw new Error(`Invalid remote request limits: ${formatErrors(limitsValid.errors)}`);
+    if (typeof airtimeCoordinator?.canRunWhenQuiet !== 'function'
+      || typeof airtimeCoordinator?.tryRunWhenQuiet !== 'function'
+      || typeof hasForegroundWork !== 'function' || typeof logger?.warn !== 'function' || typeof logger?.info !== 'function') {
+      throw new Error('Remote request coordination requires shared airtime, foreground policy and structured logging');
+    }
     this.#radio = radio;
     this.#limits = limits;
     this.#now = now;
     this.#uniquenessBytes = uniquenessBytes;
+    this.#airtime = airtimeCoordinator;
+    this.#hasForegroundWork = hasForegroundWork;
+    this.#logger = logger;
+    // The injectable policy isolates ownership tests. Runtime always creates
+    // the validated bounded budget here; producer DTOs cannot replace it.
+    this.#budget = budget ?? new RemoteRequestBudget({ minIntervalMs, maxPerMinute, now: () => this.#time() });
   }
 
   /** Trusted eligibility is executable policy, separate from the DTO.
@@ -57,8 +76,16 @@ export class RemoteRequestCoordinator {
     const snapshot = this.#radio.getConnectionSnapshot();
     if (snapshot.generation === null) return this.#defer('disconnected');
     if (!snapshot.ready) return this.#defer('not-ready');
+    const admission = this.#admissionReason();
+    if (admission) return this.#defer(admission);
+    if (!this.#airtime.canRunWhenQuiet()) return this.#defer('quiet-air');
     try { if (isEligible(descriptor, snapshot) !== true) return this.#defer('ineligible'); }
-    catch { return Promise.resolve({ status: 'failed', reason: 'eligibility-error' }); }
+    catch {
+      this.#logger.warn('services.remoteRequests', 'remote request eligibility check failed', {
+        requestId: descriptor.requestId, operation: descriptor.operation, phase: 'admission', outcome: 'eligibility-error'
+      });
+      return Promise.resolve({ status: 'failed', reason: 'eligibility-error' });
+    }
     if (this.#stopped) return this.#defer('stopped');
     if (this.#current || this.#commandPending) return this.#defer('busy');
     if (!this.#isGeneration(snapshot.generation)) return this.#defer('disconnected');
@@ -103,6 +130,12 @@ export class RemoteRequestCoordinator {
 
   #defer(reason) { return Promise.resolve({ status: 'deferred', reason }); }
 
+  #admissionReason() {
+    try { if (this.#hasForegroundWork() !== false) return 'foreground'; }
+    catch { return 'foreground'; } // Unknown priority state defers without RF/log storms.
+    return this.#budget.canAttempt() ? null : 'rate-limited';
+  }
+
   #time() {
     this.#lastTime = Math.max(this.#lastTime, this.#now());
     return this.#lastTime;
@@ -138,6 +171,22 @@ export class RemoteRequestCoordinator {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
+    const admission = this.#admissionReason();
+    if (admission) { this.#finish(current, 'deferred', admission); return; }
+    const attempt = this.#airtime.tryRunWhenQuiet(() => this.#send(current, connection, transaction));
+    if (!attempt) { this.#finish(current, 'deferred', 'quiet-air'); return; }
+    return attempt;
+  }
+
+  #send(current, connection, transaction) {
+    // Airtime's callback is deferred by a microtask. Check again at the
+    // physical-send boundary so new priority work or stop cannot slip past.
+    if (this.#current !== current || current.phase !== 'queued' || this.#expired(current)) return;
+    if (transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+      this.#finish(current, 'failed', 'disconnected'); return;
+    }
+    const admission = this.#admissionReason();
+    if (admission) { this.#finish(current, 'deferred', admission); return; }
     try {
       if (current.isEligible(current.descriptor, this.#radio.getConnectionSnapshot()) !== true) {
         this.#finish(current, 'deferred', 'ineligible');
@@ -148,6 +197,14 @@ export class RemoteRequestCoordinator {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
+    // Eligibility is trusted executable policy; recheck priority after it.
+    const finalAdmission = this.#admissionReason();
+    if (finalAdmission) { this.#finish(current, 'deferred', finalAdmission); return; }
+    if (this.#current !== current || transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+      this.#finish(current, 'failed', 'disconnected'); return;
+    }
+    if (this.#expired(current)) return;
+    if (!this.#budget.recordAttempt()) { this.#finish(current, 'deferred', 'rate-limited'); return; }
     current.phase = 'ack';
     current.connection = connection;
     current.signal = transaction.signal;
@@ -167,7 +224,17 @@ export class RemoteRequestCoordinator {
         if (this.#current === current && current.phase === 'ack') this.#recover(current, 'write-error', 'write-error');
       });
     } catch { this.#recover(current, 'write-error', 'write-error'); }
-    return current.acknowledgement;
+    // Recovery may abort the generation before its close promise settles.
+    // Release the airtime reservation on that proof of termination, even
+    // when the uncertain ACK promise deliberately remains held fail-closed.
+    if (transaction.signal.aborted) return;
+    let onTerminated;
+    const terminated = new Promise(resolve => {
+      onTerminated = resolve;
+      transaction.signal.addEventListener('abort', onTerminated, { once: true });
+    });
+    return Promise.race([current.acknowledgement, terminated]).finally(() =>
+      transaction.signal.removeEventListener('abort', onTerminated));
   }
 
   #onFrame(current, bytes) {
@@ -235,6 +302,15 @@ export class RemoteRequestCoordinator {
     }
     this.#current = null;
     if (releaseCommand) current.releaseCommand();
+    if (status !== 'deferred') {
+      this.#logger[status === 'completed' ? 'info' : 'warn']('services.remoteRequests',
+        status === 'completed' ? 'remote request completed' : 'remote request failed', {
+          requestId: current.context.requestId, operation: current.context.operation,
+          generation: current.context.generation, phase: current.phase, outcome: reason ?? status,
+          ...(current.route ? { route: current.route } : {}),
+          ...(extra.recovery ? { recovery: extra.recovery } : {})
+        });
+    }
     current.resolveCompletion({ status, ...(reason ? { reason } : {}), context: current.context,
       ...(current.tag !== null ? { tag: current.tag, route: current.route } : {}), ...extra });
   }
@@ -243,6 +319,16 @@ export class RemoteRequestCoordinator {
     if (this.#current !== current || current.phase === 'recovery') return;
     current.phase = 'recovery';
     this.#detach(current);
+    const explanations = {
+      'ack-timeout': 'Remote request acknowledgement timed out; the captured radio connection is being reset to prevent incorrect command attribution.',
+      'write-error': 'Remote request write failed; the captured radio connection is being reset because acknowledgement ownership is uncertain.',
+      'protocol-error': 'Remote request acknowledgement was malformed; the captured radio connection is being reset to prevent incorrect command attribution.',
+      'request-cancelled': 'Remote request stopped before acknowledgement; the captured radio connection is being reset because acknowledgement ownership is uncertain.'
+    };
+    this.#logger.warn('services.remoteRequests', explanations[invalidationReason], {
+      requestId: current.context.requestId, operation: current.context.operation,
+      generation: current.context.generation, phase: 'ack', outcome: reason
+    });
     // T2 retires the generation before the command can settle/reuse the queue.
     Promise.resolve().then(() => this.#radio.invalidateConnection({ generation: current.context.generation,
       reason: invalidationReason })).then((result) => {

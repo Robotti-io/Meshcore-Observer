@@ -30,6 +30,32 @@ test('invalid topology configuration fails before database/hardware/network star
   assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH), false);
   assert.doesNotMatch(result.stdout + result.stderr, /failed to open tcp connection/);
 });
+
+test('invalid remote overrides fail before store creation and hardware/network startup', () => {
+  for (const overrides of [{ PACKETCAPTURE_REMOTE_REQUEST_ACK_TIMEOUT_MS: '' },
+    { PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS: '0' },
+    { PACKETCAPTURE_REMOTE_REQUEST_MIN_INTERVAL_MS: '1.5' },
+    { PACKETCAPTURE_REMOTE_REQUEST_MAX_PER_MINUTE: '7' }]) {
+    const env = { ...environment(), ...overrides };
+    const result = spawnSync(process.execPath, [resolve('src/index.js')], { env, cwd: process.cwd(), encoding: 'utf8', timeout: 3000 });
+    assert.equal(result.status, 1); assert.match(result.stdout + result.stderr, /Configuration error:/);
+    assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH), false);
+    assert.doesNotMatch(result.stdout + result.stderr, /meshcore-observer starting|failed to open tcp connection/);
+  }
+});
+
+test('offline UI-disabled entrypoint constructs idle remote ownership and drains it before radio/storage teardown', async () => {
+  const env = { ...environment(), PACKETCAPTURE_BOT_REPLY_QUIET_MS: '0',
+    PACKETCAPTURE_REMOTE_REQUEST_ACK_TIMEOUT_MS: '1000', PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS: '2000',
+    PACKETCAPTURE_REMOTE_REQUEST_MIN_INTERVAL_MS: '10000', PACKETCAPTURE_REMOTE_REQUEST_MAX_PER_MINUTE: '6' };
+  const child = launch(env, 'remote-lifecycle'); await child.next(); child.process.send({ action: 'stop' });
+  assert.deepEqual(await child.next(), { remoteStopping: true, automaticRequests: 0, replies: 'foreground', pending: 'foreground', sending: 'foreground' });
+  const waiting = await snapshot(child); assert.equal(waiting.snapshot.runs[0].state, 'running');
+  assert.equal(waiting.snapshot.runs[0].endedAt, null);
+  child.process.send({ action: 'release' }); assert.deepEqual(await child.next(), { radioStopping: true });
+  assert.equal((await child.exited).code, 0);
+  read(env, store => assert.equal(store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }).runs[0].state, 'clean'));
+});
 test('offline dashboard-disabled topology persists bounded duplicate receptions and final coverage, then survives restart unchanged', async () => {
   const env = { ...environment(), PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE: '2' };
   const child = launch(env); await child.next();

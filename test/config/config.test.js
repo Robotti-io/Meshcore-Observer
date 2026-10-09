@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadConfig, ConfigError } from '../../src/config/index.js';
+import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS } from '../../src/radio/remote-coordinator-schemas.js';
 
 function withTempBotsFile(content, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'meshcore-config-'));
@@ -60,6 +61,32 @@ function baseEnv(overrides = {}) {
     ...overrides
   };
 }
+
+test('remote request defaults agree in normalized configuration and the example, and accept every boundary', () => {
+  assert.deepEqual(loadConfig(baseEnv()).remoteRequests, REMOTE_REQUEST_DEFAULTS);
+  const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+  const exampleEnv = {};
+  for (const [field, key] of Object.entries(REMOTE_REQUEST_ENV_KEYS)) {
+    const matches = [...example.matchAll(new RegExp(`^${key}=(\\d+)$`, 'gm'))];
+    assert.equal(matches.length, 1); exampleEnv[key] = matches[0][1];
+    assert.equal(Number(matches[0][1]), REMOTE_REQUEST_DEFAULTS[field]);
+  }
+  assert.deepEqual(loadConfig(baseEnv(exampleEnv)).remoteRequests, REMOTE_REQUEST_DEFAULTS);
+  for (const [field, values] of Object.entries({ ackTimeoutMs: [1000, 30000], responseTimeoutMaxMs: [1000, 120000],
+    minIntervalMs: [10000, 3600000], maxPerMinute: [1, 6] })) {
+    for (const value of values) assert.equal(loadConfig(baseEnv({ [REMOTE_REQUEST_ENV_KEYS[field]]: ` ${value} ` })).remoteRequests[field], value);
+  }
+});
+
+test('remote request overrides strictly reject blanks, fractions, types and out-of-range values without echoing content', () => {
+  for (const [field, outOfRange] of Object.entries({ ackTimeoutMs: [999, 30001], responseTimeoutMaxMs: [999, 120001],
+    minIntervalMs: [9999, 3600001], maxPerMinute: [0, 7] })) {
+    const key = REMOTE_REQUEST_ENV_KEYS[field];
+    for (const value of ['', ' ', '-1', '0', '1.5', '1e4', 'Infinity', 'SECRET-NOT-AN-INTEGER', null, 123, {}, ...outOfRange.map(String)]) {
+      assert.throws(() => loadConfig(baseEnv({ [key]: value })), error => error instanceof ConfigError && !error.message.includes('SECRET-NOT-AN-INTEGER'));
+    }
+  }
+});
 
 test('topology settings default independently, match example configuration and accept whole-unit overrides', () => {
   assert.deepEqual(loadConfig(baseEnv()).topology, { freshnessWindowMs: 72 * 3600000, maxObservationsPerMinute: 600, pruneAfterDays: 0 });

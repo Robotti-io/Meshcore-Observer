@@ -3,6 +3,7 @@ import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { configSchema } from './schema.js';
 import { loadBotsConfig } from '../bots/bots-config-loader.js';
 import { loadBrokersConfig } from '../mqtt/brokers-config-loader.js';
+import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS, remoteRequestEnvSchema } from '../radio/remote-coordinator-schemas.js';
 
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
 const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
@@ -15,6 +16,7 @@ export class ConfigError extends Error {
 }
 
 const validate = compileSchema(configSchema);
+const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
 
 function readString(env, key, fallback = null) {
   const value = env[key];
@@ -119,6 +121,14 @@ function readBotReplyQueue(env) {
 
 function readFloodAdvert(env) {
   return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 47) };
+}
+
+function readRemoteRequests(env) {
+  const raw = Object.fromEntries(Object.values(REMOTE_REQUEST_ENV_KEYS)
+    .filter(key => env[key] !== undefined).map(key => [key, env[key]]));
+  if (!remoteEnvValid(raw)) throw new ConfigError(`Invalid remote request environment: ${formatErrors(remoteEnvValid.errors)}`);
+  return Object.fromEntries(Object.entries(REMOTE_REQUEST_ENV_KEYS).map(([field, key]) =>
+    [field, raw[key] === undefined ? REMOTE_REQUEST_DEFAULTS[field] : Number.parseInt(raw[key].trim(), 10)]));
 }
 
 function readNodeObservations(env) {
@@ -253,7 +263,8 @@ export function loadConfig(env = process.env) {
     botReplyQueue: readBotReplyQueue(env),
     floodAdvert: readFloodAdvert(env),
     nodeObservations: readNodeObservations(env),
-    topology: readTopology(env)
+    topology: readTopology(env),
+    remoteRequests: readRemoteRequests(env)
   };
 
   if (config.radio.type === 'serial' && config.radio.serialPorts.length === 0) {
