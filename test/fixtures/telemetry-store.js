@@ -48,3 +48,20 @@ export function telemetrySnapshot(db) {
   return Object.fromEntries(['telemetry_query_outcomes', 'telemetry_observations', 'telemetry_latest']
     .map(table => [table, db.prepare('SELECT * FROM '+table).all().map(row => ({ ...row }))]));
 }
+
+// Synthetic lifecycle corpus spanning each supported interpretation and
+// failure/partial/empty scope. No producer or deployed-radio fixture implied.
+export function telemetryLifecycleResults(run, at) {
+  return [
+    telemetryResult(run,{component:'status',observedAt:at}),
+    telemetryResult(run,{component:'status',layout:'current56',body:telemetryBytes(telemetryWire.status56),observedAt:at+1}),
+    telemetryResult(run,{component:'status',evidence:'unknown',observedAt:at+2}),
+    telemetryResult(run,{observedAt:at+3}),
+    telemetryResult(run,{body:[...telemetryBytes(telemetryWire.sensors),5,250],observedAt:at+4}),
+    telemetryResult(run,{status:'failed',observedAt:at+5}),
+    telemetryResult(run,{status:'unsupported',observedAt:at+6}),
+    telemetryResult(run,{component:'neighbours',observedAt:at+7}),
+    telemetryResult(run,{component:'neighbours',body:[0,0,0,0],observedAt:at+8}),
+    telemetryResult(run,{component:'neighbours',offset:1,body:[1,0,0,0],observedAt:at+9})
+  ];
+}

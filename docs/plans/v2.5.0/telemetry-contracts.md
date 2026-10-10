@@ -1,8 +1,9 @@
-# Telemetry contracts, decoding and owned storage — #33 T1–T3
+# Telemetry contracts, decoding, owned storage and reads — #33 T1–T5
 
 These internal contracts define the inputs to the pure decoders and owned
 telemetry store. T1 supplies contracts/configuration, T2 the pure parsers, and
-T3 migration 16 and owned writes/retention. No poller or public API is installed.
+T3 migration 16 and owned writes/retention, T4 bounded internal reads, and T5
+offline lifecycle/compatibility proof. No poller or public API is installed.
 All schemas live in `src/telemetry/telemetry-schemas.js`; use
 `assertTelemetryInput`/`assertTelemetryResult` from `telemetry-validation.js`
 so strict shared AJV validation always precedes semantic checks. Errors contain
@@ -224,8 +225,8 @@ children are gone. Failure in telemetry or another dataset's shared cleanup
 rolls back all attempted deletions. Save-first retention can deliberately keep
 data older than the configured history duration; it is not a disk-size cap.
 
-The internal range/latest read contracts are implemented in T4, and integrated entrypoint
-backup/restart/operational acceptance remains T5. T3 fixtures prove isolated
+The internal range/latest read contracts are implemented in T4; T5 proves integrated entrypoint
+backup/restart/operational acceptance. T3 fixtures prove isolated
 fresh/older-schema upgrades, transaction failures, reopen ownership, source-run
 protection and prune behavior; they do not complete #33 or establish live RF.
 
@@ -297,5 +298,61 @@ closed type branches; equivalence tests preserve the former oneOf acceptance
 contract while avoiding validation of every other sensor type per reading.
 
 No new migration, endpoint, dashboard, aggregation, producer, credentials or RF
-activation accompanies these internal reads. T5 retains integrated entrypoint,
+activation accompanies these internal reads. T5 verifies integrated entrypoint,
 backup and final feature acceptance; #34/#35/#36/#37 keep their separate scopes.
+
+## Offline operation, upgrade and recovery (#33 T5)
+
+The dataset belongs to the always-on Observer store, independently of internet,
+broker connections and the optional dashboard. A fresh installation and
+synthetic upgrades from schema 13, 14 and 15 reach schema 16 without inventing
+telemetry or losing saved capture/inventory/topology evidence. Existing schema
+16 installations retain telemetry across clean shutdown and abrupt process
+death. Restart creates a new run while saved request/run/reporter/target IDs,
+receipt/completion times, variants, units, partial/empty/failure data and both
+latest pointers remain original. Unclean runs describe observed lower bounds;
+restart does not assert success for an interrupted remote request.
+
+No telemetry producer runs in this feature. Supported normalized data is saved
+only when submitted through the owned store seam; #34 will establish deployed
+profile/permission/route context and collection policy. T5 tests use source
+derived synthetic byte fixtures and test-only radio substitution around the
+real entrypoint. They make no deployed firmware, RF reachability, guest access,
+container performance or downstream ingestion claim; #37 retains that proof.
+
+The normal sampler applies `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` regardless
+of dashboard/broker state: **0 means indefinite**; positive values opt into
+days-based historical pruning at its existing maintenance cadence. Code and
+example defaults match. Protected latest useful and latest fully decoded
+records, outcomes and source runs remain even when stale or empty. Pruning may
+remove old unreferenced failures while preserving the snapshot's owning
+outcome; consequently `latestOutcome` means latest **retained** outcome, not an
+immutable last-attempt ledger or proof that no later failed attempts existed.
+`historyCompleteness:'unknown'` remains honest after pruning. Additional exact
+variants/reporters and both snapshot types can grow retained volume; monitor
+free space. Pruning is synchronous maintenance and usually frees SQLite pages
+for reuse rather than shrinking the database file. Unlimited save-first
+retention and protected snapshots are not a global disk cap.
+
+For an upgrade/backup, stop every Observer using the volume, confirm orderly
+closure and preserve a consistent closed, checkpointed database with the
+matching application version/configuration. Do not copy only the main database
+while a live WAL may contain committed data, delete sidecars to force a backup,
+lower `user_version` or remove tables. T5 proves a file copy only **after** the
+synthetic Observer closed and its WAL disappeared; restore uses the real
+entrypoint on an isolated temporary path and verifies original data/source
+identity and foreign keys. Keep the upgraded data before any rollback/restore;
+an older backup cannot contain observations accepted after it was taken. Start
+only one writer against the restored volume, using SQLite-compatible local
+locking/WAL storage. No online backup/export or production restore is added.
+
+Explicit invalid freshness values fail configuration before database creation,
+hardware or network startup; omission defaults to 72 hours. Unopenable/corrupt
+storage and migration failure are fatal before radio/broker/HTTP lifecycle.
+Migration failure rolls back the schema/version and releases ownership, so an
+operator can preserve the database, diagnose the reported cause and retry
+after repair. A competing writer gets the existing clear one-Observer/close
+SQLite-tools/restart message. Do not purge saved data to resolve an ownership
+lock; locks release when the owner exits. Normal passive capture/resource
+sampling continues alongside retained telemetry. These checks introduce no
+new configuration, storage migration, RF/auth/API, logging or deployment change.

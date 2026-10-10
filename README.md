@@ -895,7 +895,7 @@ and verify a consistent backup of the closed database. A live WAL may contain
 committed data absent from the main file: do not copy only the main file while
 the database is active or discard sidecars from an unverified backup. The tests
 verify restore from a closed, checkpointed database. Keep the matching
-application version and configuration with the backup. Migrations 14 and 15 are
+application version and configuration with the backup. Migrations 14, 15 and 16 are
 transactional on failure; an application downgrade after a successful upgrade
 requires a compatible pre-upgrade backup, not deleting tables or lowering the
 schema version manually. Preserve the upgraded database before any restore;
@@ -1198,7 +1198,7 @@ named-device answer reaching the authorized CoreScope deployment under the
 separate [#37 release validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
 Contract reference: [CoreScope client regions](https://github.com/OKI-Mesh/CoreScope/blob/6cab7d698d15f739dcaa0f04df70eaa80f5d13da/docs/client-regions.md).
 
-### Telemetry validation, decoding, storage and freshness (#33 T1–T4)
+### Telemetry validation, decoding, storage and freshness (#33 T1–T5)
 
 `PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS` defaults to **72** when omitted,
 matching `.env.example`. Overrides must be whole hours from **1 to 8760**;
@@ -1231,7 +1231,19 @@ saved data. History uses explicit receipt/completion ranges and pages of at most
 200 records. Counts describe retained evidence, not complete lifetime coverage.
 Clock rollback, future timestamps and ambiguous observations cannot silently
 renew freshness. These reads add no public endpoint or telemetry poller;
-integrated telemetry lifecycle/backup acceptance remains #33 T5.
+integrated telemetry lifecycle/backup acceptance is verified under #33 T5.
+
+Offline fixture acceptance covers schema 13/14/15 upgrades, clean/abrupt
+restart, a verified closed-database backup restore and dashboard-disabled
+retention using the ordinary sampler. Original request/run/instance identities,
+measurement times, supported units, partial/empty/failure evidence and both
+snapshots survive. Explicit invalid configuration, storage/migration failure
+and competing ownership stop startup before hardware/network work. The
+[contract guide](docs/plans/v2.5.0/telemetry-contracts.md#offline-operation-upgrade-and-recovery-33-t5)
+explains upgrade/recovery and retained-history limits. Keep a verified closed
+backup before migration 16; use the existing backup procedure above. These
+source-derived synthetic fixtures do not activate telemetry polling or replace
+#37's deployed-device/RF verification.
 
 ## Troubleshooting
 
