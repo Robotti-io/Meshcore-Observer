@@ -9,6 +9,8 @@ import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, r
 import { processSampleSchema, processPageSchema, processHistorySchema, runtimeEventSchema, runtimeEventPageSchema } from './process-schemas.js';
 import { topologyMigration } from './topology-migration.js';
 import { createTopologyHistory } from './topology-history.js';
+import { regionMigration } from './region-migration.js';
+import { createRegionHistory } from './region-history.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -521,7 +523,8 @@ const MIGRATIONS = [
       'CREATE INDEX idx_runtime_events_kind_at ON runtime_events(kind,observed_at)'
     ]
   },
-  topologyMigration
+  topologyMigration,
+  regionMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -597,6 +600,7 @@ export function resolveBucketWidthMs({ rangeMs, maxBuckets, sampleIntervalMs }) 
 export class MetricsStore {
   #db;
   #topology;
+  #regions;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -629,6 +633,11 @@ export class MetricsStore {
       this.#topology = createTopologyHistory(this.#db, (runId) => {
         if (this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
           throw new Error('Topology writes require the active owned run');
+        }
+      });
+      this.#regions = createRegionHistory(this.#db, (runId) => {
+        if (this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
+          throw new Error('Region writes require the active owned run');
         }
       });
     } catch (error) {
@@ -1742,6 +1751,7 @@ export class MetricsStore {
   }
 
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
+  recordRegionResult(result) { return this.#regions.record(result); }
   recordTopologyCoverage(sample) { return this.#topology.recordCoverage(sample); }
   queryTopologyPaths(query) { return this.#topology.paths(query); }
   getTopologyPath(query) { return this.#topology.path(query); }
