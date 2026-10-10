@@ -194,17 +194,15 @@ test('a late latest-write failure rolls back prior conflict flags as well as the
 });
 
 test('new timestamp conflicts preserve an existing publishing claim as evidence for T3 guarded resolution', () => {
-  const path = file(); let store = open(path), run = start(store);
-  const first = store.recordRegionResult(result(run, { brokers: ['first'] })); close(store);
-  const before = inspect(path, db => {
-    db.prepare(`UPDATE region_publications SET state='publishing',attempt_count=1,last_attempt_at=2000,
-      claim_run_id=?,claim_token=? WHERE answer_id=?`).run(run.runId,randomUUID(),first.answerId);
-    return snapshot(db).region_publications;
-  });
-  store = open(path); run = start(store, 3000);
+  const path = file(), store = open(path), run = start(store);
+  const first = store.recordRegionResult(result(run, { brokers: ['first'] }));
+  const claim = store.claimRegionPublication({ brokerId: 'first', runId: run.runId, now: 2000 });
   assert.equal(store.recordRegionResult(result(run, { csv: 'Conflicting', brokers: ['second'] })).observationTimeConflict, true);
   close(store); inspect(path, db => {
-    const data = snapshot(db); assert.deepEqual(data.region_publications, before);
+    const data = snapshot(db); assert.equal(data.region_publications.length, 1);
+    assert.equal(data.region_publications[0].answer_id, first.answerId);
+    assert.equal(data.region_publications[0].state, 'publishing');
+    assert.equal(data.region_publications[0].claim_token, claim.claimToken);
     assert.deepEqual(data.region_answers.map(row => row.observation_time_conflict), [1,1]);
   });
 });

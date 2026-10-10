@@ -635,8 +635,8 @@ export class MetricsStore {
           throw new Error('Topology writes require the active owned run');
         }
       });
-      this.#regions = createRegionHistory(this.#db, (runId) => {
-        if (this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
+      this.#regions = createRegionHistory(this.#db, (runId = this.#activeRunId) => {
+        if (this.#activeRunId === null || this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
           throw new Error('Region writes require the active owned run');
         }
       });
@@ -779,6 +779,7 @@ export class MetricsStore {
       `).run(input.runId, instance.instance_id, input.startedAt, input.observedAt, input.observedDurationMs,
         wallTimeAnomaly(input.startedAt, input.startedAt, input) ? 1 : 0,
         input.appVersion, input.nodeVersion, input.platform, input.architecture);
+      this.#regions.recoverPublications();
       this.#db.exec('COMMIT');
       this.#activeRunId = input.runId;
       return this.getObserverRun({ runId: input.runId });
@@ -1752,6 +1753,9 @@ export class MetricsStore {
 
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
   recordRegionResult(result) { return this.#regions.record(result); }
+  stageRegionPublications(input) { return this.#regions.stage(input); }
+  claimRegionPublication(input) { return this.#regions.claim(input); }
+  resolveRegionPublication(input) { return this.#regions.resolve(input); }
   recordTopologyCoverage(sample) { return this.#topology.recordCoverage(sample); }
   queryTopologyPaths(query) { return this.#topology.paths(query); }
   getTopologyPath(query) { return this.#topology.path(query); }
