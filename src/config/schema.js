@@ -2,7 +2,7 @@ import { botConfigSchema } from '../bots/schemas.js';
 import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
 import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 import { remoteCoordinatorLimitsSchema } from '../radio/remote-coordinator-schemas.js';
-import { regionConfigSchema } from '../regions/region-schemas.js';
+import { regionQueryConfigSchema } from '../regions/region-query-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
@@ -12,7 +12,7 @@ export const configSchema = {
   properties: {
     remoteRequests: remoteCoordinatorLimitsSchema,
     topology: topologyConfigSchema,
-    regions: regionConfigSchema,
+    regions: regionQueryConfigSchema,
     radio: {
       type: 'object',
       additionalProperties: false,

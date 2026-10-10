@@ -5,6 +5,9 @@ import { loadBotsConfig } from '../bots/bots-config-loader.js';
 import { loadBrokersConfig } from '../mqtt/brokers-config-loader.js';
 import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS, remoteRequestEnvSchema } from '../radio/remote-coordinator-schemas.js';
 import { REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, REGION_ANSWER_FRESHNESS_ENV_KEY, regionEnvSchema } from '../regions/region-schemas.js';
+import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS,
+  regionQueryEnvSchema, regionQueryConfigSchema } from '../regions/region-query-schemas.js';
+import { assertRegionQueryInput } from '../regions/region-query-validation.js';
 
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
 const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
@@ -19,6 +22,7 @@ export class ConfigError extends Error {
 const validate = compileSchema(configSchema);
 const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
 const regionEnvValid = compileSchema(regionEnvSchema);
+const regionQueryEnvValid = compileSchema(regionQueryEnvSchema);
 
 function readString(env, key, fallback = null) {
   const value = env[key];
@@ -172,8 +176,21 @@ function readRegions(env) {
   const key = REGION_ANSWER_FRESHNESS_ENV_KEY;
   const raw = env[key] === undefined ? {} : { [key]: env[key] };
   if (!regionEnvValid(raw)) throw new ConfigError(`Invalid region environment: ${formatErrors(regionEnvValid.errors)}`);
-  return { answerFreshnessWindowMs: (raw[key] === undefined ? REGION_ANSWER_FRESHNESS_DEFAULT_HOURS
-    : Number.parseInt(raw[key].trim(), 10)) * 3600000 };
+  const queryKeys = [REGION_QUERY_ENABLED_ENV_KEY,...REGION_QUERY_NUMERIC_SETTINGS.map(setting => setting.key)];
+  const queryRaw = Object.fromEntries(queryKeys.filter(key => env[key] !== undefined).map(key => [key,env[key]]));
+  if (!regionQueryEnvValid(queryRaw)) throw new ConfigError(`Invalid region discovery environment: ${formatErrors(regionQueryEnvValid.errors)}`);
+  const regions = { ...REGION_QUERY_DEFAULTS,
+    answerFreshnessWindowMs: (raw[key] === undefined ? REGION_ANSWER_FRESHNESS_DEFAULT_HOURS
+      : Number.parseInt(raw[key].trim(), 10)) * 3600000 };
+  if (queryRaw[REGION_QUERY_ENABLED_ENV_KEY] !== undefined) {
+    regions.discoveryEnabled = queryRaw[REGION_QUERY_ENABLED_ENV_KEY].trim().toLowerCase() === 'true';
+  }
+  for (const { field,key,scale } of REGION_QUERY_NUMERIC_SETTINGS) {
+    if (queryRaw[key] !== undefined) regions[field] = Number.parseInt(queryRaw[key].trim(),10) * scale;
+  }
+  try { assertRegionQueryInput(regionQueryConfigSchema,regions); }
+  catch { throw new ConfigError('Invalid region discovery configuration: check numeric bounds and ensure retry maximum is at least retry base'); }
+  return regions;
 }
 
 /**

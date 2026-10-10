@@ -57,6 +57,17 @@ test('invalid remote overrides fail before store creation and hardware/network s
   }
 });
 
+test('invalid discovery settings fail before database/hardware/network startup even while disabled', () => {
+  for(const overrides of [{ PACKETCAPTURE_REGION_DISCOVERY_ENABLED:'' },{ PACKETCAPTURE_REGION_QUERY_REFRESH_HOURS:'1.5' },
+    { PACKETCAPTURE_REGION_QUERY_MAX_ATTEMPTS:'11' },{ PACKETCAPTURE_REGION_QUERY_RETRY_BASE_MINUTES:'61',PACKETCAPTURE_REGION_QUERY_RETRY_MAX_HOURS:'1' }]) {
+    const env={ ...environment(),PACKETCAPTURE_REGION_DISCOVERY_ENABLED:'false',...overrides };
+    const result=spawnSync(process.execPath,[resolve('src/index.js')],{ env,cwd:process.cwd(),encoding:'utf8',timeout:3000,windowsHide:true });
+    assert.equal(result.status,1);assert.match(result.stdout+result.stderr,/Configuration error:/);
+    assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH),false);
+    assert.doesNotMatch(result.stdout+result.stderr,/meshcore-observer starting|failed to open tcp connection/);
+  }
+});
+
 test('offline UI-disabled entrypoint constructs idle remote ownership and drains it before radio/storage teardown', async () => {
   const env = { ...environment(), PACKETCAPTURE_BOT_REPLY_QUIET_MS: '0',
     PACKETCAPTURE_REMOTE_REQUEST_ACK_TIMEOUT_MS: '1000', PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS: '2000',

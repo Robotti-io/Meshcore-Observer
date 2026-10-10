@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { loadConfig, ConfigError } from '../../src/config/index.js';
 import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS } from '../../src/radio/remote-coordinator-schemas.js';
 import { REGION_ANSWER_FRESHNESS_ENV_KEY, REGION_ANSWER_FRESHNESS_DEFAULT_HOURS } from '../../src/regions/region-schemas.js';
+import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS } from '../../src/regions/region-query-schemas.js';
 import { compileSchema } from '../../src/validation/ajv.js';
 import { configSchema } from '../../src/config/schema.js';
 
@@ -85,7 +86,63 @@ test('region raw and normalized configuration reject explicit invalid values bef
   const valid = compileSchema(configSchema), config = loadConfig(baseEnv());
   for (const regions of [{ answerFreshnessWindowMs: 0 }, { answerFreshnessWindowMs: 3600001 },
     { answerFreshnessWindowMs: 8761 * 3600000 }, { answerFreshnessWindowMs: '72' },
-    { answerFreshnessWindowMs: 72 * 3600000, unexpected: true }, {}]) assert.equal(valid({ ...config, regions }), false);
+    { answerFreshnessWindowMs: 72 * 3600000, unexpected: true }]) assert.equal(valid({ ...config, regions: { ...config.regions,...regions } }), false);
+  assert.equal(valid({ ...config, regions: {} }),false);
+});
+
+test('discovery remains disabled by default and every documented default has matching units', () => {
+  const expected = { discoveryEnabled:false,queryRefreshIntervalMs:86400000,queryRetryBaseMs:900000,
+    queryRetryMaxMs:21600000,queryMaxAttempts:3,queryTickIntervalMs:10000,queryStartupDelayMs:60000,queryPreflightTimeoutMs:5000 };
+  assert.deepEqual(REGION_QUERY_DEFAULTS,expected);
+  assert.deepEqual(loadConfig(baseEnv()).regions,{ ...expected,answerFreshnessWindowMs:259200000 });
+  const example=readFileSync('.env.example','utf8'), overrides={};
+  for(const key of [REGION_QUERY_ENABLED_ENV_KEY,...REGION_QUERY_NUMERIC_SETTINGS.map(item=>item.key)]) {
+    const matches=[...example.matchAll(new RegExp(`^${key}=(.+)$`,'gm'))]; assert.equal(matches.length,1); overrides[key]=matches[0][1].trim();
+  }
+  assert.equal(overrides[REGION_QUERY_ENABLED_ENV_KEY],'false');
+  assert.deepEqual(loadConfig(baseEnv(overrides)).regions,loadConfig(baseEnv()).regions);
+});
+
+for(const { field,key,scale,min,max } of REGION_QUERY_NUMERIC_SETTINGS) test(`discovery ${key} accepts boundaries and rejects malformed/unsafe explicit values while off`, () => {
+  for(const raw of [min,max]) {
+    const overrides={ [key]:` ${raw} ` };
+    if(field==='queryRetryBaseMs') overrides.PACKETCAPTURE_REGION_QUERY_RETRY_MAX_HOURS='24';
+    assert.equal(loadConfig(baseEnv(overrides)).regions[field],raw*scale);
+  }
+  for(const raw of ['', ' ',String(min-1),String(max+1),'1.5','1e3','0x10','Infinity','SECRET-INVALID',null,5,{},'9'.repeat(33)]) {
+    assert.throws(()=>loadConfig(baseEnv({ [key]:raw })),error=>error instanceof ConfigError && !error.message.includes('SECRET-INVALID'));
+  }
+});
+
+test('discovery boolean spelling is strict and opt-in does not change shared limits or freshness settings', () => {
+  const baseline=loadConfig(baseEnv());
+  for(const [raw,expected] of [['true',true],[' TRUE ',true],['false',false],[' FaLsE ',false]]) {
+    const config=loadConfig(baseEnv({ [REGION_QUERY_ENABLED_ENV_KEY]:raw }));assert.equal(config.regions.discoveryEnabled,expected);
+    for(const field of ['remoteRequests','nodeObservations','brokers','metricsUi'])assert.deepEqual(config[field],baseline[field]);
+    assert.equal(config.regions.answerFreshnessWindowMs,baseline.regions.answerFreshnessWindowMs);
+  }
+  for(const raw of ['', ' ', '1','0','yes','false\ntrue',true,null,{},'SECRET-INVALID']) {
+    assert.throws(()=>loadConfig(baseEnv({ [REGION_QUERY_ENABLED_ENV_KEY]:raw })),error=>error instanceof ConfigError && !error.message.includes('SECRET-INVALID'));
+  }
+});
+
+test('discovery retry maximum must cover its base, including while disabled', () => {
+  for(const enabled of ['true','false']) {
+    const env=baseEnv({ [REGION_QUERY_ENABLED_ENV_KEY]:enabled,PACKETCAPTURE_REGION_QUERY_RETRY_BASE_MINUTES:'61',PACKETCAPTURE_REGION_QUERY_RETRY_MAX_HOURS:'1' });
+    assert.throws(()=>loadConfig(env),ConfigError);
+    assert.equal(loadConfig({ ...env,PACKETCAPTURE_REGION_QUERY_RETRY_BASE_MINUTES:'60' }).regions.queryRetryBaseMs,3600000);
+  }
+});
+
+test('normalized discovery config is strict, complete and respects integer units', () => {
+  const valid=compileSchema(configSchema),config=loadConfig(baseEnv());
+  for(const { field,scale,min,max } of REGION_QUERY_NUMERIC_SETTINGS) {
+    for(const value of [min*scale-1,max*scale+1,'1',NaN])assert.equal(valid({ ...config,regions:{ ...config.regions,[field]:value } }),false);
+    const missing={ ...config.regions };delete missing[field];assert.equal(valid({ ...config,regions:missing }),false);
+  }
+  assert.equal(valid({ ...config,regions:{ ...config.regions,discoveryEnabled:'false' } }),false);
+  assert.equal(valid({ ...config,regions:{ ...config.regions,unexpected:true } }),false);
+  assert.equal(valid(config),true);
 });
 
 test('remote request defaults agree in normalized configuration and the example, and accept every boundary', () => {

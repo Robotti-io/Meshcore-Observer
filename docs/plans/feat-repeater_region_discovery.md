@@ -1,6 +1,6 @@
 # Feature: Repeater Region Discovery for CoreScope
 
-- **Status:** Included in v2.5.0; #30 storage delivered/user-pushed f2d567c; #31 query plan staged for review; #32 publication queued
+- **Status:** Included in v2.5.0; #30 storage delivered/user-pushed f2d567c; #31 plan approved/T1 strict contracts complete locally; #32 publication queued
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06
 - **Release:** v2.5.0
@@ -9,7 +9,7 @@
 - **Feature issues:** [#30: durable answers](https://github.com/Robotti-io/Meshcore-Observer/issues/30), [#31: direct-heard querying](https://github.com/Robotti-io/Meshcore-Observer/issues/31), [#32: CoreScope publication](https://github.com/Robotti-io/Meshcore-Observer/issues/32)
 - **Shared prerequisites:** [Pillar 1 child issue register](v2.5.0/pillar-1-child-issues.md)
 - **Scope decision:** Included in v2.5.0 by explicit human direction on 2026-10-07.
-- **Approval scope:** Release inclusion and planning documentation. Implementation and protected-boundary changes require separate approval.
+- **Approval scope:** Release inclusion; #30 delivered; #31 finalized plan and QUERY-PLAN-01–05 approved on 2026-10-10. #32 publication and separately scoped hardware/protected changes retain their own review.
 
 ## Summary
 
