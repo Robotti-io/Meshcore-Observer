@@ -84,14 +84,23 @@ const statusData = object({ ...Object.fromEntries(Object.entries(TELEMETRY_STATU
   const wire = wireInteger(field.width, field.signed);
   return [name, field.offset >= 48 ? { anyOf: [wire, { type: 'null' }] } : wire];
 })), lastSnrDb: { type: 'number', minimum: -8192, maximum: 8191.75 } });
-const sensorReading = { oneOf: Object.entries(TELEMETRY_SENSOR_FIELDS).map(([type, field]) => {
+const sensorReadingBranches = Object.entries(TELEMETRY_SENSOR_FIELDS).map(([type, field]) => {
   const raw = wireInteger(field.width, field.signed);
   return object({ channel: integer(1, 255), type: { const: Number(type) }, name: { const: field.name },
     order: integer(0, TELEMETRY_MAX_READINGS - 1), occurrence: integer(0, TELEMETRY_MAX_READINGS - 1),
     byteOffset: integer(0, TELEMETRY_BODY_MAX_BYTES - 3), rawValue: raw,
     divisor: { const: field.divisor }, unit: { const: field.unit },
     value: { type: 'number', minimum: raw.minimum / field.divisor, maximum: raw.maximum / field.divisor } });
-}) };
+});
+// The literal type constants are disjoint. Dispatch through JSON Schema
+// conditionals to exactly one existing closed branch instead of validating
+// every other type per reading (important for bounded 200 x 56 read pages).
+// The final closed branch still rejects unknown/missing types and all extra
+// properties. This accepts exactly the former oneOf contract via shared AJV.
+const sensorReading = sensorReadingBranches.slice(0,-1).reduceRight((otherwise,branch) => ({
+  type: 'object', if: { properties: { type: branch.properties.type }, required: ['type'] },
+  then: branch, else: otherwise
+}),sensorReadingBranches.at(-1));
 const sensorData = object({ emitterProfile: sensorProfile,
   readings: { type: 'array', maxItems: TELEMETRY_MAX_READINGS, items: sensorReading } });
 const neighbourData = object({ reportedTotal: uint16, receivedCount: uint16,

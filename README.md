@@ -1198,19 +1198,19 @@ named-device answer reaching the authorized CoreScope deployment under the
 separate [#37 release validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
 Contract reference: [CoreScope client regions](https://github.com/OKI-Mesh/CoreScope/blob/6cab7d698d15f739dcaa0f04df70eaa80f5d13da/docs/client-regions.md).
 
-### Telemetry validation, decoding, storage and freshness (#33 T1–T3)
+### Telemetry validation, decoding, storage and freshness (#33 T1–T4)
 
 `PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS` defaults to **72** when omitted,
 matching `.env.example`. Overrides must be whole hours from **1 to 8760**;
 explicit empty or invalid values stop startup with a configuration error.
-This setting controls the future interpretation of saved observation age and
+This setting controls the interpretation of saved observation age and
 does not enable collection or change polling cadence, region freshness or pruning.
 
 The internal contracts preserve supported status fields, signed sensor values,
 remote-reported neighbour pages, original request context and explicit partial
 or unavailable data. They do not derive battery percentages or certify complete
 sensor/mesh inventory. T1 provides validation/configuration, T2 pure response
-decoders and T3 owned telemetry persistence; reads remain T4 while #34 owns
+decoders, T3 owned telemetry persistence and T4 bounded internal reads; #34 owns
 polling. A truncated known field rejects the entire response;
 unknown types/profiles retain only clearly partial supported data. No parser
 activates collection, stores GPS values or infers a layout from padded length.
@@ -1223,6 +1223,15 @@ producer submits them. Saves are atomic and require the active owned run;
 failure/unsupported outcomes preserve earlier useful data. Shared history
 retention protects both latest useful and latest decoded observations and their
 source runs, even if stale or older than the configured history duration.
+
+Internal latest reads keep useful and fully decoded snapshots separate, each
+with its original measurement time and freshness. Newer partial replies never
+refresh older decoded measurements, and a failed poll can coexist with stale
+saved data. History uses explicit receipt/completion ranges and pages of at most
+200 records. Counts describe retained evidence, not complete lifetime coverage.
+Clock rollback, future timestamps and ambiguous observations cannot silently
+renew freshness. These reads add no public endpoint or telemetry poller;
+integrated telemetry lifecycle/backup acceptance remains #33 T5.
 
 ## Troubleshooting
 

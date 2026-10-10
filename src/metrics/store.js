@@ -18,6 +18,7 @@ import { assertRegionInput } from '../regions/region-validation.js';
 import { regionPruneSchema } from '../regions/region-schemas.js';
 import { telemetryMigration } from './telemetry-migration.js';
 import { createTelemetryHistory } from './telemetry-history.js';
+import { createTelemetryReads } from './telemetry-reads.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -611,6 +612,7 @@ export class MetricsStore {
   #topology;
   #regions;
   #regionReads;
+  #telemetryReads;
   #regionPoll;
   #telemetry;
   #activeRunId = null;
@@ -654,6 +656,7 @@ export class MetricsStore {
       };
       this.#regions = createRegionHistory(this.#db, requireRegionRun);
       this.#regionReads = createRegionReads(this.#db);
+      this.#telemetryReads = createTelemetryReads(this.#db);
       this.#regionPoll = createRegionPollState(this.#db, requireRegionRun, this.#regions.recordWithinTransaction);
       this.#telemetry = createTelemetryHistory(this.#db, (runId) => {
         const run = this.#activeRunId === runId ? this.getObserverRun({ runId }) : null;
@@ -1777,6 +1780,9 @@ export class MetricsStore {
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
   recordRegionResult(result) { return this.#regions.record(result); }
   recordTelemetryResult(result) { return this.#telemetry.record(result); }
+  getTelemetryLatest(query) { return this.#telemetryReads.latest(query); }
+  queryTelemetryObservations(query) { return this.#telemetryReads.observations(query); }
+  queryTelemetryOutcomes(query) { return this.#telemetryReads.outcomes(query); }
   queryRegionPollCandidates(query, policy) { return this.#regionPoll.candidates(query, policy); }
   getRegionPollState(query) { return this.#regionPoll.state(query); }
   getRegionPollHighWater() { return this.#regionPoll.highWater(); }

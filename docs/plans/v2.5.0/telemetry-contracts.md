@@ -224,10 +224,78 @@ children are gone. Failure in telemetry or another dataset's shared cleanup
 rolls back all attempted deletions. Save-first retention can deliberately keep
 data older than the configured history duration; it is not a disk-size cap.
 
-The internal range/latest read contracts remain T4, and integrated entrypoint
+The internal range/latest read contracts are implemented in T4, and integrated entrypoint
 backup/restart/operational acceptance remains T5. T3 fixtures prove isolated
 fresh/older-schema upgrades, transaction failures, reopen ownership, source-run
 protection and prune behavior; they do not complete #33 or establish live RF.
 
 Primary-source pins, protected storage/retention decisions and remaining task
 boundaries are recorded in the [approved #33 plan](pillar-1-issues/p1-12.md).
+
+## Bounded internal reads (#33 T4)
+
+`getTelemetryLatest({ observerPublicKey, targetPublicKey, variant, now, windowMs })`
+requires full uppercase keys, a typed exact variant and an explicit original
+wall-clock read time/freshness window. Supply central configuration's
+`telemetry.freshnessWindowMs` (omitted runtime default 72 hours); reads do not
+read environment variables or choose their own policy.
+
+The result contains `observation` (nullable latest useful), `fullyDecoded`
+(an independently aged object with its own nullable `observation`) and nullable
+`latestOutcome`. Both observation views supply `freshness`, `fresh`, `ageMs`
+and `futureDated`. Freshness is `unknown` without an eligible pointer, otherwise
+`ambiguous` for retained equal-time collisions, `future` when receipt is after
+the caller's `now`, `clock-anomaly` for known request/source-run anomalies,
+`stale` when age is **at least** the supplied window, and `fresh` otherwise.
+These states describe time confidence; observation `quality` and response-only
+`coverage` remain independent. A history-only anomaly never manufactures a
+latest value. A run that becomes clock-anomalous after an earlier save is also
+disclosed through `sourceRunClockAnomaly`, separately from the original request
+flag. The read returns both original observation context and its original
+`outcome` (identity, dispatch/completion/receipt, route/tag and terminal state).
+
+Age uses `effectiveNow`, the greater of validated `now`, this read model's
+process high-water mark and durable observer-run `last_known_alive_at`. A lower
+`now` sets `clockRollback` and cannot rejuvenate expired data. Durable run time
+protects reopen/restart too; the process-only read high-water is not persisted
+by a read. Future-dated observations keep original timestamps and null age.
+No fields merge across replies, reporters, layouts/evidence, permission masks
+or neighbour page/order/prefix parameters. A newer failure/unsupported outcome
+can accompany an older useful/decoded observation without erasing it. Latest
+outcome means greatest original completion time, then request UUID; it does
+not claim arrival order or successful/current delivery.
+
+`queryTelemetryObservations` and `queryTelemetryOutcomes` require explicit
+millisecond `{ start, end }` with **[start,end)** semantics; equality is an empty
+range. Observations filter by original receipt, outcomes by original completion.
+Optional filters are `observerPublicKey`, `targetPublicKey`, `runId`, `component`
+and typed `variant`; only outcomes accept terminal `status`. Original shape is
+strictly validated before SQL or defaults. `limit` defaults to 100, maximum 200;
+`offset` defaults to 0, bounded to 2^31-1. Observation ties use stored ID;
+outcome ties use request UUID, both descending after their own original time.
+History records expose original times, quality and anomaly/eligibility flags;
+they do not claim current freshness without a read time/window.
+
+Each page returns `total` within the retained filtered range, `countScope:
+'retained-range'`, range/page metadata and `coverage`. Latest coverage is its
+exact observation scope. Page coverage describes all retained records under
+its filters, independently of the selected range/page: `retainedRecords`,
+nullable `earliestRetainedAt`/`latestRetainedAt`, `retainedHistoryOnly:true` and
+`historyCompleteness:'unknown'`. Empty counts are evidence counts, never zero
+measurements. Pruned history and protected snapshots are not complete lifetime
+coverage or time-weighted averages.
+
+SQL uses fixed columns and bound values. A materialized ID page precedes JSON
+lookups, so count/coverage/deep-offset work never hydrates skipped observations.
+The outcome join is deferred until after receipt paging unless a run filter
+requires it. At most 200 closed normalized observations are decoded, each with
+T1 byte/item bounds. Returned objects are detached; changing one cannot alter
+the store. Invalid caller data uses `Invalid telemetry data`; invalid stored
+JSON/context uses `Invalid stored telemetry data`, without exposing values.
+Sensor validation uses shared AJV conditional dispatch to the same disjoint
+closed type branches; equivalence tests preserve the former oneOf acceptance
+contract while avoiding validation of every other sensor type per reading.
+
+No new migration, endpoint, dashboard, aggregation, producer, credentials or RF
+activation accompanies these internal reads. T5 retains integrated entrypoint,
+backup and final feature acceptance; #34/#35/#36/#37 keep their separate scopes.

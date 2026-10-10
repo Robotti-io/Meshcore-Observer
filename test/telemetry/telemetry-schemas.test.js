@@ -1,11 +1,31 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { compileSchema } from '../../src/validation/ajv.js';
 import * as s from '../../src/telemetry/telemetry-schemas.js';
 import { assertTelemetryInput as valid, assertTelemetryResult, telemetryVariantKey } from '../../src/telemetry/telemetry-validation.js';
 
 const uuid = '11111111-1111-4111-8111-111111111111';
 const key = 'AB'.repeat(32);
 const clone = value => JSON.parse(JSON.stringify(value));
+test('sensor conditional dispatch is equivalent to its former disjoint closed oneOf for every type and mutated field', () => {
+  const schema=s.telemetryObservationSchema.oneOf.find(x=>x.properties.variant.properties.component.const==='sensors')
+    .properties.data.properties.readings.items;
+  const branches=[];let cursor=schema;
+  while(cursor.if) {branches.push(cursor.then);cursor=cursor.else;} branches.push(cursor);
+  const current=compileSchema(schema),previous=compileSchema({oneOf:branches});
+  const corpus=[null,[],{},0,'SECRET',...Array.from({length:256},(_,type)=>({type}))];
+  for(const [type,field] of Object.entries(s.TELEMETRY_SENSOR_FIELDS)) {
+    const validReading={channel:1,type:Number(type),name:field.name,order:0,occurrence:0,byteOffset:0,
+      rawValue:0,divisor:field.divisor,unit:field.unit,value:0};
+    corpus.push(validReading,{...validReading,SECRET:true});
+    for(const key of Object.keys(validReading)) {
+      const missing={...validReading};delete missing[key];corpus.push(missing);
+      for(const bad of [null,[],{},'SECRET',-999999,999999,0.1]) corpus.push({...validReading,[key]:bad});
+    }
+    for(const other of Object.keys(s.TELEMETRY_SENSOR_FIELDS)) corpus.push({...validReading,type:Number(other)});
+  }
+  for(const value of corpus) assert.equal(current(value),previous(value),JSON.stringify(value));
+});
 const variants = {
   status: { component: 'status', params: {}, profile: { layout: 'common48', evidence: 'established' } },
   sensors: { component: 'sensors', params: { permissionMask: 0 } },
