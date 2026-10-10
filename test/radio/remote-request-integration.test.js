@@ -31,6 +31,12 @@ function sent(tag, route = 0) {
 function binary(tag) {
   const bytes = Buffer.alloc(8); bytes[0] = 0x8C; bytes.writeUInt32LE(tag, 2); bytes[6] = 1; return [...bytes];
 }
+function regionContact(path = 0) {
+  const bytes = Array(148).fill(0); bytes[0] = 3; bytes[33] = 2; bytes[35] = path;
+  bytes.splice(1, 32, ...Buffer.from('AC'.repeat(32), 'hex')); return bytes;
+}
+const regions = (f, index = 1, reserve = () => true) =>
+  f.coordinator.tryRequest({ ...request(index), operation: 'anonymous-regions' }, {}, () => true, reserve);
 function groupText(text = 'Fixture: !echo') {
   const header = Buffer.alloc(5); header.writeUInt32LE(1700000000, 0);
   const unpadded = Buffer.concat([header, Buffer.from(text), Buffer.from([0])]);
@@ -133,6 +139,58 @@ afterEach(async () => {
     }
   } finally { vi.useRealTimers(); }
 });
+
+for (const kind of ['serial', 'tcp']) {
+  test(kind + ': fragmented anonymous contact/Sent/reply frames share ownership without holding airtime for the read', async () => {
+    const f = await rig({ kind }); await f.tick(20); const reserve = vi.fn(() => true);
+    const result = regions(f, 1, reserve); await flush();
+    assert.equal(f.airtime.canRunWhenQuiet(), true, 'local contact read does not reserve RF');
+    const local = vi.fn(() => 'local'); const waiting = f.radio.runCommand(local); await flush();
+    assert.equal(local.mock.calls.length, 0); assert.equal((await regions(f, 2)).reason, 'busy');
+    await frame(f, binary(42)); await frame(f, regionContact());
+    assert.equal(reserve.mock.calls.length, 1);
+    assert.deepEqual(f.attempts.map(item => item.bytes), [
+      [0x1E, ...Buffer.from('AC'.repeat(32), 'hex')], [0x39, ...Buffer.from('AC'.repeat(32), 'hex'), 1, 0]
+    ]);
+    assert.equal(local.mock.calls.length, 0); await frame(f, sent(42)); assert.equal(await waiting, 'local');
+    await f.tick(20); assert.equal(f.airtime.canRunWhenQuiet(), true, 'RF ownership ends at Sent');
+    await packet(f); assert.equal(f.publications.length, 1, 'capture proceeds during reply wait');
+    await frame(f, binary(99)); assert.equal((await regions(f, 3)).reason, 'busy');
+    await frame(f, binary(42)); const outcome = await result;
+    assert.equal(outcome.status, 'completed'); assert.ok(outcome.receivedAt >= outcome.dispatchedAt);
+    assert.equal(outcome.context.observerPublicKey, OBSERVER); await idle(f);
+  });
+
+  test(kind + ': bot work arriving during the contact read wins before anonymous RF', async () => {
+    const f = await rig({ kind, actors: true }); await f.tick(20);
+    const reserve = vi.fn(() => true), result = regions(f, 1, reserve); await flush();
+    await packet(f); assert.equal(f.replyQueue.size, 1);
+    await frame(f, regionContact()); assert.equal((await result).reason, 'foreground');
+    assert.equal(reserve.mock.calls.length, 0); assert.deepEqual(f.attempts.map(item => item.bytes[0]), [0x1E]);
+    await f.tick(30); assert.equal(f.bot.getRepliesSent(), 1); await idle(f);
+  });
+
+  test(kind + ': uncertain contact read retires its generation and ignores late transport frames', async () => {
+    const f = await rig({ kind }); await f.tick(20); const old = f.current();
+    const result = regions(f); await flush(); await f.tick(5001);
+    assert.equal((await result).reason, 'preflight-timeout'); assert.equal((await result).recovery, 'reset');
+    await f.tick(20); assert.notEqual(f.current(), old);
+    const next = regions(f, 2); await flush(); await frame(f, regionContact(), old); await frame(f, [1, 2], old);
+    assert.deepEqual(f.attempts.map(item => item.bytes[0]), [0x1E, 0x1E]);
+    await frame(f, [1, 2]); assert.equal((await next).reason, 'contact-missing'); await idle(f);
+  });
+
+  test(kind + ': contact deferrals consume no shared RF budget and anonymous RF consumes it once', async () => {
+    const f = await rig({ kind }); await f.tick(20);
+    const missing = regions(f); await flush(); await frame(f, [1, 2]);
+    assert.equal((await missing).reason, 'contact-missing');
+    const result = regions(f, 2); await flush(); await frame(f, regionContact()); await frame(f, sent(42)); await frame(f, binary(42));
+    assert.equal((await result).status, 'completed');
+    assert.equal((await f.coordinator.tryRequest(request(3))).reason, 'rate-limited');
+    assert.equal((await regions(f, 4)).reason, 'rate-limited');
+    assert.deepEqual(f.attempts.map(item => item.bytes[0]), [0x1E, 0x1E, 0x39]); await idle(f);
+  });
+}
 
 for (const kind of ['serial', 'tcp']) test(`${kind}: bot, advert, signing and packet publication continue during a remote reply wait`, async () => {
   const f = await rig({ kind, actors: true }); const connection = f.current();

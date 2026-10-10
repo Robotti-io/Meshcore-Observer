@@ -46,11 +46,11 @@ test('prepared arguments use the installed low-level binary method with an exact
   assert.equal(connection.eventListenersMap.size, 0);
 });
 
-test('anonymous region capability is explicitly unsupported without an adapter or side effect', () => {
+test('anonymous region preparation uses only the fixed application adapter without side effects', () => {
   const connection = new Connection();
   assert.equal(typeof connection.sendCommandSendAnonReq, 'undefined');
   assert.deepEqual(prepareRemoteRequest(request('anonymous-regions')), {
-    status: 'unsupported', reason: 'anonymous-adapter-unavailable'
+    status: 'prepared', command: { commandCode: 57, frameBytes: [0x39, ...Buffer.from(targetPublicKey, 'hex'), 1, 0] }
   });
   assert.equal(connection.eventListenersMap.size, 0);
 });

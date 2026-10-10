@@ -153,6 +153,10 @@ export class RadioManager extends EventEmitter {
     const session = this.#session;
     if (!session || session.id !== request.generation) return { status: 'stale-generation' };
     const explanations = {
+      'preflight-timeout': 'Region contact read timed out; the radio connection is being reset to prevent a late contact response from being assigned to another command. Capture may pause during reconnection.',
+      'preflight-write-error': 'Region contact read write failed; the radio connection is being reset because local response ownership is uncertain. Capture may pause during reconnection.',
+      'preflight-protocol-error': 'Region contact read returned an unfamiliar or malformed response; the radio connection is being reset to prevent incorrect command attribution. Capture may pause during reconnection.',
+      'preflight-cancelled': 'Region contact read was stopped before completion; the radio connection is being reset because local response ownership is uncertain. Capture may pause during reconnection.',
       'ack-timeout': 'Remote request acknowledgement timed out; the radio connection is being reset to prevent a late acknowledgement from being assigned to another command.',
       'write-error': 'Remote request write failed; the radio connection is being reset because command acknowledgement ownership is uncertain.',
       'protocol-error': 'Remote request acknowledgement was malformed; the radio connection is being reset to prevent incorrect command attribution.',

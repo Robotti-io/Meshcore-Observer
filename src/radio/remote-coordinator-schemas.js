@@ -1,4 +1,10 @@
 import { REMOTE_FRAME_MAX_BYTES } from './remote-request-schemas.js';
+import { regionQueryConfigSchema } from '../regions/region-query-schemas.js';
+
+export const remotePreflightLimitsSchema = {
+  type: 'object', additionalProperties: false, required: ['preflightTimeoutMs'],
+  properties: { preflightTimeoutMs: regionQueryConfigSchema.properties.queryPreflightTimeoutMs }
+};
 
 export const REMOTE_REQUEST_DEFAULTS = Object.freeze({
   ackTimeoutMs: 5000, responseTimeoutMaxMs: 30000, minIntervalMs: 60000, maxPerMinute: 1

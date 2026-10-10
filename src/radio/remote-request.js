@@ -1,5 +1,6 @@
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { remoteRequestSchema, remoteRequestUniquenessSchema } from './remote-request-schemas.js';
+import { prepareRegionAnonymousRequest } from '../regions/region-radio-adapter.js';
 
 const requestValid = compileSchema(remoteRequestSchema);
 const uniquenessValid = compileSchema(remoteRequestUniquenessSchema);
@@ -16,7 +17,8 @@ export function assertRemoteRequest(request) {
 export function prepareRemoteRequest(request, uniquenessBytes) {
   assertRemoteRequest(request);
   if (request.operation === 'anonymous-regions') {
-    return { status: 'unsupported', reason: 'anonymous-adapter-unavailable' };
+    return { status: 'prepared', command: { commandCode: 57,
+      frameBytes: prepareRegionAnonymousRequest({ targetPublicKey: request.targetPublicKey }) } };
   }
   if (!uniquenessValid(uniquenessBytes)) {
     throw new Error(`Invalid remote request uniqueness bytes: ${formatErrors(uniquenessValid.errors)}`);
