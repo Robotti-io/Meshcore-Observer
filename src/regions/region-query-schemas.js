@@ -55,6 +55,7 @@ export const regionPreflightErrorFrameSchema = object({ bytes: {
 } });
 
 const scope = { observerPublicKey: key, targetPublicKey: key };
+export const regionPollStateQuerySchema = object(scope);
 const reservationIdentity = { ...scope, runId: uuid, requestId: uuid };
 const jitterRatio = { type: 'number', minimum: 0, maximum: 0.1 };
 export const regionPollCandidateQuerySchema = object({ observerPublicKey: key, now: epoch,

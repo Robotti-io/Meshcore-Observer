@@ -2,10 +2,11 @@ import { compileSchema } from '../validation/ajv.js';
 import { assertRegionResult } from './region-validation.js';
 import { regionQueryConfigSchema, regionQueryPolicySchema, regionQueryTargetSchema,
   regionPollCandidateQuerySchema, regionPollDeferralSchema, regionPollReservationSchema,
-  regionPollCompletionSchema } from './region-query-schemas.js';
+  regionPollCompletionSchema, regionPollStateQuerySchema } from './region-query-schemas.js';
 
 const schemas = [regionQueryConfigSchema, regionQueryPolicySchema, regionQueryTargetSchema,
-  regionPollCandidateQuerySchema, regionPollDeferralSchema, regionPollReservationSchema, regionPollCompletionSchema];
+  regionPollCandidateQuerySchema, regionPollDeferralSchema, regionPollReservationSchema, regionPollCompletionSchema,
+  regionPollStateQuerySchema];
 const validators = new Map(schemas.map(schema => [schema,compileSchema(schema)]));
 const invalid = () => new Error('Invalid region query data');
 

@@ -67,40 +67,47 @@ export function createRegionHistory(db, requireRun) {
   const recoverPublications = db.prepare(`UPDATE region_publications SET state='pending',claim_run_id=NULL,claim_token=NULL
     WHERE state='publishing'`);
 
+  // Internal only: caller owns the transaction on this same connection.
+  // Preserve public record validation/idempotency without nested transactions.
+  function recordWithinTransaction(input) {
+    assertRegionResult(input); requireRun(input.outcome.runId);
+    const o = input.outcome, a = input.answer;
+    const oldOutcome = outcomeById.get(o.requestId);
+    if (oldOutcome) {
+      const saved = answerByRequest.get(o.requestId);
+      const old = { outcome: { ...oldOutcome, clockAnomaly: Boolean(oldOutcome.clockAnomaly) },
+        ...(saved ? { answer: mapAnswer(saved) } : {}) };
+      if (canonical(old) !== canonical(input)) throw new Error('Region result request identity conflict');
+      return { requestId: o.requestId, answerId: saved?.id ?? null, duplicate: true, latestUpdated: false,
+        observationTimeConflict: Boolean(saved?.observationTimeConflict) };
+    }
+    insertOutcome.run(o.requestId,o.runId,o.observerPublicKey,o.targetPublicKey,o.startedAt,o.completedAt,
+      Number(o.clockAnomaly),o.status,o.reason,o.route);
+    let answerId = null, latestUpdated = false, observationTimeConflict = false;
+    if (a) {
+      const regionsJson = JSON.stringify(a.regions);
+      observationTimeConflict = Boolean(conflictAtTime.get(o.observerPublicKey,o.targetPublicKey,
+        a.observedAt,regionsJson,a.repeaterClock).conflict);
+      answerId = Number(insertAnswer.run(o.requestId,o.observerPublicKey,o.targetPublicKey,a.observedAt,
+        regionsJson,a.repeaterClock,a.bodyBytes,a.csvBytes,a.parserVersion,a.completeness,a.provenance,
+        Number(observationTimeConflict)).lastInsertRowid);
+      if (observationTimeConflict) markConflict.run(o.observerPublicKey,o.targetPublicKey,a.observedAt);
+      latestUpdated = updateLatest.run(o.observerPublicKey,o.targetPublicKey,answerId).changes === 1;
+      if (!observationTimeConflict) for (const brokerId of input.brokerIds ?? []) {
+        stageInitial.run(answerId,brokerId,o.completedAt,brokerId,o.observerPublicKey,o.targetPublicKey,a.observedAt);
+      }
+    }
+    return { requestId: o.requestId, answerId, duplicate: false, latestUpdated, observationTimeConflict };
+  }
+
   return {
+    recordWithinTransaction,
     record(input) {
       assertRegionResult(input); requireRun(input.outcome.runId);
-      const o = input.outcome, a = input.answer;
       db.exec('BEGIN');
       try {
-        const oldOutcome = outcomeById.get(o.requestId);
-        if (oldOutcome) {
-          const saved = answerByRequest.get(o.requestId);
-          const old = { outcome: { ...oldOutcome, clockAnomaly: Boolean(oldOutcome.clockAnomaly) },
-            ...(saved ? { answer: mapAnswer(saved) } : {}) };
-          if (canonical(old) !== canonical(input)) throw new Error('Region result request identity conflict');
-          db.exec('COMMIT');
-          return { requestId: o.requestId, answerId: saved?.id ?? null, duplicate: true, latestUpdated: false,
-            observationTimeConflict: Boolean(saved?.observationTimeConflict) };
-        }
-        insertOutcome.run(o.requestId,o.runId,o.observerPublicKey,o.targetPublicKey,o.startedAt,o.completedAt,
-          Number(o.clockAnomaly),o.status,o.reason,o.route);
-        let answerId = null, latestUpdated = false, observationTimeConflict = false;
-        if (a) {
-          const regionsJson = JSON.stringify(a.regions);
-          observationTimeConflict = Boolean(conflictAtTime.get(o.observerPublicKey,o.targetPublicKey,
-            a.observedAt,regionsJson,a.repeaterClock).conflict);
-          answerId = Number(insertAnswer.run(o.requestId,o.observerPublicKey,o.targetPublicKey,a.observedAt,
-            regionsJson,a.repeaterClock,a.bodyBytes,a.csvBytes,a.parserVersion,a.completeness,a.provenance,
-            Number(observationTimeConflict)).lastInsertRowid);
-          if (observationTimeConflict) markConflict.run(o.observerPublicKey,o.targetPublicKey,a.observedAt);
-          latestUpdated = updateLatest.run(o.observerPublicKey,o.targetPublicKey,answerId).changes === 1;
-          if (!observationTimeConflict) for (const brokerId of input.brokerIds ?? []) {
-            stageInitial.run(answerId,brokerId,o.completedAt,brokerId,o.observerPublicKey,o.targetPublicKey,a.observedAt);
-          }
-        }
-        db.exec('COMMIT');
-        return { requestId: o.requestId, answerId, duplicate: false, latestUpdated, observationTimeConflict };
+        const recorded = recordWithinTransaction(input);
+        db.exec('COMMIT'); return recorded;
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     },
 

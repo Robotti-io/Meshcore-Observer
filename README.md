@@ -895,11 +895,29 @@ and verify a consistent backup of the closed database. A live WAL may contain
 committed data absent from the main file: do not copy only the main file while
 the database is active or discard sidecars from an unverified backup. The tests
 verify restore from a closed, checkpointed database. Keep the matching
-application version and configuration with the backup. Migration 14 is
+application version and configuration with the backup. Migrations 14 and 15 are
 transactional on failure; an application downgrade after a successful upgrade
 requires a compatible pre-upgrade backup, not deleting tables or lowering the
 schema version manually. Preserve the upgraded database before any restore;
 restoring an older backup loses observations recorded after that backup.
+
+Migration 15 adds reporter/target scheduling metadata to this same always-on
+store, including while discovery and the dashboard are disabled. The backend
+now provides bounded candidate pages, pre-send reservations and atomic
+answer/retry completion; the runtime discovery scheduler is staged separately
+in #31 T4. A reservation saves permission and a conservative cooldown before a
+send can be allowed. It is not evidence of transmitted RF or a successful
+reply, and restart never replays it or invents a terminal result.
+
+Scheduling rows and their needed source-run references survive shared history
+pruning and remain indefinitely per reporter/target pair. A new Companion key
+uses its own schedule. Refresh/retry overrides can extend deadlines, but
+shortened intervals or raised attempt limits cannot accelerate a saved
+cooldown. Lowered limits can stop an active cycle. Clock rollback pauses new
+reservations until agreement with durable observation time; captured result
+timestamps remain unchanged. Long outages, forward clock jumps and retained
+per-pair state can affect availability and capacity. Monitor the persistent
+volume and preserve a verified closed backup before the first upgraded start.
 
 Offline fixtures exercise migration, empty/latest/pending state, pruning,
 clean/abrupt restart and closed-backup restore. The retained-volume regression

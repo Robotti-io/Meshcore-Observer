@@ -219,7 +219,7 @@ test('migration 10 preserves legacy data without inventing history or direct evi
   store.recordVerifiedAdvert(evidence('fresh', { name: null }));
   assert.equal(store.queryNodes({ limit: 100, offset: 0 }).nodes[0].name, 'Legacy');
   assert.equal(store.queryAdvertTotals(RANGE).newDiscoveries, 0);
-  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 14);
+  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 15);
 });
 
 test('late migration failure rolls back the node rebuild and all new tables', () => {

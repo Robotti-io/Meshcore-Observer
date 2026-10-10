@@ -811,7 +811,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 14);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 15);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
     assert.ok(columns.includes('handler_state_json'));
     assert.ok(!columns.includes('lookup_outcome'));
@@ -894,7 +894,7 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
     migratedStore.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 14);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 15);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
     assert.deepEqual(columns, [
       'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',

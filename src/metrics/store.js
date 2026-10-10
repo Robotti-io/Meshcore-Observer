@@ -10,6 +10,8 @@ import { processSampleSchema, processPageSchema, processHistorySchema, runtimeEv
 import { topologyMigration } from './topology-migration.js';
 import { createTopologyHistory } from './topology-history.js';
 import { regionMigration } from './region-migration.js';
+import { regionPollMigration } from './region-poll-migration.js';
+import { createRegionPollState } from './region-poll-state.js';
 import { createRegionHistory } from './region-history.js';
 import { createRegionReads } from './region-reads.js';
 import { assertRegionInput } from '../regions/region-validation.js';
@@ -527,7 +529,8 @@ const MIGRATIONS = [
     ]
   },
   topologyMigration,
-  regionMigration
+  regionMigration,
+  regionPollMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -605,6 +608,7 @@ export class MetricsStore {
   #topology;
   #regions;
   #regionReads;
+  #regionPoll;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -639,12 +643,14 @@ export class MetricsStore {
           throw new Error('Topology writes require the active owned run');
         }
       });
-      this.#regions = createRegionHistory(this.#db, (runId = this.#activeRunId) => {
+      const requireRegionRun = (runId = this.#activeRunId) => {
         if (this.#activeRunId === null || this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
           throw new Error('Region writes require the active owned run');
         }
-      });
+      };
+      this.#regions = createRegionHistory(this.#db, requireRegionRun);
       this.#regionReads = createRegionReads(this.#db);
+      this.#regionPoll = createRegionPollState(this.#db, requireRegionRun, this.#regions.recordWithinTransaction);
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1760,6 +1766,12 @@ export class MetricsStore {
 
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
   recordRegionResult(result) { return this.#regions.record(result); }
+  queryRegionPollCandidates(query, policy) { return this.#regionPoll.candidates(query, policy); }
+  getRegionPollState(query) { return this.#regionPoll.state(query); }
+  getRegionPollHighWater() { return this.#regionPoll.highWater(); }
+  deferRegionPoll(input, policy) { return this.#regionPoll.defer(input, policy); }
+  reserveRegionPoll(input) { return this.#regionPoll.reserve(input); }
+  completeRegionPoll(input) { return this.#regionPoll.complete(input); }
   stageRegionPublications(input) { return this.#regions.stage(input); }
   claimRegionPublication(input) { return this.#regions.claim(input); }
   resolveRegionPublication(input) { return this.#regions.resolve(input); }

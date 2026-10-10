@@ -60,7 +60,7 @@ test('migration 14 preserves version-13 run/inventory/bot/advert/topology/proces
   });
   store = open(path); close(store);
   inspect(path, db => {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15);
     for (const [table, rows] of prior) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all().map(row => ({ ...row })), rows);
     assert.ok(Object.values(snapshot(db)).every(rows => rows.length === 0));
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
@@ -78,7 +78,7 @@ test('a late migration-index failure rolls back every region table and user_vers
     assert.equal(db.prepare('SELECT name FROM nodes').get().name, 'Kept');
     db.exec('DROP INDEX idx_region_publications_claim_run');
   });
-  store = open(path); close(store); inspect(path, db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 14));
+  store = open(path); close(store); inspect(path, db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15));
 });
 
 test('real owned store persists every answer and terminal failure without RF tags/raw bodies or fabricated empty success', () => {
