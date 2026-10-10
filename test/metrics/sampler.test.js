@@ -4,8 +4,30 @@ import { MetricsSampler } from '../../src/metrics/sampler.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { RunHistory } from '../../src/metrics/run-history.js';
 import { ProcessMeasurements } from '../../src/metrics/process-measurements.js';
+import { randomUUID } from 'node:crypto';
 
 const samplers = new Set();
+
+for (const retentionDays of [0,7,36500]) test(`always-on offline maintenance applies shared region retention ${retentionDays} days without losing latest or pending work`, async () => {
+  const DAY = 86400000, store = new MetricsStore({ dbPath: ':memory:' }), log = silentLogger(); let sampler;
+  try {
+    const run = store.beginObserverRun({ runId: randomUUID(), startedAt: 0, observedAt: 0, observedDurationMs: 0,
+      appVersion: '2.4.0', nodeVersion: process.version, platform: process.platform, architecture: process.arch });
+    for (const [at,brokers] of [[DAY,[]],[2 * DAY,['offline']],[3 * DAY,[]]]) store.recordRegionResult({
+      outcome: { requestId: randomUUID(), runId: run.runId, observerPublicKey: 'BE'.repeat(32), targetPublicKey: 'AC'.repeat(32),
+        startedAt: 0, completedAt: at, clockAnomaly: false, status: 'answered', reason: null, route: 'direct' },
+      answer: { observedAt: at, regions: [], repeaterClock: 0, bodyBytes: 4, csvBytes: 0, parserVersion: 1,
+        completeness: 'unknown', provenance: 'companion-tag-attributed' }, brokerIds: brokers });
+    vi.setSystemTime(30 * DAY); sampler = makeSampler({ serviceHealth: fakeServiceHealth(baseSnapshot({ mqtt: {}, radioConnected: false })),
+      metricsStore: store, sampleIntervalMs: 10, retentionDays, logger: log });
+    sampler.start(); await vi.advanceTimersByTimeAsync(10); sampler.stop();
+    assert.equal(store.queryRegionAnswers({ start: 0, end: Date.now() }).total, retentionDays === 7 ? 2 : 3);
+    assert.equal(store.queryRegionPublications({ brokerId: 'offline' }).publications[0].observedAt, 2 * DAY);
+    const latest = store.getRegionLatest({ observerPublicKey: 'BE'.repeat(32), targetPublicKey: 'AC'.repeat(32), now: Date.now(), windowMs: 72 * 3600000 });
+    assert.equal(latest.presence, 'empty'); assert.equal(latest.freshness, 'stale'); assert.equal(latest.answer.observedAt, 3 * DAY);
+    assert.equal(log.calls.warn.length, 0);
+  } finally { sampler?.stop(); store.close(); }
+});
 
 beforeEach(() => {
   vi.useFakeTimers();

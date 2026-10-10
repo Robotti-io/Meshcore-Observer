@@ -9,7 +9,7 @@ const OUTCOME_COLUMNS = `request_id AS requestId,run_id AS runId,observer_public
 const ANSWER_COLUMNS = `id,observed_at AS observedAt,regions_json AS regionsJson,repeater_clock AS repeaterClock,
   body_bytes AS bodyBytes,csv_bytes AS csvBytes,parser_version AS parserVersion,completeness,provenance,
   observation_time_conflict AS observationTimeConflict`;
-function mapAnswer(row) {
+export function mapAnswer(row) {
   const answer = { observedAt: row.observedAt, regions: JSON.parse(row.regionsJson), repeaterClock: row.repeaterClock,
     bodyBytes: row.bodyBytes, csvBytes: row.csvBytes, parserVersion: row.parserVersion,
     completeness: row.completeness, provenance: row.provenance };

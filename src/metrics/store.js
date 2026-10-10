@@ -11,6 +11,9 @@ import { topologyMigration } from './topology-migration.js';
 import { createTopologyHistory } from './topology-history.js';
 import { regionMigration } from './region-migration.js';
 import { createRegionHistory } from './region-history.js';
+import { createRegionReads } from './region-reads.js';
+import { assertRegionInput } from '../regions/region-validation.js';
+import { regionPruneSchema } from '../regions/region-schemas.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -601,6 +604,7 @@ export class MetricsStore {
   #db;
   #topology;
   #regions;
+  #regionReads;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -640,6 +644,7 @@ export class MetricsStore {
           throw new Error('Region writes require the active owned run');
         }
       });
+      this.#regionReads = createRegionReads(this.#db);
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1725,11 +1730,13 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Shared history retention: samples, runtime events, completed replies, advert events and ended unreferenced runs.
-   * Inventory, direct evidence, fingerprints, active runs and pending replies survive this cleanup. */
+  /** Shared history retention, with child-first region cleanup before source runs.
+   * Latest region snapshots, pending/publishing work, inventory and pending replies survive. */
   pruneOlderThan(cutoffMs) {
+    assertRegionInput(regionPruneSchema, { cutoffMs });
     this.#db.exec('BEGIN');
     try {
+      this.#regionReads.prune(cutoffMs);
       this.#db.prepare('DELETE FROM topology_observations WHERE received_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM topology_capture_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM process_samples WHERE sample_at < ?').run(cutoffMs);
@@ -1756,6 +1763,10 @@ export class MetricsStore {
   stageRegionPublications(input) { return this.#regions.stage(input); }
   claimRegionPublication(input) { return this.#regions.claim(input); }
   resolveRegionPublication(input) { return this.#regions.resolve(input); }
+  getRegionLatest(query) { return this.#regionReads.latest(query); }
+  queryRegionAnswers(query) { return this.#regionReads.answers(query); }
+  queryRegionOutcomes(query) { return this.#regionReads.outcomes(query); }
+  queryRegionPublications(query) { return this.#regionReads.publications(query); }
   recordTopologyCoverage(sample) { return this.#topology.recordCoverage(sample); }
   queryTopologyPaths(query) { return this.#topology.paths(query); }
   getTopologyPath(query) { return this.#topology.path(query); }

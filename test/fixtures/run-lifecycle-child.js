@@ -5,9 +5,18 @@ import { MetricsStore } from '../../src/metrics/store.js';
 import { advertSigner, signedAdvertPacket } from './signed-advert.js';
 import { RemoteRequestCoordinator } from '../../src/radio/remote-request-coordinator.js';
 import { RemoteRequestBudget } from '../../src/radio/remote-request-budget.js';
+import { MetricsSampler } from '../../src/metrics/sampler.js';
 
 const mode = process.argv[2];
 let store; let radio; let releaseStop; let releaseAdvert;
+let resourcesBeforeStop = null;
+if (mode === 'delayed-stop') {
+  const originalStop = MetricsSampler.prototype.stop;
+  MetricsSampler.prototype.stop = function () {
+    originalStop.call(this);
+    resourcesBeforeStop = store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }).total;
+  };
+}
 const originalBegin = MetricsStore.prototype.beginObserverRun;
 MetricsStore.prototype.beginObserverRun = function (input) {
   const result = originalBegin.call(this, input); store = this; return result;
@@ -62,6 +71,7 @@ MetricsStore.prototype.close = function () {
 };
 process.on('message', (message) => {
   if (message.action === 'snapshot') process.send({ snapshot: store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }),
+    resourcesBeforeStop,
     summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER'),
     resources: store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }),
     topology: store.queryTopologyPaths(),

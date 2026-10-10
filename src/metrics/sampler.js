@@ -132,7 +132,8 @@ export class MetricsSampler extends EventEmitter {
     this.#lastPrunedAt = now;
     if (this.#retentionDays > 0) {
       try {
-        this.#metricsStore.pruneOlderThan(now - this.#retentionDays * ONE_DAY_MS);
+        // A retention period longer than the epoch's age has no eligible rows.
+        this.#metricsStore.pruneOlderThan(Math.max(0, now - this.#retentionDays * ONE_DAY_MS));
       } catch (err) {
         this.#logger.warn('services.metricsUi', 'failed to prune persisted metrics', { error: err.message });
       }

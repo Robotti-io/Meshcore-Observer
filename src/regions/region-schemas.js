@@ -62,12 +62,18 @@ export const regionResultSchema = { oneOf: [
 ] };
 
 const windowMs = { type: 'integer', minimum: 3600000, maximum: 8760 * 3600000, multipleOf: 3600000 };
+export const REGION_ANSWER_FRESHNESS_DEFAULT_HOURS = 72;
+export const REGION_ANSWER_FRESHNESS_ENV_KEY = 'PACKETCAPTURE_REGION_ANSWER_FRESHNESS_HOURS';
+export const regionConfigSchema = object({ answerFreshnessWindowMs: windowMs });
+export const regionEnvSchema = { type: 'object', additionalProperties: false,
+  properties: { [REGION_ANSWER_FRESHNESS_ENV_KEY]: { type: 'string', minLength: 1, maxLength: 32, pattern: '^\\s*-?\\d+\\s*$' } } };
+export const regionPruneSchema = object({ cutoffMs: epoch });
 export const regionLatestQuerySchema = object({ observerPublicKey: key, targetPublicKey: key, now: epoch, windowMs });
-export const regionAnswerPageSchema = object({ ...filters, start: epoch, end: epoch, ...page }, ['start', 'end', 'limit', 'offset']);
+export const regionAnswerPageSchema = object({ ...filters, start: epoch, end: epoch, ...page }, ['start', 'end']);
 export const regionOutcomePageSchema = object({ ...filters, start: epoch, end: epoch, ...page,
-  status: { enum: ['answered', 'failed', 'unsupported'] } }, ['start', 'end', 'limit', 'offset']);
+  status: { enum: ['answered', 'failed', 'unsupported'] } }, ['start', 'end']);
 export const regionPublicationPageSchema = object({ brokerId, observerPublicKey: key, targetPublicKey: key,
-  state: publicationState, ...page }, ['brokerId', 'limit', 'offset']);
+  state: publicationState, ...page }, ['brokerId']);
 export const regionStagePublicationsSchema = object({ answerId: id, brokerIds: brokers });
 export const regionClaimPublicationSchema = object({ brokerId, runId: uuid, now: epoch });
 const resolution = { answerId: id, brokerId, runId: uuid, claimToken: uuid, resolvedAt: epoch };

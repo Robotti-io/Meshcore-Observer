@@ -31,6 +31,16 @@ test('invalid topology configuration fails before database/hardware/network star
   assert.doesNotMatch(result.stdout + result.stderr, /failed to open tcp connection/);
 });
 
+test('invalid explicit region freshness fails before store creation and hardware/network startup', () => {
+  for (const value of ['', '0', '8761', '1.5']) {
+    const env = { ...environment(), PACKETCAPTURE_REGION_ANSWER_FRESHNESS_HOURS: value };
+    const result = spawnSync(process.execPath, [resolve('src/index.js')], { env, cwd: process.cwd(), encoding: 'utf8', timeout: 3000, windowsHide: true });
+    assert.equal(result.status, 1); assert.match(result.stdout + result.stderr, /Configuration error:/);
+    assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH), false);
+    assert.doesNotMatch(result.stdout + result.stderr, /meshcore-observer starting|failed to open tcp connection/);
+  }
+});
+
 test('invalid remote overrides fail before store creation and hardware/network startup', () => {
   for (const overrides of [{ PACKETCAPTURE_REMOTE_REQUEST_ACK_TIMEOUT_MS: '' },
     { PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS: '0' },
@@ -105,21 +115,23 @@ test('offline entrypoint checkpoints and records clean completion only after del
   await new Promise((resolve) => setTimeout(resolve, 1100));
   const alive = await snapshot(child);
   assert.ok(alive.summary.observedDurationMs > initial.summary.observedDurationMs);
-  assert.equal(alive.resources.total, 1);
+  assert.ok(alive.resources.total >= 1);
   assert.equal(alive.resources.samples[0].runId, initial.snapshot.runs[0].runId);
-  assert.equal(alive.resources.samples[0].cpuPercent, null);
+  assert.equal(alive.resources.samples.at(-1).cpuPercent, null); // First collection is the unavailable CPU baseline.
   assert.ok(alive.resources.samples[0].rssBytes > 0);
   child.process.send({ action: 'stop' });
   const stopping = await snapshot(child);
   assert.equal(stopping.snapshot.runs[0].state, 'running');
   assert.equal(stopping.snapshot.runs[0].endedAt, null);
+  assert.ok(stopping.resourcesBeforeStop >= alive.resources.total);
+  assert.equal(stopping.resources.total, stopping.resourcesBeforeStop + 1); // Exactly one final resource flush.
   child.process.send({ action: 'release' });
   const result = await child.exited; assert.equal(result.code, 0, result.output);
   read(env, (store) => {
     const run = store.getObserverRun({ runId: initial.snapshot.runs[0].runId });
     assert.equal(run.state, 'clean'); assert.equal(run.endReason, 'SIGINT');
     assert.equal(run.durationIsLowerBound, false); assert.ok(run.observedDurationMs >= alive.summary.observedDurationMs);
-    assert.equal(store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }).total, 2);
+    assert.equal(store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }).total, stopping.resources.total);
   });
 });
 

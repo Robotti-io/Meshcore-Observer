@@ -2,15 +2,17 @@ import { botConfigSchema } from '../bots/schemas.js';
 import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
 import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 import { remoteCoordinatorLimitsSchema } from '../radio/remote-coordinator-schemas.js';
+import { regionConfigSchema } from '../regions/region-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions'],
   properties: {
     remoteRequests: remoteCoordinatorLimitsSchema,
     topology: topologyConfigSchema,
+    regions: regionConfigSchema,
     radio: {
       type: 'object',
       additionalProperties: false,

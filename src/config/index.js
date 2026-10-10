@@ -4,6 +4,7 @@ import { configSchema } from './schema.js';
 import { loadBotsConfig } from '../bots/bots-config-loader.js';
 import { loadBrokersConfig } from '../mqtt/brokers-config-loader.js';
 import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS, remoteRequestEnvSchema } from '../radio/remote-coordinator-schemas.js';
+import { REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, REGION_ANSWER_FRESHNESS_ENV_KEY, regionEnvSchema } from '../regions/region-schemas.js';
 
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
 const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
@@ -17,6 +18,7 @@ export class ConfigError extends Error {
 
 const validate = compileSchema(configSchema);
 const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
+const regionEnvValid = compileSchema(regionEnvSchema);
 
 function readString(env, key, fallback = null) {
   const value = env[key];
@@ -166,6 +168,14 @@ function readTopology(env) {
     maxObservationsPerMinute: readInteger(env, keys[1], 600), pruneAfterDays: readInteger(env, keys[2], 0) };
 }
 
+function readRegions(env) {
+  const key = REGION_ANSWER_FRESHNESS_ENV_KEY;
+  const raw = env[key] === undefined ? {} : { [key]: env[key] };
+  if (!regionEnvValid(raw)) throw new ConfigError(`Invalid region environment: ${formatErrors(regionEnvValid.errors)}`);
+  return { answerFreshnessWindowMs: (raw[key] === undefined ? REGION_ANSWER_FRESHNESS_DEFAULT_HOURS
+    : Number.parseInt(raw[key].trim(), 10)) * 3600000 };
+}
+
 /**
  * Brokers are configured via a JSON file (an array of independent broker
  * definitions), the same pattern as readBots() below, rather than flat env
@@ -264,6 +274,7 @@ export function loadConfig(env = process.env) {
     floodAdvert: readFloodAdvert(env),
     nodeObservations: readNodeObservations(env),
     topology: readTopology(env),
+    regions: readRegions(env),
     remoteRequests: readRemoteRequests(env)
   };
 

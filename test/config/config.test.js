@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadConfig, ConfigError } from '../../src/config/index.js';
 import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS } from '../../src/radio/remote-coordinator-schemas.js';
+import { REGION_ANSWER_FRESHNESS_ENV_KEY, REGION_ANSWER_FRESHNESS_DEFAULT_HOURS } from '../../src/regions/region-schemas.js';
+import { compileSchema } from '../../src/validation/ajv.js';
+import { configSchema } from '../../src/config/schema.js';
 
 function withTempBotsFile(content, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'meshcore-config-'));
@@ -61,6 +64,29 @@ function baseEnv(overrides = {}) {
     ...overrides
   };
 }
+
+test('region-answer freshness defaults and example agree, accept whole-hour boundaries and stay independent', () => {
+  const defaults = loadConfig(baseEnv()); assert.equal(defaults.regions.answerFreshnessWindowMs, 72 * 3600000);
+  assert.equal(REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, 72);
+  const matches = [...readFileSync('.env.example','utf8').matchAll(new RegExp(`^${REGION_ANSWER_FRESHNESS_ENV_KEY}=(\\d+)$`, 'gm'))];
+  assert.equal(matches.length, 1); assert.equal(Number(matches[0][1]), 72);
+  for (const hours of [1,72,8760]) assert.equal(loadConfig(baseEnv({ [REGION_ANSWER_FRESHNESS_ENV_KEY]: ` ${hours} ` })).regions.answerFreshnessWindowMs, hours * 3600000);
+  const custom = loadConfig(baseEnv({ [REGION_ANSWER_FRESHNESS_ENV_KEY]: '96' }));
+  assert.equal(custom.nodeObservations.directHeardWindowMs, defaults.nodeObservations.directHeardWindowMs);
+  assert.deepEqual(custom.topology, defaults.topology); assert.deepEqual(custom.remoteRequests, defaults.remoteRequests);
+  assert.equal(custom.metricsUi.retentionDays, 0); assert.equal(custom.metricsUi.enabled, false); assert.deepEqual(custom.brokers, []);
+});
+
+test('region raw and normalized configuration reject explicit invalid values before use without echoing secrets', () => {
+  for (const value of ['', ' ', '0', '-1', '8761', '1.5', '1e2', 'Infinity', 'SECRET-INVALID', null, 72, {}, '9'.repeat(33)]) {
+    assert.throws(() => loadConfig(baseEnv({ [REGION_ANSWER_FRESHNESS_ENV_KEY]: value })),
+      error => error instanceof ConfigError && !error.message.includes('SECRET-INVALID'));
+  }
+  const valid = compileSchema(configSchema), config = loadConfig(baseEnv());
+  for (const regions of [{ answerFreshnessWindowMs: 0 }, { answerFreshnessWindowMs: 3600001 },
+    { answerFreshnessWindowMs: 8761 * 3600000 }, { answerFreshnessWindowMs: '72' },
+    { answerFreshnessWindowMs: 72 * 3600000, unexpected: true }, {}]) assert.equal(valid({ ...config, regions }), false);
+});
 
 test('remote request defaults agree in normalized configuration and the example, and accept every boundary', () => {
   assert.deepEqual(loadConfig(baseEnv()).remoteRequests, REMOTE_REQUEST_DEFAULTS);
