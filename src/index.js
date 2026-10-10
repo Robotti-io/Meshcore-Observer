@@ -16,6 +16,7 @@ import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
 import { RemoteRequestCoordinator } from './radio/remote-request-coordinator.js';
+import { RegionDiscoveryScheduler } from './regions/region-discovery-scheduler.js';
 import { NodeRegistry } from './nodes/node-registry.js';
 import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
@@ -148,16 +149,24 @@ async function main() {
   });
   floodAdvertScheduler.start();
 
-  // One idle owner shared by future discovery/telemetry producers. There is
-  // no polling here; pending durable foreground work wins every admission.
+  // One owner shared by discovery and future telemetry producers. Pending
+  // durable foreground work wins every admission.
   const remoteRequestCoordinator = new RemoteRequestCoordinator({
     radio: radioManager, airtimeCoordinator, logger, ...config.remoteRequests,
+    preflightTimeoutMs: config.regions.queryPreflightTimeoutMs,
     hasForegroundWork: () => {
       if (replyQueue.size > 0) return true;
       const status = metricsStore.getFloodAdvertState().status;
       return status === 'pending' || status === 'sending';
     }
   });
+
+  const regionDiscovery = config.regions.discoveryEnabled ? new RegionDiscoveryScheduler({
+    config: config.regions, store: metricsStore, runId: runHistory.runId,
+    directHeardWindowMs: config.nodeObservations.directHeardWindowMs,
+    radio: radioManager, coordinator: remoteRequestCoordinator, logger
+  }) : null;
+  regionDiscovery?.start();
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
   // JWT auth seam, kept separate from generic MQTT connection code per
@@ -354,6 +363,7 @@ async function main() {
 
   const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
     teardown: async () => {
+      regionDiscovery?.stop();
       // Detach persistence input and stop checkpoints before asynchronous teardown.
       packetPipeline.off('packet', recordNodeObservation);
       topologyObserver.stop();
@@ -364,6 +374,7 @@ async function main() {
       // Cancel background ownership before outbound schedulers await commands,
       // then retire the radio later under the existing shutdown deadline.
       await remoteRequestCoordinator.stop();
+      await regionDiscovery?.drain();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.
       repeatCheckSweeper.stop();

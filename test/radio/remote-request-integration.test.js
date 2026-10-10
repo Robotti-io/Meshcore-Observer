@@ -16,6 +16,9 @@ import { PacketPipeline } from '../../src/packets/packet-pipeline.js';
 import { ObserverPublisher } from '../../src/mqtt/observer-publisher.js';
 import { LetsMeshAuth } from '../../src/mqtt/letsmesh-auth.js';
 import { buildRawFrame, RouteType, PayloadType } from '../fixtures/packet-frames.js';
+import { RegionDiscoveryScheduler } from '../../src/regions/region-discovery-scheduler.js';
+import { REGION_QUERY_DEFAULTS } from '../../src/regions/region-query-schemas.js';
+import { start, observe, HOUR } from '../fixtures/region-poll.js';
 
 const fixtures = [];
 const OBSERVER = 'BE'.repeat(32);
@@ -47,7 +50,7 @@ function groupText(text = 'Fixture: !echo') {
   const payload = Buffer.concat([createHash('sha256').update(key).digest().subarray(0, 1), mac, ciphertext]);
   return buildRawFrame({ payloadType: PayloadType.GRP_TXT, routeType: RouteType.FLOOD, hops: ['AC'], payload });
 }
-async function rig({ kind = 'serial', actors = false, responseTimeoutMaxMs = 10000 } = {}) {
+async function rig({ kind = 'serial', actors = false, responseTimeoutMaxMs = 10000, discovery = false } = {}) {
   vi.useFakeTimers(); const clock = { value: 0 }; const sdk = []; const attempts = []; const publications = [];
   const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const store = new MetricsStore({ dbPath: ':memory:' });
@@ -93,6 +96,7 @@ async function rig({ kind = 'serial', actors = false, responseTimeoutMaxMs = 100
   const coordinator = new RemoteRequestCoordinator({ radio, logger, airtimeCoordinator: airtime,
     hasForegroundWork: () => (replyQueue?.size ?? 0) > 0 || ['pending', 'sending'].includes(store.getFloodAdvertState().status),
     ackTimeoutMs: 1000, responseTimeoutMaxMs, minIntervalMs: 10000, maxPerMinute: 6,
+    preflightTimeoutMs: 2000, wallNow: () => 100000 + clock.value,
     now: () => clock.value, uniquenessBytes: () => [1, 2, 3, 4] });
   const f = { clock, radio, airtime, coordinator, sdk, store, logger, attempts, publications, pipeline, replyQueue, bot, scheduler,
     current: () => sdk.at(-1),
@@ -100,6 +104,15 @@ async function rig({ kind = 'serial', actors = false, responseTimeoutMaxMs = 100
   fixtures.push(f);
   const ready = new Promise(resolve => radio.once('radio.connected', resolve)); radio.start(); await ready; await flush();
   clock.value = 10000; await f.tick(5);
+  if (discovery) {
+    const run = start(store, 100000 + clock.value);
+    observe(store, 'AC'.repeat(32), 100000 + clock.value);
+    f.discovery = new RegionDiscoveryScheduler({ store, runId: run.runId, directHeardWindowMs: 72 * HOUR,
+      radio, coordinator, logger, wallNow: () => 100000 + clock.value, monotonicNow: () => clock.value, jitter: () => 0,
+      config: { ...REGION_QUERY_DEFAULTS, answerFreshnessWindowMs: 72 * HOUR,
+        discoveryEnabled: true, queryStartupDelayMs: 10000, queryTickIntervalMs: 1000 } });
+    f.discovery.start();
+  }
   if (bot) assert.equal(bot.isReady(), true);
   return f;
 }
@@ -128,7 +141,9 @@ async function idle(f) {
 afterEach(async () => {
   try {
     for (const f of fixtures.splice(0)) {
+      f.discovery?.stop();
       const stopping = f.coordinator.stop(); await f.tick(101); await stopping;
+      await f.discovery?.drain();
       f.bot?.stop(); await f.scheduler?.stop(); await f.replyQueue?.stop();
       const closed = f.radio.stop(); await f.tick(101); await closed;
       for (const connection of f.sdk) {
@@ -141,6 +156,45 @@ afterEach(async () => {
 });
 
 for (const kind of ['serial', 'tcp']) {
+  test(kind + ': opt-in producer saves a measured empty reply through actual contact/Sent/binary ownership and store reservation', async () => {
+    const f = await rig({ kind, discovery: true }); await f.tick(9999);
+    assert.equal(f.attempts.length, 0); await f.tick(1);
+    assert.equal(f.attempts[0].bytes[0], 0x1E);
+    assert.equal(f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: 'AC'.repeat(32) }), null);
+    await frame(f, regionContact()); assert.equal(f.attempts[1].bytes[0], 0x39);
+    assert.equal(f.attempts[1].bytes.length, 35);
+    const reserved = f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: 'AC'.repeat(32) });
+    assert.equal(reserved.cycleReservations, 1); assert.equal(reserved.reason, 'reserved');
+    await frame(f, sent(17)); const response = [0x8C, 0, 17, 0, 0, 0, 0, 0, 0, 0];
+    await frame(f, response);
+    const latest = f.store.getRegionLatest({ observerPublicKey: OBSERVER, targetPublicKey: 'AC'.repeat(32),
+      now: 100000 + f.clock.value, windowMs: 72 * HOUR });
+    assert.equal(latest.presence, 'empty'); assert.deepEqual(latest.answer.regions, []);
+    assert.equal(latest.latestOutcome.startedAt, reserved.reservedAt);
+    assert.equal(latest.answer.observedAt, 100000 + f.clock.value);
+    assert.equal(f.store.queryRegionPublications({ brokerId: 'unused' }).total, 0);
+    assert.equal(f.publications.length, 0); assert.equal(vi.getTimerCount(), 1);
+    assert.deepEqual(f.attempts.map(x => x.bytes[0]), [0x1E, 0x39]);
+  });
+  test(kind + ': producer contact timeout uses the configured deadline, pauses uncertain generation and drains without invented RF evidence', async () => {
+    const f = await rig({ kind, discovery: true }); await f.tick(10000);
+    await f.tick(1999); assert.equal(f.sdk.length, 1);
+    await f.tick(1); assert.equal(f.radio.getConnectionSnapshot().generation, null);
+    assert.deepEqual(f.attempts.map(x => x.bytes[0]), [0x1E]);
+    assert.equal(f.store.queryRegionOutcomes({ start: 0, end: Number.MAX_SAFE_INTEGER }).total, 0);
+    assert.equal(f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: 'AC'.repeat(32) }), null);
+    assert.ok(f.logger.warn.mock.calls.some(([, message]) => /contact read timed out/.test(message)));
+    f.discovery.stop(); const stopped = f.coordinator.stop(); await f.tick(101); await stopped; await f.discovery.drain();
+  });
+  test(kind + ': producer stop during a physical ACK wait saves stopped outcome after targeted retirement before store closes', async () => {
+    const f = await rig({ kind, discovery: true }); await f.tick(10000); await frame(f, regionContact());
+    assert.equal(f.attempts.length, 2); f.discovery.stop();
+    const stopped = f.coordinator.stop(); await f.tick(101); await stopped; await f.discovery.drain();
+    const outcome = f.store.queryRegionOutcomes({ start: 0, end: Number.MAX_SAFE_INTEGER }).outcomes[0];
+    assert.equal(outcome.reason, 'stopped'); assert.equal(outcome.status, 'failed');
+    assert.equal(f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: 'AC'.repeat(32) }).cycleReservations, 1);
+    assert.equal(vi.getTimerCount(), 0);
+  });
   test(kind + ': fragmented anonymous contact/Sent/reply frames share ownership without holding airtime for the read', async () => {
     const f = await rig({ kind }); await f.tick(20); const reserve = vi.fn(() => true);
     const result = regions(f, 1, reserve); await flush();

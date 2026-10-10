@@ -80,6 +80,17 @@ test('offline UI-disabled entrypoint constructs idle remote ownership and drains
   assert.equal((await child.exited).code, 0);
   read(env, store => assert.equal(store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }).runs[0].state, 'clean'));
 });
+test('enabled discovery entrypoint stops admission, drains coordinator then producer before radio/run/store teardown', async () => {
+  const env = { ...environment(), PACKETCAPTURE_REGION_DISCOVERY_ENABLED: 'true',
+    PACKETCAPTURE_REGION_QUERY_PREFLIGHT_TIMEOUT_MS: '2000' };
+  const child = launch(env, 'discovery-lifecycle'); await child.next(); child.process.send({ action: 'stop' });
+  assert.deepEqual(await child.next(), { discoveryDraining: true, started: 1, admissionStopped: true, remoteStopped: true });
+  const waiting = await snapshot(child); assert.equal(waiting.snapshot.runs[0].state, 'running');
+  assert.equal(waiting.snapshot.runs[0].endedAt, null);
+  child.process.send({ action: 'release' }); assert.deepEqual(await child.next(), { radioStopping: true });
+  assert.equal((await child.exited).code, 0);
+  read(env, store => assert.equal(store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }).runs[0].state, 'clean'));
+});
 test('offline dashboard-disabled topology persists bounded duplicate receptions and final coverage, then survives restart unchanged', async () => {
   const env = { ...environment(), PACKETCAPTURE_TOPOLOGY_MAX_OBSERVATIONS_PER_MINUTE: '2' };
   const child = launch(env); await child.next();

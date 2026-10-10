@@ -757,12 +757,11 @@ the script before running it.
 
 ### Shared remote-request foundation
 
-The shared coordinator is constructed at startup but remains idle: this
-foundation schedules no polls or automatic remote requests. It uses the
-existing Companion connection locally and requires no internet service.
-Region discovery, telemetry producers and network publication are separate
-release features. Durable region-answer storage is described below; installing
-the coordinator does not activate those producers.
+The shared coordinator uses the existing Companion connection locally and
+requires no internet service. It remains idle unless a producer requests work.
+Region discovery is disabled by default and uses the separately configured
+opt-in scheduler described below. Telemetry and region MQTT publication remain
+separate release features.
 
 Operator overrides and code defaults match `.env.example`. All settings are
 whole numbers; an omitted value uses the default, while an explicit blank,
@@ -807,24 +806,25 @@ submitted context. The binary envelope provides no full RF sender identity.
 Generation guards reject old-session callbacks, and a 32-entry retired-tag map
 rejects known recent reuse for response cap plus 60000ms. This bounded process
 bookkeeping does not prove cryptographic identity or prevent every RF replay
-across restarts/arbitrary delay. Response interpretation and durable storage
-belong to the future feature owners. Installed anonymous-region dispatch remains
-unsupported until its separately approved library/firmware integration exists;
-the coordinator changes no contacts, routes, ACLs or login behavior.
+across restarts/arbitrary delay. Anonymous regions use a fixed adapter over the
+installed library's raw-frame transport, a read-only exact-key contact check,
+and owned region storage. The coordinator changes no contacts, routes, ACLs or
+login behavior.
 
 Deterministic tests cover installed serial/TCP framing with stub drivers, shared
 bot/advert/signing/capture work, 1,000 mixed completion/failure cycles and 1,000
 busy-air deferrals. They do not certify deployed firmware, hardware or RF
-delivery; activation and live validation remain in issues #31/#34/#37.
+delivery; final region feature acceptance remains #31 T5, telemetry activation
+remains #34, and hardware/soak validation remains #37.
 
 ### Durable region observations
 
 The always-on SQLite store retains normalized region answers and terminal query
 outcomes locally, including when the dashboard is disabled or no broker is
-configured. This foundation works without internet access. Actual opt-in region
-queries remain issue #31; broker opt-in, MQTT payloads, delivery policy and
-CoreScope integration remain #32. Neither producer is enabled by these storage
-settings, and the dashboard has no region-history view yet.
+configured. This works without internet access. The #31 scheduler can collect
+answers locally when explicitly enabled; broker opt-in, MQTT payloads, delivery
+policy and CoreScope integration remain #32. Storage settings alone do not
+enable discovery, and the dashboard has no region-history view yet.
 
 An answer is an observation from the trusted Companion, associated with the
 captured full Observer and target public keys. It is not proof of a repeater's
@@ -903,9 +903,9 @@ restoring an older backup loses observations recorded after that backup.
 
 Migration 15 adds reporter/target scheduling metadata to this same always-on
 store, including while discovery and the dashboard are disabled. The backend
-now provides bounded candidate pages, pre-send reservations and atomic
-answer/retry completion; the runtime discovery scheduler is staged separately
-in #31 T4. A reservation saves permission and a conservative cooldown before a
+provides bounded candidate pages, pre-send reservations and atomic
+answer/retry completion used by the opt-in runtime scheduler. A reservation
+saves permission and a conservative cooldown before a
 send can be allowed. It is not evidence of transmitted RF or a successful
 reply, and restart never replays it or invents a terminal result.
 
@@ -918,6 +918,41 @@ reservations until agreement with durable observation time; captured result
 timestamps remain unchanged. Long outages, forward clock jumps and retained
 per-pair state can affect availability and capacity. Monitor the persistent
 volume and preserve a verified closed backup before the first upgraded start.
+
+The producer is constructed only with `PACKETCAPTURE_REGION_DISCOVERY_ENABLED=true`;
+the omitted default is false. Central code and `.env.example` define startup
+delay, tick, refresh, retry, maximum-attempt and contact-read timeout overrides.
+It uses one unreferenced timer and one in-progress operation, selecting one
+target from a bounded 100-key page per pass. It advances after that selected
+full key and uses an empty pass to wrap, with no queued catalog or catch-up
+burst. Pending bot replies/adverts, quiet-air checks and shared remote limits
+still govern actual dispatch. The dashboard and brokers need not be enabled.
+
+Admission and dispatch both require a current verified repeater with original
+zero-hop reception within `PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS` (72 hours by
+default), expiring at equality. The Companion must already contain the exact
+key with a zero-length outbound path. Missing/unsafe contacts receive a saved
+base-retry delay without RF or a terminal outcome. Unsupported or uncertain
+local contact reads pause discovery on the captured generation; uncertain
+reads trigger the coordinator's explained reset. A new ready generation can
+reconsider work without resetting saved cooldowns or global RF budgets.
+
+Original dispatch and matching binary receipt times accompany terminal data.
+Wall-clock rollback pauses new RF against durable high water and a whole-second
+monotonic elapsed lower bound; saved observations retain millisecond wall times
+and explicit anomaly flags. Successful empty/nonempty answers refresh normally;
+malformed responses/timeouts preserve prior latest answers and use bounded
+retry policy. A command-level unsupported error has its own refresh cooldown.
+No region publications are staged by this producer.
+
+If final persistence fails, discovery pauses with one unsaved result and
+retries only that local write on subsequent ticks. Its original times and saved
+cooldown remain intact. Shutdown first stops admission, cancels/drains remote
+ownership, then drains result persistence before radio/run/store teardown.
+An unsaved result or unvalidated completion prevents a clean run end; the
+existing 10-second shutdown bound still applies. Fixed warnings explain these
+conditions without including raw frames, contact data or credentials. Full
+feature activation/troubleshooting acceptance is staged in #31 T5.
 
 Offline fixtures exercise migration, empty/latest/pending state, pruning,
 clean/abrupt restart and closed-backup restore. The retained-volume regression

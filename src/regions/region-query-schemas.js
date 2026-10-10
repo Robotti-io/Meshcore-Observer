@@ -1,5 +1,5 @@
-import { REMOTE_FRAME_MAX_BYTES } from '../radio/remote-request-schemas.js';
-import { regionConfigSchema, regionResultSchema } from './region-schemas.js';
+import { REMOTE_FRAME_MAX_BYTES, REMOTE_BODY_MAX_BYTES, REMOTE_ERROR_REASONS } from '../radio/remote-request-schemas.js';
+import { regionConfigSchema, regionResultSchema, REGION_FAILURE_REASONS } from './region-schemas.js';
 
 export const REGION_QUERY_DEFAULTS = Object.freeze({
   discoveryEnabled: false, queryRefreshIntervalMs: 24 * 3600000,
@@ -71,3 +71,39 @@ const pollResultSchema = { oneOf: regionResultSchema.oneOf.map(branch => ({ ...b
 })) };
 export const regionPollCompletionSchema = object({ ...reservationIdentity, result: pollResultSchema,
   policy: regionQueryPolicySchema, jitterRatio });
+
+// Trusted executable dependencies stay outside these strict data contracts.
+export const regionSchedulerOptionsSchema = object({ runId: uuid,
+  directHeardWindowMs: regionConfigSchema.properties.answerFreshnessWindowMs });
+export const regionSchedulerClockSchema = object({ wall: epoch,
+  monotonic: { type: 'number', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } });
+export const regionSchedulerJitterSchema = object({ jitterRatio });
+export const regionSchedulerSnapshotSchema = object({
+  generation: { anyOf: [{ type: 'null' }, { ...epoch, minimum: 1 }] }, ready: { type: 'boolean' },
+  observerPublicKey: { anyOf: [{ type: 'null' }, { ...key, pattern: '^[0-9a-fA-F]{64}$' }] }
+});
+export const REGION_PREFLIGHT_DEFERRALS = Object.freeze([
+  'contact-missing', 'unsafe-route', 'preflight-unsupported', 'preflight-failed'
+]);
+const completionContext = object({ requestId: uuid, targetPublicKey: key,
+  operation: { const: 'anonymous-regions' }, params: object({}),
+  generation: { ...epoch, minimum: 1 }, observerPublicKey: key });
+const deferredReason = { enum: [...REGION_PREFLIGHT_DEFERRALS, 'reservation-unavailable',
+  'recovery-failed', 'busy', 'stopped', 'disconnected', 'not-ready', 'preflight-paused',
+  'foreground', 'rate-limited', 'quiet-air', 'ineligible', 'queue-timeout'] };
+const failureFields = {
+  status: { const: 'failed' }, reason: { enum: [...REGION_FAILURE_REASONS, 'preflight-timeout'] },
+  context: completionContext,
+  errorCode: byte, errorReason: { enum: [...Object.values(REMOTE_ERROR_REASONS), 'unknown'] },
+  recovery: { enum: ['reset', 'stale-generation', 'close-failed', 'close-timeout', 'failed'] }
+};
+const tagged = { tag: { ...epoch, maximum: 0xFFFFFFFF }, route: { enum: ['direct', 'flood'] } };
+export const regionSchedulerResponseSchema = { oneOf: [
+  object({ status: { const: 'deferred' }, reason: deferredReason, context: completionContext }, ['status', 'reason']),
+  object(failureFields, ['status', 'reason']),
+  object({ ...failureFields, dispatchedAt: epoch, ...tagged }, ['status', 'reason', 'context', 'dispatchedAt']),
+  object({ status: { const: 'completed' }, context: completionContext, dispatchedAt: epoch,
+    receivedAt: epoch, ...tagged, route: { const: 'direct' },
+    body: { type: 'array', minItems: 1, maxItems: REMOTE_BODY_MAX_BYTES, items: byte },
+    provenance: { const: 'companion-tag-attributed' } })
+] };

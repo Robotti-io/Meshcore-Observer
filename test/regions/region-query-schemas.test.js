@@ -71,3 +71,20 @@ test('only known schemas can validate query inputs and cross-field policy checks
   rejects(schemas.regionQueryConfigSchema,{ ...config,queryRetryBaseMs:7200000,queryRetryMaxMs:3600000 });
   rejects(schemas.regionQueryConfigSchema,{ ...config,discoveryEnabled:'false' });
 });
+test('producer response variants require original dispatch/receipt/context and reject unknown or phase-incompatible fields', () => {
+  const context = { requestId, targetPublicKey, observerPublicKey, generation: 1, operation: 'anonymous-regions', params: {} };
+  const response = { status: 'completed', context, dispatchedAt: 1000, receivedAt: 1001,
+    tag: 42, route: 'direct', body: [0,0,0,0], provenance: 'companion-tag-attributed' };
+  valid(schemas.regionSchedulerResponseSchema, response);
+  for (const field of Object.keys(response)) {
+    const incomplete = { ...response }; delete incomplete[field]; rejects(schemas.regionSchedulerResponseSchema, incomplete);
+  }
+  for (const change of [{ route:'flood' }, { extra:true }, { body:[] }, { receivedAt:-1 }, { context:{ ...context, runId } }]) {
+    rejects(schemas.regionSchedulerResponseSchema, { ...response, ...change });
+  }
+  valid(schemas.regionSchedulerResponseSchema, { status:'deferred', reason:'foreground' });
+  valid(schemas.regionSchedulerResponseSchema, { status:'failed', reason:'preflight-timeout', context, recovery:'reset' });
+  valid(schemas.regionSchedulerResponseSchema, { status:'failed', reason:'response-timeout', context, dispatchedAt:1000, tag:42, route:'direct' });
+  rejects(schemas.regionSchedulerResponseSchema, { status:'deferred', reason:'foreground', dispatchedAt:1000 });
+  rejects(schemas.regionSchedulerResponseSchema, { status:'failed', reason:'response-timeout', dispatchedAt:1000 });
+});

@@ -9,6 +9,7 @@ import { MetricsSampler } from '../../src/metrics/sampler.js';
 import { MqttManager } from '../../src/mqtt/mqtt-manager.js';
 import { parseRegionResponseBody } from '../../src/regions/region-response-parser.js';
 import { randomUUID } from 'node:crypto';
+import { RegionDiscoveryScheduler } from '../../src/regions/region-discovery-scheduler.js';
 
 const mode = process.argv[2];
 let store; let radio; let releaseStop; let releaseAdvert;
@@ -32,6 +33,17 @@ MetricsStore.prototype.beginObserverRun = function (input) {
 };
 const stopGate = new Promise((resolve) => { releaseStop = resolve; });
 const advertGate = new Promise((resolve) => { releaseAdvert = resolve; });
+if (mode === 'discovery-lifecycle') {
+  let started = 0, admissionStopped = false, remoteStopped = false;
+  RegionDiscoveryScheduler.prototype.start = function () { started++; };
+  RegionDiscoveryScheduler.prototype.stop = function () { admissionStopped = true; };
+  RegionDiscoveryScheduler.prototype.drain = async function () {
+    process.send({ discoveryDraining: true, started, admissionStopped, remoteStopped });
+    await stopGate;
+  };
+  const originalStop = RemoteRequestCoordinator.prototype.stop;
+  RemoteRequestCoordinator.prototype.stop = async function () { await originalStop.call(this); remoteStopped = true; };
+}
 if (mode === 'remote-lifecycle') {
   const originalTry = RemoteRequestCoordinator.prototype.tryRequest;
   const originalStop = RemoteRequestCoordinator.prototype.stop;
@@ -71,7 +83,7 @@ RadioManager.prototype.start = function () {
 };
 RadioManager.prototype.stop = async () => {
   if (mode === 'delayed-stop') await stopGate;
-  if (mode === 'remote-lifecycle') process.send({ radioStopping: true });
+  if (mode === 'remote-lifecycle' || mode === 'discovery-lifecycle') process.send({ radioStopping: true });
 };
 const originalClose = MetricsStore.prototype.close;
 MetricsStore.prototype.close = function () {
