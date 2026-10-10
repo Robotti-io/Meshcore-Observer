@@ -132,7 +132,7 @@ test('offline UI-disabled entrypoint upgrades v13 without inferred regions or lo
   assert.equal(observed.regions.remoteRequestCalls,0); assert.equal(observed.regions.mqttPublishCalls,0);
   child.process.send({ action:'stop' }); assert.equal((await child.exited).code,0);
   const checked=new DatabaseSync(path);
-  try { assert.equal(checked.prepare('PRAGMA user_version').get().user_version,15);
+  try { assert.equal(checked.prepare('PRAGMA user_version').get().user_version,16);
     assert.equal(checked.prepare('SELECT name FROM nodes').get().name,'Kept offline'); assert.deepEqual(checked.prepare('PRAGMA foreign_key_check').all(),[]); }
   finally { checked.close(); }
 });

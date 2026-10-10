@@ -1,8 +1,8 @@
-# Telemetry contracts and pure decoders — #33 T1/T2
+# Telemetry contracts, decoding and owned storage — #33 T1–T3
 
-These internal contracts define the inputs to the pure decoders and the planned
-owned telemetry store. T1 supplies contracts/configuration; T2 supplies the pure
-parsers. No migration, poller or public API is installed by either task.
+These internal contracts define the inputs to the pure decoders and owned
+telemetry store. T1 supplies contracts/configuration, T2 the pure parsers, and
+T3 migration 16 and owned writes/retention. No poller or public API is installed.
 All schemas live in `src/telemetry/telemetry-schemas.js`; use
 `assertTelemetryInput`/`assertTelemetryResult` from `telemetry-validation.js`
 so strict shared AJV validation always precedes semantic checks. Errors contain
@@ -150,7 +150,8 @@ Whole-hour overrides 1–8760 normalize to `telemetry.freshnessWindowMs` in cent
 configuration. Explicit empty, fractional, nonnumeric or out-of-range values
 fail startup. Freshness changes observation-age interpretation only; it enables
 no RF activity or pruning. Shared metrics history retention remains 0/unlimited
-by default regardless of the UI flag; actual telemetry retention arrives in T3.
+by default regardless of the UI flag; T3 applies it to telemetry history while
+protecting both latest pointers and their required source runs.
 
 Latest input requires full reporter/target, typed variant, `now` and whole-hour
 window. Range inputs require millisecond `[start,end)` boundaries and optional
@@ -164,6 +165,69 @@ The current closed shapes and wire/item limits bound legitimate payloads below
 this ceiling; maximum supported fixtures verify that. The explicit byte guard
 also protects later schema evolution. This bound applies before persistence,
 not as a promise about total retained database size.
+
+## Owned transactional storage — T3
+
+The always-on MetricsStore applies migration **16** at startup, independently of
+the optional UI. It adds `telemetry_query_outcomes`, `telemetry_observations` and
+`telemetry_latest` with scope/time/run indexes, CHECKs and foreign keys. Existing
+datasets are unchanged; migration creates no invented samples. A migration
+failure rolls back its tables/indexes/version and fails startup before hardware
+or network services. It never opens a second database or installs a dependency.
+
+`MetricsStore.recordTelemetryResult(result)` validates the full strict result
+before a transaction and requires the active owned running source run. A merely
+reopened store has no mutation authority. One transaction writes the immutable
+outcome, optional bounded normalized observation, receipt-collision evidence
+and both latest pointers, or rolls all of them back. Decoding stays pure and
+collection is still #34; T3 supplies no new producer or background timer.
+
+Replaying an identical request/result is idempotent, regardless of object key
+ordering. Changing immutable context, times, route/tag, variant or measurement
+content under that UUID fails with a fixed identity-conflict error. Array order
+remains meaningful. Replay also validates saved content; corrupted normalized
+data cannot be silently accepted or leaked through an error. Neither failures
+nor unsupported results insert an empty observation or modify latest pointers.
+
+Each full reporter/target/component/canonical-variant scope keeps the latest
+useful observation and, independently, the latest fully decoded observation.
+An initial partial scope has no fabricated decoded pointer. A newer partial
+reply may replace useful data while the older decoded observation retains its
+own original receipt time. A late decoded reply can advance the decoded pointer
+without replacing a newer partial useful observation. Fields are never merged
+or refreshed across observations, and decoded quality remains response-only.
+
+Ordering uses original receipt time and then lexicographic request UUID for
+deterministic ties, not commit/arrival order. Any distinct request at the same
+scope/receipt time marks every retained peer ambiguous, even for identical
+values. The ambiguity flag survives pruning of other peers; a later uniquely
+timed observation can become the next useful snapshot. Request replay does not
+create a second observation or manufacture a collision.
+
+Explicit request-clock anomalies/impossible receipt ordering stay history-only.
+A source run with a known clock anomaly or a request predating its source run
+also cannot advance either pointer; original flags/times stay unchanged and
+`latest_eligible` records this conservative derived guard. T3 does not read the
+current clock: an ordered original timestamp that becomes future-dated relative
+to a later read is preserved, with truthful freshness interpretation owned by T4.
+Composite foreign keys prevent latest from pointing into another scope, into a
+history-only observation or, for the decoded pointer, into partial-quality data.
+
+Shared pruning runs child-first in the existing store transaction. Only
+unreferenced observations whose receipt **and** completion are strictly before
+the cutoff can be removed; cutoff equality stays. Unreferenced outcomes require
+completion and any available receipt to be strictly older too. Both latest
+observations, including old/stale/empty snapshots, and their outcome/source run
+remain protected. Source-run pruning discovers the new run foreign key through
+the existing guard, so clean or unclean runs disappear only after all retained
+children are gone. Failure in telemetry or another dataset's shared cleanup
+rolls back all attempted deletions. Save-first retention can deliberately keep
+data older than the configured history duration; it is not a disk-size cap.
+
+The internal range/latest read contracts remain T4, and integrated entrypoint
+backup/restart/operational acceptance remains T5. T3 fixtures prove isolated
+fresh/older-schema upgrades, transaction failures, reopen ownership, source-run
+protection and prune behavior; they do not complete #33 or establish live RF.
 
 Primary-source pins, protected storage/retention decisions and remaining task
 boundaries are recorded in the [approved #33 plan](pillar-1-issues/p1-12.md).

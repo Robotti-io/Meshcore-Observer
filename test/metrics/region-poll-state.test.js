@@ -22,7 +22,7 @@ test('migration 15 upgrades v14 atomically without touching any legacy data or s
   });
   f.open();assert.equal(f.store.getRegionPollState(SCOPE),null);f.close();
   f.inspect(db=>{
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version,15);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version,16);
     for(const [table,rows] of prior)assert.deepEqual(db.prepare('SELECT * FROM '+table).all().map(row=>({...row})),rows);
     assert.equal(db.prepare('SELECT count(*) AS n FROM region_poll_state').get().n,0);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
@@ -38,7 +38,7 @@ test('the final migration index failure rolls back the table, all poll indexes a
     assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name LIKE 'region_poll_%' OR name LIKE 'idx_region_poll_%'").get().n,0);
     assert.equal(db.prepare('SELECT count(*) AS n FROM nodes').get().n,1);db.exec('DROP INDEX idx_nodes_type_key');
   });
-  f.open();f.close();f.inspect(db=>assert.equal(db.prepare('PRAGMA user_version').get().user_version,15));
+  f.open();f.close();f.inspect(db=>assert.equal(db.prepare('PRAGMA user_version').get().user_version,16));
 });
 
 test('candidate pages require fresh verified direct repeater evidence and strict keyset limits',()=>{

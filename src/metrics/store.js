@@ -16,6 +16,8 @@ import { createRegionHistory } from './region-history.js';
 import { createRegionReads } from './region-reads.js';
 import { assertRegionInput } from '../regions/region-validation.js';
 import { regionPruneSchema } from '../regions/region-schemas.js';
+import { telemetryMigration } from './telemetry-migration.js';
+import { createTelemetryHistory } from './telemetry-history.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -530,7 +532,8 @@ const MIGRATIONS = [
   },
   topologyMigration,
   regionMigration,
-  regionPollMigration
+  regionPollMigration,
+  telemetryMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -609,6 +612,7 @@ export class MetricsStore {
   #regions;
   #regionReads;
   #regionPoll;
+  #telemetry;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -651,6 +655,11 @@ export class MetricsStore {
       this.#regions = createRegionHistory(this.#db, requireRegionRun);
       this.#regionReads = createRegionReads(this.#db);
       this.#regionPoll = createRegionPollState(this.#db, requireRegionRun, this.#regions.recordWithinTransaction);
+      this.#telemetry = createTelemetryHistory(this.#db, (runId) => {
+        const run = this.#activeRunId === runId ? this.getObserverRun({ runId }) : null;
+        if (!run || run.state !== 'running') throw new Error('Telemetry writes require the active owned run');
+        return run;
+      });
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1736,12 +1745,13 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
-  /** Shared history retention, with child-first region cleanup before source runs.
-   * Latest region snapshots, pending/publishing work, inventory and pending replies survive. */
+  /** Shared history retention, with child-first telemetry/region cleanup before source runs.
+   * Both telemetry latest pointers, region snapshots, pending work and inventory survive. */
   pruneOlderThan(cutoffMs) {
     assertRegionInput(regionPruneSchema, { cutoffMs });
     this.#db.exec('BEGIN');
     try {
+      this.#telemetry.prune(cutoffMs);
       this.#regionReads.prune(cutoffMs);
       this.#db.prepare('DELETE FROM topology_observations WHERE received_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM topology_capture_samples WHERE sample_at < ?').run(cutoffMs);
@@ -1766,6 +1776,7 @@ export class MetricsStore {
 
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
   recordRegionResult(result) { return this.#regions.record(result); }
+  recordTelemetryResult(result) { return this.#telemetry.record(result); }
   queryRegionPollCandidates(query, policy) { return this.#regionPoll.candidates(query, policy); }
   getRegionPollState(query) { return this.#regionPoll.state(query); }
   getRegionPollHighWater() { return this.#regionPoll.highWater(); }

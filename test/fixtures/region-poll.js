@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { parseRegionResponseBody } from '../../src/regions/region-response-parser.js';
+import { dropTelemetrySchema } from './telemetry-downgrade.js';
 
 export const OBSERVER='BE'.repeat(32), TARGET='AC'.repeat(32), HOUR=3600000;
 export const POLICY={ queryRefreshIntervalMs:24*HOUR,queryRetryBaseMs:15*60000,
@@ -42,4 +43,4 @@ export function pollSnapshot(db) {
   return Object.fromEntries(['region_query_outcomes','region_answers','region_latest','region_publications','region_poll_state']
     .map(table=>[table,db.prepare('SELECT * FROM '+table).all().map(row=>({ ...row }))]));
 }
-export const dropPollSchema='DROP TABLE region_poll_state; DROP INDEX idx_nodes_type_key;';
+export const dropPollSchema=dropTelemetrySchema+' DROP TABLE region_poll_state; DROP INDEX idx_nodes_type_key;';

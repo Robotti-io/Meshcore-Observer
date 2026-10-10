@@ -180,7 +180,7 @@ test('v8 migration preserves IDs, legacy unavailable evidence, other datasets an
   assert.ok(id > 42);
   const reopened = openStore(dbPath);
   assert.deepEqual(reopened.getReplyById(id), store.getReplyById(id));
-  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 15);
+  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 16);
 });
 
 test('a failed v9 migration rolls back its rebuild and version without losing old records', () => {

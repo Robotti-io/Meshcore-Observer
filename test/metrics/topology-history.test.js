@@ -216,7 +216,7 @@ test('migration 13 preserves earlier inventory/run state, creates no legacy obse
   store = open(path); assert.equal(store.getObserverRun({ runId: run.runId }).state, 'running');
   assert.equal(store.countNodesByType('REPEATER'), 1); assert.equal(store.queryTopologyPaths().total, 0);
   assert.equal(store.queryTopologyObservations(RANGE).total, 0); close(store);
-  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 15);
+  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 16);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []); db.close();
 });
 

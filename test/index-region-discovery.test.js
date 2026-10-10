@@ -270,6 +270,6 @@ test('actual offline entrypoint upgrades v14 to v15 without inventing schedules,
   const child = await launch(f); const after = await child.ask({ action: 'tick', ms: 10000 });
   assert.equal(after.inventory, 1); assert.deepEqual(codes(after), []); assert.equal(after.state, null); assert.equal(after.outcomes.total, 0); await child.stop();
   const checked = new DatabaseSync(f.env.PACKETCAPTURE_METRICS_UI_DB_PATH);
-  try { assert.equal(checked.prepare('PRAGMA user_version').get().user_version, 15); assert.deepEqual(checked.prepare('PRAGMA foreign_key_check').all(), []); }
+  try { assert.equal(checked.prepare('PRAGMA user_version').get().user_version, 16); assert.deepEqual(checked.prepare('PRAGMA foreign_key_check').all(), []); }
   finally { checked.close(); }
 });
