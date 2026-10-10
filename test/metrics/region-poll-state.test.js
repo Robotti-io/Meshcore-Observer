@@ -152,7 +152,7 @@ test('wrong/stale request, reporter, target and reservation run cannot write ter
 test('malformed completion, identity mismatch, broker staging and backdated start are rejected before effects',()=>{
   const f=fixture(),r=reservation(f.run);f.store.reserveRegionPoll(r);
   for(const mutate of [
-    input=>{input.result.brokerIds=['secret'];},input=>{input.result.outcome.requestId=randomUUID();},
+    input=>{input.result.brokerIds=[''];},input=>{input.result.outcome.requestId=randomUUID();},
     input=>{input.result.answer.regions=['é'];input.result.answer.csvBytes=1;},
     input=>{input.result.outcome.startedAt=999;}]){
     const input=completion(r);mutate(input);

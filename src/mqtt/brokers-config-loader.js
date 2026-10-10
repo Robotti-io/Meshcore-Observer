@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { brokersConfigSchema } from './schemas.js';
+import { REGION_PUBLICATION_DEFAULTS,regionPublicationBrokerIdsSchema } from './region-publication-schemas.js';
 
 const validate = compileSchema(brokersConfigSchema);
+const destinationsValid = compileSchema(regionPublicationBrokerIdsSchema);
 
 export class BrokersConfigError extends Error {
   constructor(message) {
@@ -15,6 +17,7 @@ function normalizeBroker(broker) {
   return {
     id: broker.id,
     enabled: broker.enabled,
+    regionPublication: { ...REGION_PUBLICATION_DEFAULTS,...broker.regionPublication },
     host: broker.host,
     port: broker.port,
     transport: broker.transport ?? 'tcp',
@@ -94,6 +97,10 @@ export function loadBrokersConfig(filePath) {
       throw new BrokersConfigError(`Duplicate broker id "${broker.id}" in brokers config file "${filePath}"`);
     }
     ids.add(broker.id);
+    const publication={ ...REGION_PUBLICATION_DEFAULTS,...broker.regionPublication };
+    if(publication.retryBaseMs>publication.retryMaxMs) {
+      throw new BrokersConfigError('Region publication retry maximum must be at least its retry base');
+    }
 
     if (broker.auth.method === 'password' && !broker.auth.username) {
       throw new BrokersConfigError(`Broker "${broker.id}" uses password auth but has no username configured`);
@@ -103,5 +110,8 @@ export function loadBrokersConfig(filePath) {
     }
   }
 
+  if(!destinationsValid(parsed.filter(b=>b.enabled && b.regionPublication?.enabled).map(b=>b.id))) {
+    throw new BrokersConfigError('Region publication supports at most 64 destinations with IDs of 1 to 256 characters');
+  }
   return parsed.map(normalizeBroker);
 }

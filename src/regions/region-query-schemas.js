@@ -66,10 +66,7 @@ export const regionPollDeferralSchema = object({ ...scope, runId: uuid, observed
   reason: { enum: ['contact-missing','unsafe-route','preflight-unsupported','preflight-failed'] } });
 export const regionPollReservationSchema = object({ ...reservationIdentity, reservedAt: epoch,
   policy: regionQueryPolicySchema, jitterRatio });
-const pollResultSchema = { oneOf: regionResultSchema.oneOf.map(branch => ({ ...branch,
-  properties: { ...branch.properties, brokerIds: { ...branch.properties.brokerIds, maxItems: 0 } }
-})) };
-export const regionPollCompletionSchema = object({ ...reservationIdentity, result: pollResultSchema,
+export const regionPollCompletionSchema = object({ ...reservationIdentity, result: regionResultSchema,
   policy: regionQueryPolicySchema, jitterRatio });
 
 // Trusted executable dependencies stay outside these strict data contracts.

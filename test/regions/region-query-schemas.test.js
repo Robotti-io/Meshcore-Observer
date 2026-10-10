@@ -44,9 +44,10 @@ test('completion binds immutable reservation identity to validated terminal resu
   for(const field of ['requestId','runId','observerPublicKey','targetPublicKey']) {
     const input=completion();input.result.outcome[field]=field.endsWith('Id')?otherId:'CD'.repeat(32);rejects(schemas.regionPollCompletionSchema,input);
   }
-  for(const change of [{ brokerIds:['first'] },{ tag:42 },{ rawBody:[1] }]) {
+  const optedIn=completion();optedIn.result.brokerIds=['first'];valid(schemas.regionPollCompletionSchema,optedIn);
+  for(const change of [{ brokerIds:[''] },{ tag:42 },{ rawBody:[1] }]) {
     const input=completion();Object.assign(input.result,change);
-    assert.equal(compileSchema(schemas.regionPollCompletionSchema)(input),false,'AJV rejects broker staging/unknown fields before semantic processing');
+    assert.equal(compileSchema(schemas.regionPollCompletionSchema)(input),false,'AJV rejects invalid staging/unknown fields before semantic processing');
     rejects(schemas.regionPollCompletionSchema,input);
   }
   const input=completion();input.result.answer.observedAt=2001;rejects(schemas.regionPollCompletionSchema,input);

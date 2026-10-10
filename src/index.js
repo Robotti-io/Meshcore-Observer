@@ -4,6 +4,7 @@ import { RadioManager } from './radio/radio-manager.js';
 import { PacketPipeline } from './packets/packet-pipeline.js';
 import { MqttManager } from './mqtt/mqtt-manager.js';
 import { ObserverPublisher } from './mqtt/observer-publisher.js';
+import { RegionPublisher } from './mqtt/region-publisher.js';
 import { buildObserverStatusPayload } from './mqtt/observer-status.js';
 import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
 import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
@@ -164,7 +165,8 @@ async function main() {
   const regionDiscovery = config.regions.discoveryEnabled ? new RegionDiscoveryScheduler({
     config: config.regions, store: metricsStore, runId: runHistory.runId,
     directHeardWindowMs: config.nodeObservations.directHeardWindowMs,
-    radio: radioManager, coordinator: remoteRequestCoordinator, logger
+    radio: radioManager, coordinator: remoteRequestCoordinator, logger,
+    brokerIds:config.brokers.filter(b=>b.enabled && b.regionPublication.enabled).map(b=>b.id)
   }) : null;
   regionDiscovery?.start();
 
@@ -207,6 +209,9 @@ async function main() {
     iata: config.observer.iata,
     clientVersion: packageInfo.version
   });
+  const regionPublisher=new RegionPublisher({ store:metricsStore,runId:runHistory.runId,radio:radioManager,
+    mqttManager,brokers:config.brokers,logger });
+  regionPublisher.start();
 
   let mqttStarted = false;
   const stopTokenRefreshLoops = [];
@@ -364,6 +369,7 @@ async function main() {
   const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
     teardown: async () => {
       regionDiscovery?.stop();
+      regionPublisher.stop();
       // Detach persistence input and stop checkpoints before asynchronous teardown.
       packetPipeline.off('packet', recordNodeObservation);
       topologyObserver.stop();
@@ -375,6 +381,7 @@ async function main() {
       // then retire the radio later under the existing shutdown deadline.
       await remoteRequestCoordinator.stop();
       await regionDiscovery?.drain();
+      await regionPublisher.drain();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.
       repeatCheckSweeper.stop();

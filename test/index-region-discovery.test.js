@@ -28,12 +28,17 @@ afterEach(async () => {
   for (const child of children) { child.process.kill(); await child.exited; } children.clear();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); dirs.clear();
 });
-function environment({ enabled = true, bots = false } = {}) {
+function environment({ enabled = true, bots = false,publication=false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'region-entrypoint-')); dirs.add(dir);
   const signer = advertSigner(), targetPublicKey = signer.publicKeyHex;
   const advertRaw = signedAdvertPacket(signer.payload({ name: null })).raw;
   const second = advertSigner(), secondAdvertRaw = signedAdvertPacket(second.payload({ name: 'Second' })).raw;
-  const brokers = join(dir, 'brokers.json'), botFile = join(dir, 'bots.json'); writeFileSync(brokers, '[]');
+  const brokers = join(dir, 'brokers.json'), botFile = join(dir, 'bots.json');
+  writeFileSync(brokers,JSON.stringify(publication?[
+    { id:'regions',enabled:true,host:'fixture.invalid',port:1883,auth:{ method:'none' },
+      regionPublication:{ enabled:true,tickIntervalMs:1000,publishTimeoutMs:1000,retryBaseMs:1000,retryMaxMs:4000 } },
+    { id:'opt-out',enabled:true,host:'opt-out.invalid',port:1883,auth:{ method:'none' } }
+  ]:[]));
   writeFileSync(botFile, JSON.stringify(bots ? [{ name: 'echo', channel: '#echo', enabled: true, minHops: 1,
     commands: [{ trigger: '!echo', response: 'reply to {sender}' }] }] : []));
   return { dir, targetPublicKey, advertRaw, secondTarget: second.publicKeyHex, secondAdvertRaw, env: { ...process.env, PACKETCAPTURE_CONNECTION_TYPE: 'tcp',
@@ -73,6 +78,63 @@ function read(f, callback) {
   try { return callback(store); } finally { store.close(); }
 }
 const codes = snapshot => snapshot.writes.map(write => write.bytes[0]);
+
+test('actual entrypoint saves then publishes a measured answer only to opted-in MQTT client topic, keeping capture active',async()=>{
+  const f=environment({ publication:true }),child=await launch(f,{ publicationBrokerId:'regions' });
+  await child.ask({ action:'advert' });const saved=await child.ask({ action:'tick',ms:10000 });
+  assert.equal(saved.answers.total,1);assert.equal(saved.publications.total,1);
+  const delivered=await child.ask({ action:'tick',ms:1000 });assert.equal(delivered.publications.publications[0].state,'published');
+  assert.equal(delivered.regionDeliveries.length,1);const sent=delivered.regionDeliveries[0];
+  assert.equal(sent.host,'fixture.invalid');assert.equal(sent.topic,'meshcore/client/'+OBSERVER.toLowerCase()+'/regions');
+  assert.deepEqual(sent.settings,{ qos:1,retain:false });assert.deepEqual(sent.payload.regions,['*','BE','be-vlg']);
+  assert.equal(sent.payload.timestamp,new Date(saved.latest.answer.observedAt).toISOString());assert.equal(sent.payload.truncated,true);
+  const capture=await child.ask({ action:'advert',count:2 });assert.equal(capture.publishTopics.filter(topic=>topic.endsWith('/packets')).length,3);
+  assert.equal(capture.regionDeliveries.length,1);await child.stop();
+  read(f,store=>{assert.equal(store.queryObserverRuntimeSummary().cleanRuns,1);assert.equal(store.queryRegionPublications({ brokerId:'opt-out' }).total,0);});
+});
+for(const publicationOutcome of ['failure','hang'])test(`actual entrypoint ${publicationOutcome} retains original answer, bounded retry and continuing capture`,async()=>{
+  const f=environment({ publication:true }),child=await launch(f,{ publicationBrokerId:'regions',publicationOutcome,answer:'empty' });
+  await child.ask({ action:'advert' });await child.ask({ action:'tick',ms:10000 });await child.ask({ action:'tick',ms:1000 });
+  const retriable=await child.ask({ action:'tick',ms:1000 });
+  assert.equal(retriable.publications.publications[0].state,'pending');assert.equal(retriable.latest.presence,'empty');
+  assert.deepEqual(retriable.regionDeliveries[0].payload.regions,[]);
+  await child.ask({ action:'publication-mode',value:'success' });
+  if(publicationOutcome==='hang')await child.ask({ action:'tick',ms:5000 });
+  const retried=await child.ask({ action:'tick',ms:4000 });
+  assert.equal(retried.publications.publications[0].state,'published');
+  for(const sent of retried.regionDeliveries)assert.deepEqual(sent.payload,retried.regionDeliveries[0].payload);
+  const capture=await child.ask({ action:'advert',count:2 });assert.equal(capture.publishTopics.filter(topic=>topic.endsWith('/packets')).length,3);
+  const end=await child.stop();assert.doesNotMatch(end.output,/Private broker failure/);
+});
+test('actual entrypoint can backfill saved latest with discovery/UI disabled and an unavailable broker',async()=>{
+  const f=environment({ enabled:false,publication:true });seed(f);
+  const child=await launch(f,{ publicationBrokerId:'regions' });await child.ask({ action:'broker-connected',value:false });
+  const offline=await child.ask({ action:'tick',ms:1000 });assert.equal(offline.publications.total,1);
+  assert.equal(offline.publications.publications[0].attemptCount,0);assert.equal(offline.regionDeliveries.length,0);assert.deepEqual(codes(offline),[]);
+  await child.ask({ action:'broker-connected',value:true });const published=await child.ask({ action:'tick',ms:1000 });
+  assert.equal(published.publications.publications[0].state,'published');assert.deepEqual(published.regionDeliveries[0].payload.regions,['Kept']);
+  assert.equal(published.regionDeliveries[0].payload.timestamp,new Date(START-25*3600000+1).toISOString());await child.stop();
+});
+for(const phase of ['broker-accepted-before-local-save','after-publication-save'])test(`actual entrypoint crash ${phase} restarts with truthful delivery state and identical source observation`,async()=>{
+  const f=environment({ publication:true }),child=await launch(f,{ phase,publicationBrokerId:'regions' });
+  await child.ask({ action:'advert' });await child.ask({ action:'tick',ms:10000 });child.process.send({ action:'tick',ms:1000 });
+  const end=await child.exited;assert.equal(end.code,17,end.output);
+  const original=readFileSync(child.ledger,'utf8').trim().split('\n').map(line=>JSON.parse(line)).find(row=>row.region).region;
+  const restarted=await launch(f,{ suffix:'publication-restart',startAt:START+20000,publicationBrokerId:'regions' });
+  const recovered=await restarted.ask({ action:'tick',ms:1000 });assert.equal(recovered.publications.publications[0].state,'published');
+  assert.equal(recovered.regionDeliveries.length,phase==='after-publication-save'?0:1);
+  if(recovered.regionDeliveries.length)assert.deepEqual(recovered.regionDeliveries[0].payload,original.payload);
+  assert.deepEqual(codes(recovered),[]);assert.equal(recovered.runs.runs.find(row=>row.runId!==recovered.runId).state,'unclean');await restarted.stop();
+});
+test('actual entrypoint retries delivery persistence locally and refuses clean closure while an accepted result is unsaved',async()=>{
+  const f=environment({ publication:true }),child=await launch(f,{ publicationBrokerId:'regions',publicationWriteFault:true });
+  await child.ask({ action:'advert' });await child.ask({ action:'tick',ms:10000 });await child.ask({ action:'tick',ms:1000 });
+  const paused=await child.ask({ action:'tick',ms:5000 });assert.equal(paused.regionDeliveries.length,1);
+  assert.equal(paused.publications.publications[0].state,'publishing');
+  child.process.send({ action:'stop' });const end=await child.exited;assert.equal(end.code,1,end.output);
+  assert.doesNotMatch(end.output,/Private publication storage failure/);assert.match(end.output,/clean shutdown cannot be confirmed/);
+  read(f,store=>{assert.equal(store.queryObserverRuntimeSummary().cleanRuns,0);assert.equal(store.queryRegionPublications({ brokerId:'regions' }).publications[0].state,'publishing');});
+});
 
 test('actual offline dashboard-disabled entrypoint receives verified adverts and persists nonempty answers with only fixed read/request commands', async () => {
   const f = environment(), child = await launch(f);
@@ -147,7 +209,11 @@ test('old transport/generation callbacks cannot resolve another repeater after d
   await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'disconnect' });
   await child.ask({ action: 'tick', ms: 20 }); await child.ask({ action: 'advert', second: true }); await child.ask({ action: 'next-tag' });
   const limited = await child.ask({ action: 'tick', ms: 2000 }); assert.equal(codes(limited).filter(code => code === 0x39).length, 1);
-  await child.ask({ action: 'tick', ms: 8000 }); const waiting = await child.ask({ action: 'snapshot' });
+  await child.ask({ action: 'tick', ms: 8000 });
+  // Random signed keys can place the new target before the prior cursor;
+  // allow one bounded keyset wrap after the spacing gate, not before it.
+  let waiting = await child.ask({ action: 'snapshot' });
+  if(codes(waiting).filter(code=>code===0x39).length===1)waiting=await child.ask({ action:'tick',ms:1000 });
   assert.equal(codes(waiting).filter(code => code === 0x39).length, 2); assert.equal(waiting.outcomes.total, 1);
   const stale = await child.ask({ action: 'reply', tag: 18, connection: 0 }); assert.equal(stale.outcomes.total, 1);
   const wrong = await child.ask({ action: 'reply', tag: 17 }); assert.equal(wrong.outcomes.total, 1);

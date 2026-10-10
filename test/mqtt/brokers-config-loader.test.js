@@ -5,6 +5,24 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadBrokersConfig, BrokersConfigError } from '../../src/mqtt/brokers-config-loader.js';
+import { REGION_PUBLICATION_DEFAULTS } from '../../src/mqtt/region-publication-schemas.js';
+
+test('region publication is disabled with matching code/example defaults; strict overrides are normalized',()=>{
+  const [broker]=withTempFile(JSON.stringify([VALID_BROKER]),loadBrokersConfig);
+  assert.deepEqual(broker.regionPublication,REGION_PUBLICATION_DEFAULTS);
+  const [explicit]=withTempFile(JSON.stringify([{ ...VALID_BROKER,regionPublication:{ enabled:true,retryBaseMs:120000 } }]),loadBrokersConfig);
+  assert.deepEqual(explicit.regionPublication,{ ...REGION_PUBLICATION_DEFAULTS,enabled:true,retryBaseMs:120000 });
+  for(const example of loadBrokersConfig('brokers.config.example.json')) assert.deepEqual(example.regionPublication,REGION_PUBLICATION_DEFAULTS);
+});
+test('invalid publication settings and excessive destinations fail before normalization/network activity',()=>{
+  for(const regionPublication of [{ enabled:'true' },{ qos:0 },{ publishTimeoutMs:5001 },{ tickIntervalMs:0 },
+    { retryBaseMs:4000000 },{ retryMaxMs:0 },{ retryBaseMs:null }]) {
+    assert.throws(()=>withTempFile(JSON.stringify([{ ...VALID_BROKER,regionPublication }]),loadBrokersConfig),BrokersConfigError);
+  }
+  const brokers=Array.from({ length:65 },(_,i)=>({ ...VALID_BROKER,id:'b'+i,regionPublication:{ enabled:true } }));
+  assert.throws(()=>withTempFile(JSON.stringify(brokers),loadBrokersConfig),BrokersConfigError);
+  brokers[0].enabled=false;assert.equal(withTempFile(JSON.stringify(brokers),loadBrokersConfig).length,65);
+});
 
 function withTempFile(content, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'meshcore-brokers-'));

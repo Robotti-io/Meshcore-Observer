@@ -5,6 +5,9 @@ import { regionQueryConfigSchema, regionQueryPolicySchema, regionSchedulerOption
   regionSchedulerClockSchema, regionSchedulerJitterSchema, regionSchedulerSnapshotSchema,
   regionSchedulerResponseSchema, REGION_PREFLIGHT_DEFERRALS } from './region-query-schemas.js';
 import { parseRegionResponseBody } from './region-response-parser.js';
+import { compileSchema } from '../validation/ajv.js';
+import { regionPublicationBrokerIdsSchema } from '../mqtt/region-publication-schemas.js';
+const destinationsValid=compileSchema(regionPublicationBrokerIdsSchema);
 
 /** One opt-in producer. The coordinator owns radio state; the store owns
  * schedules. Only a single unsaved terminal result can be held for retry. */
@@ -15,12 +18,15 @@ export class RegionDiscoveryScheduler {
   #cursor = null; #observer = null; #pausedGeneration = null;
   #anchor = null; #lastMonotonic = 0; #highWater = 0; #clockPaused = false;
   #fault = null; #unsaved = null; #unconfirmed = false;
+  #brokerIds;
 
   constructor({ config, store, runId, directHeardWindowMs, radio, coordinator, logger,
     wallNow = Date.now, monotonicNow = () => performance.now(),
-    jitter = () => Math.random() / 10, createId = randomUUID }) {
+    jitter = () => Math.random() / 10, createId = randomUUID,brokerIds=[] }) {
     assertRegionQueryInput(regionQueryConfigSchema, config);
     assertRegionQueryInput(regionSchedulerOptionsSchema, { runId, directHeardWindowMs });
+    if(!destinationsValid(brokerIds)) throw new Error('Invalid region publication destinations');
+    this.#brokerIds=Object.freeze([...brokerIds]);
     this.#config = Object.freeze({ ...config });
     this.#policy = Object.freeze(Object.fromEntries(Object.keys(regionQueryPolicySchema.properties)
       .map(key => [key, config[key]])));
@@ -188,7 +194,8 @@ export class RegionDiscoveryScheduler {
       reason: answered ? null : unsupported ? 'unsupported' : parsed ? 'malformed-response' : response.reason,
       route: response.route ?? null };
     this.#unsaved = { ...identity, policy: this.#policy, jitterRatio: reservation.jitterRatio,
-      result: { outcome, ...(answered ? { answer: { ...parsed.answer, observedAt: response.receivedAt } } : {}), brokerIds: [] } };
+      result: { outcome, ...(answered ? { answer: { ...parsed.answer, observedAt: response.receivedAt } } : {}),
+        brokerIds:answered && !outcome.clockAnomaly ? [...this.#brokerIds] : [] } };
     this.#persist();
   }
 

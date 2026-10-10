@@ -79,8 +79,13 @@ test('20k answers/20k failures/two brokers preserve indexed bounded reads, durab
       readCosts[name]=ms(p95(times));
     }
     const claimTimes = [];
+    const backfillTimes=[];
+    for(let i=0;i<20;i++) {
+      const before=performance.now(),page=store.stageRegionLatestPublications({ observerPublicKey:OBSERVER,brokerId:'backfill',now:300000,limit:20 });
+      backfillTimes.push(performance.now()-before);assert.equal(page.visited,1);assert.equal(page.staged,i===0?1:0);
+    }
     for (let i=0;i<100;i++) {
-      const before=performance.now(), saved=store.claimRegionPublication({ brokerId:'first',runId:run.runId,now:300000 }); claimTimes.push(performance.now()-before);
+      const before=performance.now(), saved=store.claimRegionPublication({ brokerId:'first',runId:run.runId,now:300000,observerPublicKey:OBSERVER }); claimTimes.push(performance.now()-before);
       assert.equal(saved.answer.observedAt,1000+i);
       assert.equal(store.resolveRegionPublication({ answerId:saved.answerId,brokerId:'first',runId:run.runId,
         claimToken:saved.claimToken,status:'published',resolvedAt:300001 }),true);
@@ -110,11 +115,12 @@ test('20k answers/20k failures/two brokers preserve indexed bounded reads, durab
     finally { checked.close(); }
     console.info('Region cost fixture:', { answers:20000,terminalFailures:20000,initialPublicationRows:40000,
       normalTwoBrokerWriteP95Ms:ms(p95(writeTimes)),maximum64BrokerWriteP95Ms:ms(p95(fanOutTimes)),readP95Ms:readCosts,
-      claimP95Ms:ms(p95(claimTimes)),pruneMs:ms(pruneMs),fixtureBytes:bytesBefore,measuredGrowthBytes:bytesAfter-bytesBefore,
+      claimP95Ms:ms(p95(claimTimes)),latestBackfillP95Ms:ms(p95(backfillTimes)),pruneMs:ms(pruneMs),fixtureBytes:bytesBefore,measuredGrowthBytes:bytesAfter-bytesBefore,
       reusablePagesAfterPrune:reusablePages,retainedAnswersAfterPrune:221,platform:process.platform,node:process.version,
       targets:{ normalWriteP95Ms:10,readP95Ms:100 } });
     assert.ok(p95(writeTimes)<10,'normal two-broker synchronous write p95 must remain below 10ms');
     assert.ok(p95(claimTimes)<100,'one-item claim p95 must remain below 100ms');
+    assert.ok(p95(backfillTimes)<100,'bounded latest backfill p95 must remain below 100ms');
     for (const [name,cost] of Object.entries(readCosts)) assert.ok(cost<100,`${name} bounded read p95 ${cost}ms must remain below 100ms`);
   } finally { store?.close(); rmSync(dir,{ recursive:true,force:true }); }
 },30000);

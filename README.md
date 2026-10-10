@@ -876,7 +876,7 @@ now-ambiguous answer. On owned restart, interrupted publishing rows become
 pending with original observation times and prior attempt/result evidence
 preserved. A prior acknowledgement can remain unknown: broker acceptance before
 local recording may cause an idempotent duplicate retry. `published` records a
-future publisher's approved transport-success criterion, **not CoreScope
+QoS 1 broker acknowledgement, **not CoreScope
 ingestion or exactly-once delivery**. Claim tokens are absent from history pages.
 
 Monitor the configured database volume: unlimited history, latest snapshots and
@@ -959,7 +959,9 @@ monotonic elapsed lower bound; saved observations retain millisecond wall times
 and explicit anomaly flags. Successful empty/nonempty answers refresh normally;
 malformed responses/timeouts preserve prior latest answers and use bounded
 retry policy. A command-level unsupported error has its own refresh cooldown.
-No region publications are staged by this producer.
+Safe successful answers stage delivery records atomically for enabled brokers
+that explicitly opt into region publication (see below). Clock-anomalous or
+conflicting observations stay saved locally without speculative publication.
 
 If final persistence fails, discovery pauses with one unsaved result and
 retries only that local write on subsequent ticks. Its original times and saved
@@ -1010,8 +1012,8 @@ interval. Changing settings never shortens an already saved cooldown.
 Answers/outcomes are saved locally with original reporter/target/run/request
 identity. Empty means a measured empty reply; unknown means no measured answer.
 Completeness remains unknown, including for short/empty lists. The current
-dashboard has no region-history view, and #31 stages no CoreScope publication.
-Broker policy and public payloads remain [#32](https://github.com/Robotti-io/Meshcore-Observer/issues/32).
+dashboard has no region-history view. Optional CoreScope publication follows
+the per-broker settings below and preserves those saved observation semantics.
 
 | Symptom / fixed outcome | Meaning and operator action |
 | --- | --- |
@@ -1130,6 +1132,71 @@ src/
 ```
 
 Engineering conventions (validation, logging, protected boundaries, dependency policy) are in [`AGENTS.md`](AGENTS.md).
+
+### Optional CoreScope region publication
+
+Region publication is independently disabled by default on every broker. Set
+`regionPublication.enabled: true` in that broker's JSON definition only after
+verifying its CoreScope compatibility and client-topic permissions. The broker
+itself must also be enabled. At most 64 destinations are supported; keep IDs
+stable. A different logical destination should use a new ID, since an ID owns
+its saved delivery history. Omitted fields use the same defaults as the example:
+
+| Per-broker setting | Default | Allowed override |
+| --- | --- | --- |
+| `enabled` | `false` | Boolean |
+| `tickIntervalMs` | `10000` | Whole milliseconds, 1000–60000 |
+| `publishTimeoutMs` | `5000` | Whole milliseconds, 1000–5000 |
+| `retryBaseMs` | `60000` | Whole milliseconds, 1000–86400000 |
+| `retryMaxMs` | `3600000` | Whole milliseconds, 1000–604800000; at least the base |
+
+Invalid explicit settings fail startup before the store, hardware or network
+opens, including when publication is disabled. Region messages always use
+QoS 1 and `retain:false`, independently of packet/status broker settings.
+
+The topic is `meshcore/client/{lowercase reporting Companion key}/regions`.
+Its strict payload includes `type:"REGIONS"`, the original answer-receipt ISO
+timestamp with milliseconds, a lowercase full target key, unchanged region
+names (case/order/duplicates/`*`), `truncated:true` and optional
+`repeater_clock`. Remote clock zero is preserved; null is omitted. The
+conservative truncation hint means completeness is unknown, including for
+short or empty lists. It does not assert that omissions were detected.
+There is no GPS, reception coverage, RF sample or observer `/neighbors` object.
+
+New safe answers and delivery records commit together before publication.
+When later enabled, each broker backfills the latest safe retained observation
+for each target, in pages of 20 headers. Earlier unstaged history remains local;
+this is not a bulk history export. Older pending deliveries remain preserved.
+Fresh direct-heard eligibility is required for RF queries, not for publication
+of an already saved observation. Discovery and the dashboard can remain off.
+The worker requires the current ready Companion to match the original reporter;
+another Companion never relabels history. Future-dated, clock-anomalous or
+ambiguous observations remain local. Opt-out/removal preserves pending rows.
+
+Each broker has one in-flight job. Offline brokers accumulate durable pending
+work without counting transport attempts. Failures retry with capped exponential
+backoff and original content/time. An acknowledgement timeout retires that
+broker's MQTT client, discards its old outgoing queue and reconnects after five
+seconds through existing credentials/will configuration. That broker's packet
+and status delivery pauses during recovery; local capture and other brokers
+continue. A fixed warning explains retry and directs operators to verify client
+ACL permissions and broker availability. A failed local delivery-result save
+pauses that worker, retries the save only, and prevents a clean-shutdown claim.
+
+`published` means broker PUBACK, not verified CoreScope ingestion. Crash between
+broker acceptance and local commit can resend an identical observation.
+Compatible CoreScope deduplicates by reporter, target and original observation
+time and orders latest by that time rather than upload time. Live compatibility
+and permissions must be verified for the actual deployed ingestor.
+
+CoreScope requires `clientRegions.enabled:true`, an ACL binding each reporting
+Companion to its own lowercase client topic, and subscription coverage for
+`meshcore/client/+/regions` (the default `meshcore/#` covers it). Existing
+observer-feed permissions do not grant this client permission. No broker/ACL or
+CoreScope deployment is changed by installing this feature. Validate an actual
+named-device answer reaching the authorized CoreScope deployment under the
+separate [#37 release validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
+Contract reference: [CoreScope client regions](https://github.com/OKI-Mesh/CoreScope/blob/6cab7d698d15f739dcaa0f04df70eaa80f5d13da/docs/client-regions.md).
 
 ## Troubleshooting
 

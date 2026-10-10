@@ -75,7 +75,9 @@ export const regionOutcomePageSchema = object({ ...filters, start: epoch, end: e
 export const regionPublicationPageSchema = object({ brokerId, observerPublicKey: key, targetPublicKey: key,
   state: publicationState, ...page }, ['brokerId']);
 export const regionStagePublicationsSchema = object({ answerId: id, brokerIds: brokers });
-export const regionClaimPublicationSchema = object({ brokerId, runId: uuid, now: epoch });
+export const regionStageLatestPublicationsSchema = object({ observerPublicKey:key,brokerId,now:epoch,
+  afterPublicKey:key,limit:{ type:'integer',minimum:1,maximum:200 } },['observerPublicKey','brokerId','now']);
+export const regionClaimPublicationSchema = object({ brokerId, runId: uuid, now: epoch,observerPublicKey:key },['brokerId','runId','now']);
 const resolution = { answerId: id, brokerId, runId: uuid, claimToken: uuid, resolvedAt: epoch };
 export const regionResolvePublicationSchema = { oneOf: [
   object({ ...resolution, status: { const: 'published' } }),

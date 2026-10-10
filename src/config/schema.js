@@ -3,6 +3,7 @@ import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
 import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 import { remoteCoordinatorLimitsSchema } from '../radio/remote-coordinator-schemas.js';
 import { regionQueryConfigSchema } from '../regions/region-query-schemas.js';
+import { regionPublicationConfigSchema } from '../mqtt/region-publication-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
@@ -127,6 +128,7 @@ export const configSchema = {
           'auth'
         ],
         properties: {
+          regionPublication: regionPublicationConfigSchema,
           id: { type: 'string', minLength: 1 },
           enabled: { type: 'boolean' },
           host: { type: 'string', minLength: 1 },

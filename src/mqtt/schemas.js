@@ -3,6 +3,7 @@
 // Each broker may name its password secret variable in auth.passwordEnv.
 // The 1-based array position remains the legacy fallback used by
 // src/config/index.js's readBrokers; it is not itself a JSON field.
+import { regionPublicationFileSchema } from './region-publication-schemas.js';
 export const brokersConfigSchema = {
   $id: 'meshcore-observer/mqtt/brokers-config',
   type: 'array',
@@ -11,6 +12,7 @@ export const brokersConfigSchema = {
     additionalProperties: false,
     required: ['id', 'enabled', 'host', 'port', 'auth'],
     properties: {
+      regionPublication: regionPublicationFileSchema,
       id: { type: 'string', minLength: 1 },
       enabled: { type: 'boolean' },
       host: { type: 'string', minLength: 1 },

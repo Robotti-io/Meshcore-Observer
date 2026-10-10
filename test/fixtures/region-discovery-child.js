@@ -8,6 +8,8 @@ import { TCPConnection, Constants } from '@liamcottle/meshcore.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { RadioManager } from '../../src/radio/radio-manager.js';
 import { MqttManager } from '../../src/mqtt/mqtt-manager.js';
+import mqtt from 'mqtt';
+import { EventEmitter } from 'node:events';
 
 const fixture = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const { observerPublicKey, targetPublicKey, startAt, ledger, phase = null } = fixture;
@@ -23,8 +25,26 @@ net.createConnection = () => { throw Error('Fixture attempted a real network con
 let store, run, radio, closed = false, writeFault = fixture.writeFault ?? false;
 let contacts = fixture.contact ?? 'direct', answer = fixture.answer ?? 'nonempty', tag = 17;
 const connections = [], writes = [], replies = [], adverts = [], publishTopics = [], localCalls = [];
+const regionDeliveries=[],brokerClients=[];
+let publicationOutcome=fixture.publicationOutcome ?? 'success',publicationWriteFault=fixture.publicationWriteFault ?? false;
 const record = value => appendFileSync(ledger, JSON.stringify(value) + '\n');
 const crash = boundary => { if (phase === boundary) process.exit(17); };
+// Substitute only the MQTT client factory, retaining the actual broker,
+// manager, publication worker and SQLite lifecycle. No sockets are opened.
+mqtt.default.connect=options=>{
+  const client=new EventEmitter();brokerClients.push(client);
+  client.publish=(topic,payload,settings,callback)=>{
+    if(topic.endsWith('/regions')) {
+      const delivery={ topic,payload:JSON.parse(payload),settings,host:options.host,at:Date.now() };
+      regionDeliveries.push(delivery);record({ region:delivery });
+      if(publicationOutcome==='hang')return;
+      callback(publicationOutcome==='failure'?Error('Private broker failure must not enter logs'):null);
+      crash('broker-accepted-before-local-save');
+    } else callback();
+  };
+  client.end=(_force,_settings,callback)=>{client.emit('close');callback();};
+  Promise.resolve().then(()=>client.emit('connect'));return client;
+};
 async function pump(ms = 0) {
   mock.timers.tick(ms);
   for (let n = 0; n < 48; n++) { await Promise.resolve(); mock.timers.tick(0); }
@@ -95,6 +115,11 @@ MetricsStore.prototype.completeRegionPoll = function (input) {
   if (writeFault) throw Error('Private fixture failure must not enter logs');
   const result = originalComplete.call(this, input); if (result.completed) crash('after-completion'); return result;
 };
+const originalResolution=MetricsStore.prototype.resolveRegionPublication;
+MetricsStore.prototype.resolveRegionPublication=function(input) {
+  if(publicationWriteFault)throw Error('Private publication storage failure must not enter logs');
+  const result=originalResolution.call(this,input);if(result)crash('after-publication-save');return result;
+};
 const originalStart = RadioManager.prototype.start;
 RadioManager.prototype.start = function () { radio = this; return originalStart.call(this); };
 const originalPublish = MqttManager.prototype.publish;
@@ -107,11 +132,11 @@ MetricsStore.prototype.close = function () {
 const range = { start: 0, end: Number.MAX_SAFE_INTEGER };
 function snapshot() {
   return { now: Date.now(), runId: run.runId, radio: radio.getConnectionSnapshot(), writes, replies, adverts,
-    publishTopics, localCalls, runs: store.queryObserverRuns(range),
+    publishTopics, localCalls,regionDeliveries, runs: store.queryObserverRuns(range),
     state: store.getRegionPollState({ observerPublicKey, targetPublicKey }),
     latest: store.getRegionLatest({ observerPublicKey, targetPublicKey, now: Date.now(), windowMs: 72 * 3600000 }),
     outcomes: store.queryRegionOutcomes(range), answers: store.queryRegionAnswers(range),
-    publications: store.queryRegionPublications({ brokerId: 'unused' }),
+    publications: store.queryRegionPublications({ brokerId: fixture.publicationBrokerId ?? 'unused' }),
     inventory: store.countNodesByType('REPEATER'), advertTotals: store.queryAdvertTotals(range),
     botUsage: store.queryBotUsageTotals(range), pendingReplies: store.countPendingReplyItems(),
     resources: store.queryProcessSamples(range), topology: store.queryTopologyPaths() };
@@ -132,6 +157,13 @@ process.on('message', message => {
     if (message.action === 'sign') { await radio.runCommand(connection => connection.sign([1, 2])); await pump(); }
     if (message.action === 'flood-advert') store.requestFloodAdvert(Date.now());
     if (message.action === 'next-tag') tag++;
+    if(message.action==='publication-mode') {
+      publicationOutcome=message.value ?? publicationOutcome;
+      publicationWriteFault=message.writeFault ?? publicationWriteFault;
+    }
+    if(message.action==='broker-connected') {
+      for(const client of brokerClients)client.emit(message.value?'connect':'offline');await pump();
+    }
     if (message.action === 'stop') { process.emit('SIGINT'); await pump(); if (!closed) await pump(10000); return; }
     if (message.action === 'snapshot') await pump();
     process.send(snapshot());

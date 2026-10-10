@@ -1,6 +1,6 @@
 # Feature: Repeater Region Discovery for CoreScope
 
-- **Status:** Included in v2.5.0; #30 delivered/user-pushed f2d567c; #31 T1–T4 user-pushed 4e7d92e / T5 complete locally, 975 tests and full single-worker coverage/lint pass; all six fixture criteria met, #31 completed/project Done; #32 publication queued
+- **Status:** Included in v2.5.0; #30/#31 delivered/user-pushed through 54a920d; #32 T1–T5 complete locally/completed/project Done; 1,010 tests/CI coverage/lint pass under 2026-10-10 authorization. Publication is default-off; live RF-to-CoreScope verification remains #37.
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06
 - **Release:** v2.5.0
@@ -9,7 +9,7 @@
 - **Feature issues:** [#30: durable answers](https://github.com/Robotti-io/Meshcore-Observer/issues/30), [#31: direct-heard querying](https://github.com/Robotti-io/Meshcore-Observer/issues/31), [#32: CoreScope publication](https://github.com/Robotti-io/Meshcore-Observer/issues/32)
 - **Shared prerequisites:** [Pillar 1 child issue register](v2.5.0/pillar-1-child-issues.md)
 - **Scope decision:** Included in v2.5.0 by explicit human direction on 2026-10-07.
-- **Approval scope:** Release inclusion; #30 delivered; #31 finalized plan and QUERY-PLAN-01–05 approved on 2026-10-10. #32 publication and separately scoped hardware/protected changes retain their own review.
+- **Approval scope:** Release inclusion; #30 delivered; #31 finalized plan and QUERY-PLAN-01–05 approved on 2026-10-10. The user explicitly authorizes #32 planning and implementation on 2026-10-10, with PUBLICATION-PLAN-01–05 recorded in its plan. Live hardware/ACL/CoreScope deployment actions remain separately scoped.
 
 ## Summary
 
@@ -132,3 +132,8 @@ Research captured on 2026-10-06; recheck upstream and deployed firmware when pla
 - [CoreDrive RX region request/reply framing](https://github.com/efiten/coredrive-rx/blob/9b053d6537df78ae2d51e9ffec846807169575db/src/regionreq.js)
 
 Backlog documentation does not authorize changes to dependencies, storage, public MQTT contracts, authentication, logging contracts, or deployment. Resolve those boundaries in a separately approved implementation plan.
+
+
+## Publication delivery — 2026-10-10
+
+[#32 implementation plan and evidence](v2.5.0/pillar-1-issues/p1-11.md#implementation-plan) resolves the remaining publication choices. New safe successes stage explicit opted-in broker destinations in their save transaction. A bounded independent worker backfills latest safe retained observations, preserves older pending work, uses fixed validated lowercase/ISO-millisecond/unknown-completeness payloads and QoS 1/nonretained delivery, and retries with durable original timestamps. Matching current Companion identity, anomaly/conflict/future safeguards, transport retirement and unsaved-result shutdown protection are implemented. Configuration defaults and operator ACL/CoreScope activation guidance are in README. All five code/fixture acceptance criteria pass; separately authorized physical-radio-to-deployed-CoreScope proof remains #37. No operator broker/config, ACL or deployment was activated.

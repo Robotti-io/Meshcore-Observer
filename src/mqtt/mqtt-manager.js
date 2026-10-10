@@ -1,5 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { MqttBroker } from './mqtt-broker.js';
+import { compileSchema } from '../validation/ajv.js';
+import { regionTransportSchema } from './region-publication-schemas.js';
+const regionTransportValid=compileSchema(regionTransportSchema);
 
 /**
  * Owns an arbitrary configured list of independent brokers. One broker
@@ -11,6 +14,7 @@ import { MqttBroker } from './mqtt-broker.js';
 export class MqttManager extends EventEmitter {
   #brokers;
   #logger;
+  #regionBrokerIds;
 
   /**
    * @param {(brokerConfig: object) => {getUsername?: Function, getPassword?: Function}} [getCredentialHooks]
@@ -28,6 +32,7 @@ export class MqttManager extends EventEmitter {
   }) {
     super();
     this.#logger = logger;
+    this.#regionBrokerIds=new Set(config.brokers.filter(b=>b.enabled && b.regionPublication?.enabled).map(b=>b.id));
     this.#brokers = config.brokers.map((brokerConfig) =>
       createBroker({
         config: brokerConfig,
@@ -40,6 +45,23 @@ export class MqttManager extends EventEmitter {
 
   getBroker(id) {
     return this.#brokers.find((broker) => broker.id === id) ?? null;
+  }
+
+  /** A deliberate single destination; never falls back to broadcast. */
+  async publishRegion(input) {
+    if(!regionTransportValid(input)) throw new Error('Invalid region transport data');
+    if(!this.#regionBrokerIds.has(input.brokerId)) return { outcome:'skipped' };
+    const broker=this.getBroker(input.brokerId);
+    if(!broker?.isConnected()) return { outcome:'skipped' };
+    try {
+      await broker.publishBounded(input.topic,JSON.stringify(input.payload),
+        { qos:1,retain:false,timeoutMs:input.timeoutMs });
+      return { outcome:'sent' };
+    } catch {
+      // The transport error may include broker/credential text. Keep the
+      // public worker's error classification fixed and secret-free.
+      return { outcome:'failed' };
+    }
   }
 
   /**

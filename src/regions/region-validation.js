@@ -2,11 +2,11 @@ import { TextDecoder } from 'node:util';
 import { compileSchema } from '../validation/ajv.js';
 import { regionBodySchema, regionAnswerSchema, regionObservedAnswerSchema, regionOutcomeSchema, regionResultSchema,
   regionLatestQuerySchema, regionAnswerPageSchema, regionOutcomePageSchema, regionPublicationPageSchema,
-  regionStagePublicationsSchema, regionClaimPublicationSchema, regionResolvePublicationSchema, regionPruneSchema } from './region-schemas.js';
+  regionStagePublicationsSchema, regionStageLatestPublicationsSchema, regionClaimPublicationSchema, regionResolvePublicationSchema, regionPruneSchema } from './region-schemas.js';
 
 const schemas = [regionBodySchema, regionAnswerSchema, regionObservedAnswerSchema, regionOutcomeSchema, regionResultSchema,
   regionLatestQuerySchema, regionAnswerPageSchema, regionOutcomePageSchema, regionPublicationPageSchema,
-  regionStagePublicationsSchema, regionClaimPublicationSchema, regionResolvePublicationSchema, regionPruneSchema];
+  regionStagePublicationsSchema, regionStageLatestPublicationsSchema, regionClaimPublicationSchema, regionResolvePublicationSchema, regionPruneSchema];
 const validators = new Map(schemas.map(schema => [schema, compileSchema(schema)]));
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const invalid = () => new Error('Invalid region data'); // Never echo values/unknown fields.

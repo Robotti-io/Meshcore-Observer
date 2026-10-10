@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { assertRegionResult, assertRegionInput } from '../regions/region-validation.js';
 import { regionObservedAnswerSchema, regionStagePublicationsSchema, regionClaimPublicationSchema,
-  regionResolvePublicationSchema } from '../regions/region-schemas.js';
+  regionResolvePublicationSchema, regionStageLatestPublicationsSchema } from '../regions/region-schemas.js';
 
 const OUTCOME_COLUMNS = `request_id AS requestId,run_id AS runId,observer_public_key AS observerPublicKey,
   target_public_key AS targetPublicKey,started_at AS startedAt,completed_at AS completedAt,
@@ -58,6 +58,8 @@ export function createRegionHistory(db, requireRun) {
     FROM region_publications p JOIN region_answers a ON a.id=p.answer_id
     JOIN region_query_outcomes o ON o.request_id=a.request_id
     WHERE p.broker_id=? AND p.state='pending' AND p.next_due_at<=? AND a.observation_time_conflict=0
+      AND (? IS NULL OR (a.observer_public_key=? AND o.clock_anomaly=0 AND a.observed_at<=?
+        AND a.observed_at<=253402300799999))
     ORDER BY p.next_due_at,p.answer_id LIMIT 1`);
   const claimPublication = db.prepare(`UPDATE region_publications SET state='publishing',attempt_count=attempt_count+1,
     last_attempt_at=?,claim_run_id=?,claim_token=? WHERE answer_id=? AND broker_id=? AND state='pending'`);
@@ -66,6 +68,12 @@ export function createRegionHistory(db, requireRun) {
     AND EXISTS(SELECT 1 FROM region_answers a WHERE a.id=answer_id AND a.observation_time_conflict=0)`);
   const recoverPublications = db.prepare(`UPDATE region_publications SET state='pending',claim_run_id=NULL,claim_token=NULL
     WHERE state='publishing'`);
+  // Keyset LIMIT applies to registry headers before loading any bodies.
+  // Unlike history/reporting reads this has no total count or OFFSET scan.
+  const latestPage = db.prepare(`SELECT l.answer_id AS answerId,l.target_public_key AS targetPublicKey
+    FROM region_latest l WHERE l.observer_public_key=? AND l.target_public_key>? ORDER BY l.target_public_key LIMIT ?`);
+  const safeAnswer = db.prepare(`SELECT a.observation_time_conflict AS conflict,a.observed_at AS observedAt,
+    o.clock_anomaly AS anomaly FROM region_answers a JOIN region_query_outcomes o ON o.request_id=a.request_id WHERE a.id=?`);
 
   // Internal only: caller owns the transaction on this same connection.
   // Preserve public record validation/idempotency without nested transactions.
@@ -128,11 +136,29 @@ export function createRegionHistory(db, requireRun) {
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     },
 
+    stageLatest(input) {
+      assertRegionInput(regionStageLatestPublicationsSchema,input);requireRun();
+      const page=latestPage.all(input.observerPublicKey,input.afterPublicKey ?? '',input.limit ?? 20);
+      db.exec('BEGIN');
+      try {
+        let staged=0;
+        for(const entry of page) {
+          const safety=safeAnswer.get(entry.answerId);
+          if(safety.conflict || safety.anomaly || safety.observedAt>input.now || safety.observedAt>253402300799999) continue;
+          const row=answerById.get(entry.answerId);mapAnswer(row);
+          staged+=stageInitial.run(row.id,input.brokerId,row.completedAt,input.brokerId,
+            row.observerPublicKey,row.targetPublicKey,row.observedAt).changes;
+        }
+        db.exec('COMMIT');return { staged,visited:page.length,afterPublicKey:page.at(-1)?.targetPublicKey ?? null };
+      } catch(error) { db.exec('ROLLBACK');throw error; }
+    },
+
     claim(input) {
       assertRegionInput(regionClaimPublicationSchema, input); requireRun(input.runId);
       db.exec('BEGIN');
       try {
-        const row = duePublication.get(input.brokerId,input.now);
+        const observer=input.observerPublicKey ?? null;
+        const row = duePublication.get(input.brokerId,input.now,observer,observer,input.now);
         let claim = null;
         if (row) {
           const answer = mapAnswer(row), claimToken = randomUUID();

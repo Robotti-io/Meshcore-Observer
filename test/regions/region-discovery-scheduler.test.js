@@ -41,7 +41,7 @@ async function fixture(overrides = {}) {
   f.make = () => new RegionDiscoveryScheduler({ config: f.config, store: f.store, runId: f.run.runId,
     directHeardWindowMs: 72 * HOUR, radio: { getConnectionSnapshot: () => f.snapshot },
     coordinator: f.coordinator, logger: f.logger, wallNow: () => f.clock.wall,
-    monotonicNow: () => f.clock.monotonic, jitter: () => f.jitter ?? 0 });
+    monotonicNow: () => f.clock.monotonic, jitter: () => f.jitter ?? 0,brokerIds:f.brokerIds ?? [] });
   f.scheduler = f.make();
   f.tick = async (ms = 1000) => {
     f.clock.wall += ms; f.clock.monotonic += ms; await vi.advanceTimersByTimeAsync(ms);
@@ -81,6 +81,20 @@ test('original dispatch and binary receipt survive delayed continuation', async 
   const row = outcomes(f.store).outcomes[0];
   assert.equal(row.startedAt, dispatched); assert.equal(row.completedAt, dispatched + 500);
   assert.equal(latest(f).answer.observedAt, dispatched + 10); assert.equal(row.clockAnomaly, false);
+});
+test('approved broker destinations stage atomically only for safe successes, including measured empty answers',async()=>{
+  const f=await fixture();f.brokerIds=['first','second'];f.scheduler=f.make();await f.launch();
+  for(const brokerId of f.brokerIds)assert.equal(f.store.queryRegionPublications({ brokerId }).total,1);
+  assert.equal(f.store.queryRegionPublications({ brokerId:'opt-out' }).total,0);
+  assert.equal(latest(f).presence,'empty');
+});
+test('failed or clock-anomalous discovery does not stage opted-in destinations; invalid destination data is rejected',async()=>{
+  const f=await fixture();f.brokerIds=['first'];f.response={ status:'failed',reason:'response-timeout' };
+  f.scheduler=f.make();await f.launch();assert.equal(f.store.queryRegionPublications({ brokerId:'first' }).total,0);
+  f.brokerIds=[''];assert.throws(f.make,/Invalid region publication destinations/);
+  const g=await fixture();g.brokerIds=['first'];g.scheduler=g.make();g.beforeCompletion=()=>{g.clock.wall-=1000;};
+  await g.launch();assert.equal(latest(g).answer.clockAnomaly,true);
+  assert.equal(g.store.queryRegionPublications({ brokerId:'first' }).total,0);
 });
 test('one active operation means no timers, catch-up burst, candidate backlog or overlapping requests', async () => {
   const f = await fixture(); f.hold = true; await f.launch(); await f.tick(120000);

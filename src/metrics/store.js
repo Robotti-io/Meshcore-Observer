@@ -1773,6 +1773,7 @@ export class MetricsStore {
   reserveRegionPoll(input) { return this.#regionPoll.reserve(input); }
   completeRegionPoll(input) { return this.#regionPoll.complete(input); }
   stageRegionPublications(input) { return this.#regions.stage(input); }
+  stageRegionLatestPublications(input) { return this.#regions.stageLatest(input); }
   claimRegionPublication(input) { return this.#regions.claim(input); }
   resolveRegionPublication(input) { return this.#regions.resolve(input); }
   getRegionLatest(query) { return this.#regionReads.latest(query); }

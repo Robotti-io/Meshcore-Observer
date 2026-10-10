@@ -1,6 +1,13 @@
 [
   {
     "id": "meshmapper",
+    "regionPublication": {
+      "enabled": false,
+      "tickIntervalMs": 10000,
+      "publishTimeoutMs": 5000,
+      "retryBaseMs": 60000,
+      "retryMaxMs": 3600000
+    },
     "enabled": true,
     "host": "mqtt.meshmapper.net",
     "port": 443,
