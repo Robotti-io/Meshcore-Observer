@@ -4,13 +4,15 @@ import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 import { remoteCoordinatorLimitsSchema } from '../radio/remote-coordinator-schemas.js';
 import { regionQueryConfigSchema } from '../regions/region-query-schemas.js';
 import { regionPublicationConfigSchema } from '../mqtt/region-publication-schemas.js';
+import { telemetryConfigSchema } from '../telemetry/telemetry-schemas.js';
 
 export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions', 'telemetry'],
   properties: {
+    telemetry: telemetryConfigSchema,
     remoteRequests: remoteCoordinatorLimitsSchema,
     topology: topologyConfigSchema,
     regions: regionQueryConfigSchema,

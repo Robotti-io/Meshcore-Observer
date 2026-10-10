@@ -8,6 +8,7 @@ import { REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, REGION_ANSWER_FRESHNESS_ENV_KEY,
 import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS,
   regionQueryEnvSchema, regionQueryConfigSchema } from '../regions/region-query-schemas.js';
 import { assertRegionQueryInput } from '../regions/region-query-validation.js';
+import { TELEMETRY_FRESHNESS_DEFAULT_HOURS, TELEMETRY_FRESHNESS_ENV_KEY, telemetryEnvSchema } from '../telemetry/telemetry-schemas.js';
 
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
 const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
@@ -23,6 +24,7 @@ const validate = compileSchema(configSchema);
 const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
 const regionEnvValid = compileSchema(regionEnvSchema);
 const regionQueryEnvValid = compileSchema(regionQueryEnvSchema);
+const telemetryEnvValid = compileSchema(telemetryEnvSchema);
 
 function readString(env, key, fallback = null) {
   const value = env[key];
@@ -172,6 +174,17 @@ function readTopology(env) {
     maxObservationsPerMinute: readInteger(env, keys[1], 600), pruneAfterDays: readInteger(env, keys[2], 0) };
 }
 
+function readTelemetry(env) {
+  const key = TELEMETRY_FRESHNESS_ENV_KEY;
+  const raw = env[key] === undefined ? {} : { [key]: env[key] };
+  if (!telemetryEnvValid(raw)) throw new ConfigError(`Invalid telemetry environment: ${formatErrors(telemetryEnvValid.errors)}`);
+  const hours = raw[key] === undefined ? TELEMETRY_FRESHNESS_DEFAULT_HOURS : Number(raw[key].trim());
+  if (!Number.isInteger(hours) || hours < 1 || hours > 8760) {
+    throw new ConfigError(`${key} must be whole hours from 1 to 8760`);
+  }
+  return { freshnessWindowMs: hours * 3600000 };
+}
+
 function readRegions(env) {
   const key = REGION_ANSWER_FRESHNESS_ENV_KEY;
   const raw = env[key] === undefined ? {} : { [key]: env[key] };
@@ -291,6 +304,7 @@ export function loadConfig(env = process.env) {
     floodAdvert: readFloodAdvert(env),
     nodeObservations: readNodeObservations(env),
     topology: readTopology(env),
+    telemetry: readTelemetry(env),
     regions: readRegions(env),
     remoteRequests: readRemoteRequests(env)
   };

@@ -1198,6 +1198,21 @@ named-device answer reaching the authorized CoreScope deployment under the
 separate [#37 release validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
 Contract reference: [CoreScope client regions](https://github.com/OKI-Mesh/CoreScope/blob/6cab7d698d15f739dcaa0f04df70eaa80f5d13da/docs/client-regions.md).
 
+### Telemetry validation and freshness (#33 T1)
+
+`PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS` defaults to **72** when omitted,
+matching `.env.example`. Overrides must be whole hours from **1 to 8760**;
+explicit empty or invalid values stop startup with a configuration error.
+This setting controls the future interpretation of saved observation age and
+does not enable collection or change polling cadence, region freshness or pruning.
+
+The internal contracts preserve supported status fields, signed sensor values,
+remote-reported neighbour pages, original request context and explicit partial
+or unavailable data. They do not derive battery percentages or certify complete
+sensor/mesh inventory. T1 provides validation/configuration only; telemetry
+decoders, persistence and reads remain later #33 tasks, while #34 owns polling.
+See the [internal contract guide](docs/plans/v2.5.0/telemetry-contracts.md).
+
 ## Troubleshooting
 
 - Run with `PACKETCAPTURE_LOG_LEVEL=debug`. The channel bots log exactly why a message didn't get a reply - wrong channel, decrypt/MAC failure, no matching trigger, or too few hops - rather than staying silent.

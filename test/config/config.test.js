@@ -9,6 +9,7 @@ import { REGION_ANSWER_FRESHNESS_ENV_KEY, REGION_ANSWER_FRESHNESS_DEFAULT_HOURS 
 import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS } from '../../src/regions/region-query-schemas.js';
 import { compileSchema } from '../../src/validation/ajv.js';
 import { configSchema } from '../../src/config/schema.js';
+import { TELEMETRY_FRESHNESS_ENV_KEY, TELEMETRY_FRESHNESS_DEFAULT_HOURS } from '../../src/telemetry/telemetry-schemas.js';
 
 function withTempBotsFile(content, fn) {
   const dir = mkdtempSync(join(tmpdir(), 'meshcore-config-'));
@@ -65,6 +66,33 @@ function baseEnv(overrides = {}) {
     ...overrides
   };
 }
+
+test('telemetry freshness code/example/default and whole-hour overrides agree independently of UI/region settings', () => {
+  const baseline = loadConfig(baseEnv());
+  assert.equal(TELEMETRY_FRESHNESS_DEFAULT_HOURS, 72);
+  assert.deepEqual(baseline.telemetry, { freshnessWindowMs: 72 * 3600000 });
+  const example = readFileSync(new URL('../../.env.example', import.meta.url), 'utf8');
+  assert.match(example, new RegExp(`^${TELEMETRY_FRESHNESS_ENV_KEY}=${TELEMETRY_FRESHNESS_DEFAULT_HOURS}$`, 'm'));
+  for (const hours of [1, 72, 8760]) {
+    const config = loadConfig(baseEnv({ [TELEMETRY_FRESHNESS_ENV_KEY]: ` ${hours} `, PACKETCAPTURE_METRICS_UI_ENABLED: 'false' }));
+    assert.equal(config.telemetry.freshnessWindowMs, hours * 3600000);
+    assert.deepEqual(config.regions, baseline.regions);
+    assert.equal(config.metricsUi.retentionDays, baseline.metricsUi.retentionDays);
+  }
+});
+
+test('explicit invalid telemetry environment and normalized values fail with safe actionable startup errors', () => {
+  for (const value of ['', ' ', '1.5', '1e2', '0x48', '72junk', '-1', '0', '8761', '9'.repeat(33), 'SECRET', 72, null]) {
+    assert.throws(() => loadConfig(baseEnv({ [TELEMETRY_FRESHNESS_ENV_KEY]: value })), error =>
+      error instanceof ConfigError && /telemetry|PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS/.test(error.message) && !error.message.includes('SECRET'));
+  }
+  const config = loadConfig(baseEnv()); const valid = compileSchema(configSchema);
+  for (const value of [0, 3600001, 8761 * 3600000, '72', NaN]) {
+    assert.equal(valid({ ...config, telemetry: { freshnessWindowMs: value } }), false);
+  }
+  assert.equal(valid({ ...config, telemetry: {} }), false);
+  assert.equal(valid({ ...config, telemetry: { ...config.telemetry, pollingEnabled: true } }), false);
+});
 
 test('region-answer freshness defaults and example agree, accept whole-hour boundaries and stay independent', () => {
   const defaults = loadConfig(baseEnv()); assert.equal(defaults.regions.answerFreshnessWindowMs, 72 * 3600000);
