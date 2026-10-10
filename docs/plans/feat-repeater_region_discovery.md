@@ -1,6 +1,6 @@
 # Feature: Repeater Region Discovery for CoreScope
 
-- **Status:** Included in v2.5.0 scope; child issues captured, implementation planning pending
+- **Status:** Included in v2.5.0; #30 storage delivered/user-pushed f2d567c; #31 query plan staged for review; #32 publication queued
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06
 - **Release:** v2.5.0
