@@ -135,4 +135,4 @@ The initial mapping covers the 20 epic/Pillar 1 issues; the additional table cov
 
 - #32 completion on 2026-10-10: T1–T5/code-fixture acceptance complete, 1,010 tests/CI coverage/lint pass. Close as completed, remove `status:in-progress`, verify native project #1 Done; preserve enhancement/configuration/security/release/pillar/OBS-02 labels. Live ACL/CoreScope/RF evidence stays in #37; #18/#23 remain active.
 
-- #33 implementation on 2026-10-10: TELEMETRY-PLAN-01–05 approved; T1 contracts/configuration complete locally; 1,025 tests/CI coverage/lint pass. OPEN/native project In progress and status/configuration/enhancement/release/pillar labels preserved. No feature acceptance is checked for partial delivery; #34 owns authentication/polling.
+- #33 implementation on 2026-10-10: TELEMETRY-PLAN-01–05 approved; T1 user-pushed 0e40d81; T2 pure decoding complete locally, 1,054 tests/full CI coverage/lint pass. OPEN/native project In progress and status/configuration/enhancement/release/pillar labels preserved. No feature acceptance is checked for partial delivery; #34 owns authentication/polling.

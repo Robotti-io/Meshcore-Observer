@@ -1,7 +1,8 @@
-# Telemetry contracts — #33 T1
+# Telemetry contracts and pure decoders — #33 T1/T2
 
-These internal contracts define the inputs to the planned pure decoders and
-owned telemetry store. T1 installs no parser, migration, poller or public API.
+These internal contracts define the inputs to the pure decoders and the planned
+owned telemetry store. T1 supplies contracts/configuration; T2 supplies the pure
+parsers. No migration, poller or public API is installed by either task.
 All schemas live in `src/telemetry/telemetry-schemas.js`; use
 `assertTelemetryInput`/`assertTelemetryResult` from `telemetry-validation.js`
 so strict shared AJV validation always precedes semantic checks. Errors contain
@@ -71,9 +72,76 @@ All observations have `coverage: response-only`. Even `decoded` does not certify
 complete physical sensors or remote inventory. Byte accounting is exact:
 `bodyBytes = decodedBytes + paddingBytes + uninterpretedBytes`. Padding is at
 most 15 bytes; it cannot coexist with an uninterpreted suffix. Fully decoded
-sensor records cannot hide gaps/skipped records. T2 must validate actual fixed
+sensor records cannot hide gaps/skipped records. T2 validates actual fixed
 widths, suffix bytes and truncation before producing these normalized DTOs;
 typed metadata alone cannot certify a raw response was correctly parsed.
+
+## Pure parser interface — T2
+
+`parseStatusResponseBody`, `parseSensorResponseBody` and
+`parseNeighbourResponseBody` live in the corresponding small modules under
+`src/telemetry`. Each accepts the strict central `telemetryParseInputSchema`:
+
+```js
+{
+  response: {
+    variant: {
+      component: 'sensors',
+      params: { permissionMask: 0 }
+    },
+    emitterProfile: 'positive-channels',
+    body: [1, 116, 1, 74]
+  },
+  observedAt: 1500
+}
+```
+
+The caller supplies previously correlated post-tag bytes and the original local
+receipt time. The wrapper adds that time without changing T1's raw response
+contract. Each parser validates the entire input before buffer allocation/read,
+requires its own component, and validates the detached normalized observation
+again before returning `{status: 'accepted', observation}`. Quality determines
+whether a future owned outcome is `answered` or `partial`; an accepted partial
+observation never certifies complete decoding. No parser reads the clock,
+discovers identity, authenticates, sends RF, persists or logs data.
+
+Invalid input, contradictory counts, a truncated known field or invalid padding
+returns only `{status: 'malformed', reason}`. Reasons are fixed: `invalid-input`,
+`wrong-component`, `truncated-field`, `invalid-counts`, `invalid-padding` or
+`invalid-observation`. There is no partial observation on a malformed result and
+no raw bytes, exception string, prefix sample or secret in an error. Future
+request handling maps a malformed decode to the fixed `malformed-response`
+outcome rather than treating it as evidence of unsupported hardware.
+
+Sensor zero padding is recognized only at complete record boundaries with the
+reviewed positive-channel emitter profile and an all-zero suffix of 1–15 bytes.
+Unknown profiles keep known positive-channel measurements explicitly partial;
+they never certify padding. A lone trailing zero under an unknown profile stays
+uninterpreted, while a nonzero incomplete header fails. A channel-zero record or
+an overlong zero suffix stops with ambiguity metadata. Width checks for known
+fields precede channel ambiguity, so a truncated known sensor/GPS field rejects
+the whole response. Empty supported/padded data remains distinct from partial
+unsupported-only, excluded-only or ambiguous data.
+
+Only reviewed fixed-width GPS type 136 can be skipped by this initial parser.
+It stores type/offset/remaining-byte exclusion metadata and continues later
+supported records without reading GPS values. Wire order includes skipped
+records; repeated channel/type occurrences count supported readings. If a later
+unknown type/channel stops parsing, its stopping diagnostic takes precedence
+over earlier exclusion metadata. Retained byte offsets/order and partial quality
+still disclose gaps; skipped values and arbitrary remainder bytes are absent.
+
+Status established profiles validate a bounded all-zero suffix after every
+structural field; unknown profiles preserve the unresolved suffix as count-only
+metadata and decode the common prefix only. Neither strips structural zeros nor
+requires a universal post-tag modulo-16 length. Neighbour header relationships
+and the complete expected entry budget are checked before the first entry is
+read. A single page's order, total, relative ages and request parameters survive
+unchanged; there is no page stitching or inventory upsert.
+
+Fixtures in `test/fixtures/telemetry-wire.js` are synthetic byte examples from
+the pinned sources, independent of production width tables. They establish
+local decoder behavior, not deployed firmware, ACL access or real RF support.
 
 ## Configuration and reads
 

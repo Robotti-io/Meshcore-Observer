@@ -76,6 +76,10 @@ const body = { type: 'array', minItems: 1, maxItems: TELEMETRY_BODY_MAX_BYTES, i
 export const telemetryDecoderInputSchema = { oneOf: Object.entries(variants).map(([component, variant]) =>
   object({ variant, body, ...(component === 'sensors' ? { emitterProfile: sensorProfile } : {}) })) };
 
+// Receipt time comes from the owning, previously correlated request. Decoders
+// do not read the clock or infer reporter/target identity from response bytes.
+export const telemetryParseInputSchema = object({ response: telemetryDecoderInputSchema, observedAt: epoch });
+
 const statusData = object({ ...Object.fromEntries(Object.entries(TELEMETRY_STATUS_FIELDS).map(([name, field]) => {
   const wire = wireInteger(field.width, field.signed);
   return [name, field.offset >= 48 ? { anyOf: [wire, { type: 'null' }] } : wire];

@@ -1,7 +1,7 @@
 import { compileSchema } from '../validation/ajv.js';
 import * as schemas from './telemetry-schemas.js';
 
-const known = [schemas.telemetryVariantSchema, schemas.telemetryDecoderInputSchema, schemas.telemetryObservationSchema,
+const known = [schemas.telemetryVariantSchema, schemas.telemetryDecoderInputSchema, schemas.telemetryParseInputSchema, schemas.telemetryObservationSchema,
   schemas.telemetryOutcomeSchema, schemas.telemetryResultSchema, schemas.telemetryConfigSchema, schemas.telemetryEnvSchema,
   schemas.telemetryLatestQuerySchema, schemas.telemetryObservationPageSchema, schemas.telemetryOutcomePageSchema];
 const validators = new Map(known.map(schema => [schema, compileSchema(schema)]));
@@ -85,6 +85,7 @@ function assertObservation(value) {
 /** AJV precedes all cross-field/byte invariants; no mutation or side effects. */
 export function assertTelemetryInput(schema, value) {
   if (validators.get(schema)?.(value) !== true) throw invalid();
+  if (schema === schemas.telemetryParseInputSchema) assertTelemetryInput(schemas.telemetryDecoderInputSchema, value.response);
   if (schema === schemas.telemetryDecoderInputSchema && value.variant.component === 'status') {
     const { profile } = value.variant;
     const width = profile.evidence === 'established' && profile.layout === 'current56' ? 56 : 48;

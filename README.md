@@ -1198,7 +1198,7 @@ named-device answer reaching the authorized CoreScope deployment under the
 separate [#37 release validation](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
 Contract reference: [CoreScope client regions](https://github.com/OKI-Mesh/CoreScope/blob/6cab7d698d15f739dcaa0f04df70eaa80f5d13da/docs/client-regions.md).
 
-### Telemetry validation and freshness (#33 T1)
+### Telemetry validation, decoding and freshness (#33 T1/T2)
 
 `PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS` defaults to **72** when omitted,
 matching `.env.example`. Overrides must be whole hours from **1 to 8760**;
@@ -1209,8 +1209,11 @@ does not enable collection or change polling cadence, region freshness or prunin
 The internal contracts preserve supported status fields, signed sensor values,
 remote-reported neighbour pages, original request context and explicit partial
 or unavailable data. They do not derive battery percentages or certify complete
-sensor/mesh inventory. T1 provides validation/configuration only; telemetry
-decoders, persistence and reads remain later #33 tasks, while #34 owns polling.
+sensor/mesh inventory. T1 provides validation/configuration and T2 adds pure
+response decoders; telemetry persistence and reads remain later #33 tasks,
+while #34 owns polling. A truncated known field rejects the entire response;
+unknown types/profiles retain only clearly partial supported data. No parser
+activates collection, stores GPS values or infers a layout from padded length.
 See the [internal contract guide](docs/plans/v2.5.0/telemetry-contracts.md).
 
 ## Troubleshooting
