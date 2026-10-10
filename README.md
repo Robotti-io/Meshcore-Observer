@@ -814,7 +814,7 @@ login behavior.
 Deterministic tests cover installed serial/TCP framing with stub drivers, shared
 bot/advert/signing/capture work, 1,000 mixed completion/failure cycles and 1,000
 busy-air deferrals. They do not certify deployed firmware, hardware or RF
-delivery; final region feature acceptance remains #31 T5, telemetry activation
+delivery; region fixture acceptance is complete under #31, telemetry activation
 remains #34, and hardware/soak validation remains #37.
 
 ### Durable region observations
@@ -920,8 +920,24 @@ per-pair state can affect availability and capacity. Monitor the persistent
 volume and preserve a verified closed backup before the first upgraded start.
 
 The producer is constructed only with `PACKETCAPTURE_REGION_DISCOVERY_ENABLED=true`;
-the omitted default is false. Central code and `.env.example` define startup
-delay, tick, refresh, retry, maximum-attempt and contact-read timeout overrides.
+the omitted default is false. Code defaults and `.env.example` agree. An omitted
+setting uses its default; explicit blank, fractional or out-of-range values
+fail startup before opening storage, radio or network services, even when
+discovery is disabled. Retry base must not exceed its maximum.
+
+| Setting | Default | Valid range / role |
+| --- | --- | --- |
+| `PACKETCAPTURE_REGION_DISCOVERY_ENABLED` | false | true/false; explicit opt-in |
+| `PACKETCAPTURE_REGION_QUERY_REFRESH_HOURS` | 24 | Whole hours 1–8760; minimum target refresh and exhausted/unsupported cycle cooldown |
+| `PACKETCAPTURE_REGION_QUERY_RETRY_BASE_MINUTES` | 15 | Whole minutes 3–1440; initial retry and known contact deferral |
+| `PACKETCAPTURE_REGION_QUERY_RETRY_MAX_HOURS` | 6 | Whole hours 1–168; exponential retry ceiling including positive jitter |
+| `PACKETCAPTURE_REGION_QUERY_MAX_ATTEMPTS` | 3 | Whole 1–10; conservative pre-send reservations per cycle, including slots unused after a race/crash |
+| `PACKETCAPTURE_REGION_QUERY_TICK_INTERVAL_MS` | 10000 | Whole milliseconds 1000–60000; wait after one completed producer pass |
+| `PACKETCAPTURE_REGION_QUERY_STARTUP_DELAY_MS` | 60000 | Whole milliseconds 10000–3600000; initial producer wait |
+| `PACKETCAPTURE_REGION_QUERY_PREFLIGHT_TIMEOUT_MS` | 5000 | Whole milliseconds 1000–30000; exact-key local contact-read deadline |
+| `PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS` | 72 | Whole hours 1–8760; verified zero-hop advert reception eligibility |
+| `PACKETCAPTURE_REGION_ANSWER_FRESHNESS_HOURS` | 72 | Whole hours 1–8760; stored answer age label, independent of eligibility and refresh |
+
 It uses one unreferenced timer and one in-progress operation, selecting one
 target from a bounded 100-key page per pass. It advances after that selected
 full key and uses an empty pass to wrap, with no queued catalog or catch-up
@@ -951,8 +967,72 @@ cooldown remain intact. Shutdown first stops admission, cancels/drains remote
 ownership, then drains result persistence before radio/run/store teardown.
 An unsaved result or unvalidated completion prevents a clean run end; the
 existing 10-second shutdown bound still applies. Fixed warnings explain these
-conditions without including raw frames, contact data or credentials. Full
-feature activation/troubleshooting acceptance is staged in #31 T5.
+conditions without including raw frames, contact data or credentials.
+
+#### Region discovery prerequisites and operation
+
+Before enabling discovery, verify the following for the intended deployment:
+
+1. Node >=22.13.0 and the always-on SQLite store are available on persistent
+   storage. Preserve a verified closed-database backup before upgrading to
+   migration 15, using the backup procedure above.
+2. The installed library's serial/TCP raw-frame transport and deployed
+   Companion support exact-key contact read command 30 and anonymous request
+   command 57. The adapter is tested against the pinned 148-byte Contact layout
+   with a 64-byte path field. The repeater must support anonymous region
+   requests. Library PR #44, a firmware build date or a version string alone
+   does not establish these deployed capabilities; no dependency upgrade is
+   required by this adapter.
+3. Operator-managed Companion contacts already contain each full target key
+   with a zero-length outbound path. Observer does not create, edit, evict or
+   restore contacts, change routing, log in, or fall back to a flood request.
+   Command 57 itself can create a missing contact in firmware, so the preceding
+   read cannot eliminate a race with another client deleting/changing contacts.
+   Coordinate access to the Companion; host preflight is not a firmware lock.
+4. Each target has a signature-verified REPEATER advert received locally with
+   zero recorded hops within the configured direct window. A name, general
+   registry presence, relayed advert or passive proximity path is insufficient.
+   Unnamed/renamed repeaters remain keyed by their full public key.
+5. Set `PACKETCAPTURE_REGION_DISCOVERY_ENABLED=true` in the runtime
+   configuration when ready to collect. Other settings can be omitted for the
+   defaults above. Local development uses `.env.local`; containers receive
+   environment configuration through the existing startup process. Discovery
+   requires neither the dashboard nor broker/internet availability.
+
+At defaults, collection waits at least the 60-second startup delay and shared
+60-second initial spacing; one physical attempt/minute and foreground/quiet-air
+checks limit the whole radio. Refresh is a minimum per-target interval, not a
+fleet freshness guarantee. A large fleet or sustained foreground traffic can
+take hours to cover. Failures use base × 2^(cycle reservation−1), plus positive
+0–10% jitter capped at the retry maximum; exhausted cycles wait one refresh
+interval. Changing settings never shortens an already saved cooldown.
+
+Answers/outcomes are saved locally with original reporter/target/run/request
+identity. Empty means a measured empty reply; unknown means no measured answer.
+Completeness remains unknown, including for short/empty lists. The current
+dashboard has no region-history view, and #31 stages no CoreScope publication.
+Broker policy and public payloads remain [#32](https://github.com/Robotti-io/Meshcore-Observer/issues/32).
+
+| Symptom / fixed outcome | Meaning and operator action |
+| --- | --- |
+| No requests after startup | Check opt-in, current verified zero-hop evidence, existing exact-key direct contact, and shared foreground/quiet/rate limits. Do not infer a fault from registry presence alone. |
+| `contact-missing`, `unsafe-route`, `preflight-failed` | Known non-RF deferral; the base delay is saved and no terminal answer/attempt is fabricated. Inspect the operator-managed contact/route or Companion error. Observer will not refill a full table or evict contacts. |
+| `preflight-unsupported` | The captured Companion generation cannot perform the local read. Discovery pauses on that generation, preserving state; verify deployed capability before reconnecting/restarting to reconsider it. |
+| Contact read timed out / unfamiliar or malformed response | Ownership is uncertain. The fixed warning explains a targeted connection reset and possible capture pause. Check the Companion/transport/layout and preflight timeout; disable discovery and restart if repeated resets disrupt operation. No RF permission was granted by that failed read. |
+| `unsupported` terminal outcome | The anonymous command returned an explicit unsupported error; the target waits one refresh interval. Verify deployed support. |
+| `response-timeout` | Silence is a failed attempt, not proof of unsupported firmware. Prior latest is retained and retry policy applies; no credentials or flood fallback are attempted. |
+| `route-mismatch` | Companion Sent reported an unexpected flood route. The physical attempt cannot be undone; prior latest is retained. Review the saved route/external-client race before further collection. |
+| Region result could not be saved | One original result is retained for local write retry and new discovery is paused. Check storage availability/capacity. A failed final drain cannot mark the run clean; abrupt exit can lose that unsaved result while retaining its pre-saved cooldown. |
+| Reservation has no validated completion | Discovery fails closed and clean shutdown remains unconfirmed. Inspect the fixed warning and the supported completion contract; a saved reservation is not evidence of delivery. |
+| Clock agreement paused / future or anomalous answer | Correct/verify the host clock. Do not delete scheduling data to force a retry. Original evidence and conservative deadlines remain saved; resumed RF waits for clock agreement and eligibility. |
+
+Complete offline fixture acceptance covers startup, disabled behavior,
+empty/nonempty/malformed/timeout/unsupported/route mismatch, missing/full/unsafe
+contacts, real signed adverts, mixed bot/advert/signing/capture work and five
+crash boundaries. Restart preserves original answers and cooldowns without
+replaying saved reservations or inventing missing replies. Live radio,
+firmware/deployment and representative-load soak validation remain separately
+scoped to [#37](https://github.com/Robotti-io/Meshcore-Observer/issues/37).
 
 Offline fixtures exercise migration, empty/latest/pending state, pruning,
 clean/abrupt restart and closed-backup restore. The retained-volume regression

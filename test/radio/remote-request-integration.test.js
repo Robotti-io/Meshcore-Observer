@@ -156,6 +156,20 @@ afterEach(async () => {
 });
 
 for (const kind of ['serial', 'tcp']) {
+  test(kind + ': enabled discovery shares its actual reply wait with bot replies, scheduled adverts, local signing and duplicate capture', async () => {
+    const f = await rig({ kind, discovery: true, actors: true }); await f.tick(10000);
+    await frame(f, regionContact()); await frame(f, sent(117));
+    await packet(f, groupText(), 2); await f.tick(30);
+    assert.equal(f.bot.getRepliesSent(), 1); assert.equal(f.publications.length, 2);
+    f.store.requestFloodAdvert(f.clock.value); await f.tick(30);
+    assert.equal(f.current().sendFloodAdvert.mock.calls.length, 2);
+    const signature = await f.radio.runCommand(connection => connection.sign([1, 2])); assert.equal(signature.length, 64);
+    assert.equal(f.store.queryRegionOutcomes({ start: 0, end: Number.MAX_SAFE_INTEGER }).total, 0);
+    await frame(f, [0x8C, 0, 117, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(f.store.queryRegionOutcomes({ start: 0, end: Number.MAX_SAFE_INTEGER }).outcomes[0].status, 'answered');
+    assert.deepEqual(f.attempts.map(write => write.bytes[0]), [0x1E, 0x39]);
+    assert.equal(f.store.queryRegionPublications({ brokerId: 'unused' }).total, 0);
+  });
   test(kind + ': opt-in producer saves a measured empty reply through actual contact/Sent/binary ownership and store reservation', async () => {
     const f = await rig({ kind, discovery: true }); await f.tick(9999);
     assert.equal(f.attempts.length, 0); await f.tick(1);

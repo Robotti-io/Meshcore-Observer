@@ -1,6 +1,6 @@
 # Feature: Repeater Region Discovery for CoreScope
 
-- **Status:** Included in v2.5.0; #30 delivered/user-pushed f2d567c; #31 T1–T3 user-pushed 0830cc4 / T4 opt-in scheduler complete locally, 949 tests and full single-worker coverage/lint pass; T5 acceptance pending; #32 publication queued
+- **Status:** Included in v2.5.0; #30 delivered/user-pushed f2d567c; #31 T1–T4 user-pushed 4e7d92e / T5 complete locally, 975 tests and full single-worker coverage/lint pass; all six fixture criteria met, #31 completed/project Done; #32 publication queued
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06
 - **Release:** v2.5.0
