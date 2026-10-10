@@ -2,7 +2,7 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — first-wave backend/coordination features and research are complete. #30’s finalized five-task plan and REGION-PLAN-01–05 are approved. T1–T3 are user-pushed at 12c57a3 / migration 14, verified locally/remotely with a clean starting tree. T4 bounded region reads, configurable 72-hour freshness and protected shared retention are complete locally on 2026-10-09: 24 new scenarios; full 71 files / 791 tests, coverage thresholds and lint pass. T5 offline/recovery/cost/operator acceptance remains pending. #18/#23/#30 stay OPEN/project In progress; #22/#29 stay completed/Done. Whole-feature #30 acceptance stays unchecked; #31/#32 retain actual RF/publication activation.
+**Stage:** In progress — first-wave backend/coordination features and research are complete. #30 T1–T5 are complete; REGION-PLAN-01–05 are delivered. T1–T4 are user-pushed at 0f46233 / migration 14, verified locally/remotely with a clean starting tree. T5 is complete locally on 2026-10-09: five new integrated/cost scenarios; full 72 files / 796 tests pass in functional and coverage runs, with lint and coverage thresholds passing. Coverage-run region p95: normal two-broker writes 4.096ms (<10ms), slowest bounded read 56.931ms (<100ms); offline migration, pruning, clean/abrupt restart and closed-backup restore pass. #30 is completed/project Done with its progress label removed and all four acceptance items checked. #18/#23 stay OPEN/In progress; #22/#29 stay completed/Done. Next is #31 implementation planning; #31/#32 retain actual RF/publication activation.
 Research records versioned capabilities and deployment limits. #29 delivers the validated shared internal seam with configurable limits, bounded ACK recovery, priority and idle lifecycle; startup schedules no polls. Public reporting/dashboard and active discovery/telemetry remain in their owning issues.
 
 ## Operator outcome
@@ -31,7 +31,7 @@ Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acce
 - [x] [P1-06: Persist passive topology and path evidence](https://github.com/Robotti-io/Meshcore-Observer/issues/27)
 - [x] [P1-07: Aggregate bot usage by sender and command](https://github.com/Robotti-io/Meshcore-Observer/issues/28)
 - [x] [P1-08: Coordinate remote requests and conservative radio scheduling](https://github.com/Robotti-io/Meshcore-Observer/issues/29)
-- [ ] [P1-09: OBS-02: Persist region answers and freshness](https://github.com/Robotti-io/Meshcore-Observer/issues/30)
+- [x] [P1-09: OBS-02: Persist region answers and freshness](https://github.com/Robotti-io/Meshcore-Observer/issues/30)
 - [ ] [P1-10: OBS-02: Query recently direct-heard repeater regions](https://github.com/Robotti-io/Meshcore-Observer/issues/31)
 - [ ] [P1-11: OBS-02: Publish region declarations to CoreScope](https://github.com/Robotti-io/Meshcore-Observer/issues/32)
 - [ ] [P1-12: Persist supported repeater telemetry and range queries](https://github.com/Robotti-io/Meshcore-Observer/issues/33)
@@ -44,7 +44,7 @@ Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime a
 
 ## Dependencies and unresolved decisions
 
-- Update 2026-10-09: #30’s finalized five-task plan and REGION-PLAN-01–05 are approved. T1–T3 are user-pushed at 12c57a3 / migration 14, verified locally/remotely with a clean starting tree. T4 bounded region reads, configurable 72-hour freshness and protected shared retention are complete locally on 2026-10-09: 24 new scenarios; full 71 files / 791 tests, coverage thresholds and lint pass. T5 offline/recovery/cost/operator acceptance remains pending. #18/#23/#30 stay OPEN/project In progress; #22/#29 stay completed/Done. Whole-feature #30 acceptance stays unchecked; #31/#32 retain actual RF/publication activation.
+- Update 2026-10-09: #30 T1–T5 are complete; REGION-PLAN-01–05 are delivered. T1–T4 are user-pushed at 0f46233 / migration 14, verified locally/remotely with a clean starting tree. T5 is complete locally on 2026-10-09: five new integrated/cost scenarios; full 72 files / 796 tests pass in functional and coverage runs, with lint and coverage thresholds passing. Coverage-run region p95: normal two-broker writes 4.096ms (<10ms), slowest bounded read 56.931ms (<100ms); offline migration, pruning, clean/abrupt restart and closed-backup restore pass. #30 is completed/project Done with its progress label removed and all four acceptance items checked. #18/#23 stay OPEN/In progress; #22/#29 stay completed/Done. Next is #31 implementation planning; #31/#32 retain actual RF/publication activation.
 
 - Planning wave started on 2026-10-08: `docs/plans/v2.5.0/pillar-1-implementation-queue.md` links the four code-grounded draft plans and maps remaining issue-local gates. Review recommendation is #28, #26, #24, then #25. Relevant approved decisions unlock each issue; completion of all #23 discussions is not a global prerequisite for planning or an otherwise-ready approved implementation slice.
 
@@ -66,7 +66,7 @@ Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime a
 - [ ] Historical advert events and unique-node/current-inventory counts retain distinct meanings.
 - [x] Run history and resource samples survive restart; abrupt shutdown reporting does not invent an exact stop time.
 - [ ] OBS-02 satisfies its documented acceptance criteria: verified direct-heard eligibility, direct request/zero-hop reply, matched tags, durable successful answers, and validated CoreScope publication.
-- [ ] Empty successful region answers remain distinct from unknown/failure; failures preserve prior successful answers and possibly incomplete declarations do not imply completeness.
+- [x] Empty successful region answers remain distinct from unknown/failure; failures preserve prior successful answers and possibly incomplete declarations do not imply completeness.
 - [ ] Discovery and telemetry failures, full/missing contacts, disconnects, and broker failures do not disrupt packet capture or silently broaden routing.
 - [ ] Existing persisted metrics, pending replies, registry, and advert state survive migrations.
 - [ ] Automated checks, authorized hardware/RF validation, retention/query-performance measurements, and operator documentation are complete.
@@ -83,7 +83,7 @@ Recommended first main delivery pillar. Establish runtime measurements and obser
 
 ## Planning status and approval boundaries
 
-This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 and #22/#29 are complete. #30’s finalized five-task plan and REGION-PLAN-01–05 are approved. T1–T3 are user-pushed at 12c57a3 / migration 14, verified locally/remotely with a clean starting tree. T4 bounded region reads, configurable 72-hour freshness and protected shared retention are complete locally on 2026-10-09: 24 new scenarios; full 71 files / 791 tests, coverage thresholds and lint pass. T5 offline/recovery/cost/operator acceptance remains pending. #18/#23/#30 stay OPEN/project In progress; #22/#29 stay completed/Done. Whole-feature #30 acceptance stays unchecked; #31/#32 retain actual RF/publication activation. Presentation/offline assets/release validation remain in their owning issues.
+This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 and #22/#29/#30 are complete. #30 T1–T5 are complete; REGION-PLAN-01–05 are delivered. T1–T4 are user-pushed at 0f46233 / migration 14, verified locally/remotely with a clean starting tree. T5 is complete locally on 2026-10-09: five new integrated/cost scenarios; full 72 files / 796 tests pass in functional and coverage runs, with lint and coverage thresholds passing. Coverage-run region p95: normal two-broker writes 4.096ms (<10ms), slowest bounded read 56.931ms (<100ms); offline migration, pruning, clean/abrupt restart and closed-backup restore pass. #30 is completed/project Done with its progress label removed and all four acceptance items checked. #18/#23 stay OPEN/In progress; #22/#29 stay completed/Done. Next is #31 implementation planning; #31/#32 retain actual RF/publication activation. Presentation/offline assets/release validation remain in their owning issues.
 
 Set active work to `In progress` in the [release project's Status field](https://github.com/orgs/Robotti-io/projects/1), alongside the supplemental `status:in-progress` issue label. Project #1 statuses for #18, #22, #23, and #26 were updated and verified on 2026-10-07. Check off completed decision/research acceptance items as evidence is recorded, and close each issue as completed only when its full deliverable and validation are satisfied. Verify project Status is `Done`, remove the progress label on closure, and synchronize this epic's child checklist and local register. Epic completion requires completion of its required children and epic acceptance outcomes.
 

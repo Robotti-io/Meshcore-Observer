@@ -760,8 +760,9 @@ the script before running it.
 The shared coordinator is constructed at startup but remains idle: this
 foundation schedules no polls or automatic remote requests. It uses the
 existing Companion connection locally and requires no internet service.
-Region discovery and telemetry producers, durable answers and publication
-are separate release features; installing the foundation does not enable them.
+Region discovery, telemetry producers and network publication are separate
+release features. Durable region-answer storage is described below; installing
+the coordinator does not activate those producers.
 
 Operator overrides and code defaults match `.env.example`. All settings are
 whole numbers; an omitted value uses the default, while an explicit blank,
@@ -815,6 +816,99 @@ Deterministic tests cover installed serial/TCP framing with stub drivers, shared
 bot/advert/signing/capture work, 1,000 mixed completion/failure cycles and 1,000
 busy-air deferrals. They do not certify deployed firmware, hardware or RF
 delivery; activation and live validation remain in issues #31/#34/#37.
+
+### Durable region observations
+
+The always-on SQLite store retains normalized region answers and terminal query
+outcomes locally, including when the dashboard is disabled or no broker is
+configured. This foundation works without internet access. Actual opt-in region
+queries remain issue #31; broker opt-in, MQTT payloads, delivery policy and
+CoreScope integration remain #32. Neither producer is enabled by these storage
+settings, and the dashboard has no region-history view yet.
+
+An answer is an observation from the trusted Companion, associated with the
+captured full Observer and target public keys. It is not proof of a repeater's
+entire configuration. The bounded parser keeps exact case, whitespace, order,
+duplicates and `*`; it accepts a valid empty list as a measured answer. Invalid
+UTF-8, embedded control characters and malformed CSV produce no partial answer.
+Firmware may omit names that do not fit without signalling completeness, so
+completeness is always **unknown**, even for a short or empty list. Raw packet
+bodies, request tags and credentials are not stored in this dataset.
+
+Failed or unsupported evaluations stay separate from successful answers and
+preserve the previous successful declaration. Operational deferrals and missing
+evidence after a crash are not fabricated as physical-send counts or empty
+answers. Every successful observation is retained, while one latest snapshot is
+selected per Observer/target by original receipt time and stable answer ID.
+Older arrivals cannot overwrite a newer snapshot. Conflicting declarations at
+the same reporter/target/millisecond remain saved and flagged as ambiguous;
+their timestamps are never rewritten to evade downstream deduplication.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `PACKETCAPTURE_REGION_ANSWER_FRESHNESS_HOURS` | 72 | Whole hours 1–8760; age labels use original Observer receipt time, independently of direct-advert eligibility or polling cadence |
+| `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` | 0 | Shared history retention; zero keeps history indefinitely, positive whole days prune eligible historical detail |
+
+Code defaults match `.env.example`; an omitted freshness setting uses 72 hours.
+Explicit blank, fractional or out-of-range freshness settings fail before
+database, hardware or network initialization. Age equal to the freshness window
+is stale. Future-dated, clock-anomalous or ambiguous observations do not claim
+freshness. The process query high water and saved run last-known-alive evidence
+guard wall-clock rollback; the query time itself is not persisted, and run
+checkpoints are a retained lower bound. Freshness labels neither trigger RF nor
+delete data.
+
+Save-first retention preserves the latest successful snapshot indefinitely,
+including old or empty answers, and protects every pending/publishing reference.
+Published bookkeeping expires only when its saved result is strictly before
+the cutoff. Historical answers expire only when both receipt and terminal times
+are older, no latest pointer references them and no publication reference
+remains. Source/claim-run foreign keys protect needed older runs. Equality stays
+retained. Disabled or removed broker IDs do not purge their pending work.
+Retained counts/earliest timestamps are not proof of complete lifetime history.
+
+Internal history pages default to 100 with a strict 200-row maximum and explicit
+time ranges/scopes. Per-broker publication storage stages only explicitly
+requested destinations (at most 64 distinct IDs of 1–256 characters); the
+default stages none. A due claim captures the active owned run and a unique
+token. Conditional results cannot resolve a different broker, stale token or
+now-ambiguous answer. On owned restart, interrupted publishing rows become
+pending with original observation times and prior attempt/result evidence
+preserved. A prior acknowledgement can remain unknown: broker acceptance before
+local recording may cause an idempotent duplicate retry. `published` records a
+future publisher's approved transport-success criterion, **not CoreScope
+ingestion or exactly-once delivery**. Claim tokens are absent from history pages.
+
+Monitor the configured database volume: unlimited history, latest snapshots and
+long-lived pending work can grow disk usage even when detail retention is set.
+The result/fan-out bounds are not a lifetime storage cap. Cleanup makes SQLite
+pages reusable and does not promise an automatic reduction in file size. This
+shared cleanup is synchronous; the retained-volume fixture measured roughly a
+one-second maintenance pause, separately from normal write/read latency.
+Deployment storage and retained volume can change that cost. This
+feature adds no automatic abandonment, separate database or backup/export
+endpoint. Keep the configured database on persistent container storage with
+SQLite-compatible local locking; the dashboard flag never gates persistence.
+
+Before an upgrade, stop Observer and all other users of the database, then take
+and verify a consistent backup of the closed database. A live WAL may contain
+committed data absent from the main file: do not copy only the main file while
+the database is active or discard sidecars from an unverified backup. The tests
+verify restore from a closed, checkpointed database. Keep the matching
+application version and configuration with the backup. Migration 14 is
+transactional on failure; an application downgrade after a successful upgrade
+requires a compatible pre-upgrade backup, not deleting tables or lowering the
+schema version manually. Preserve the upgraded database before any restore;
+restoring an older backup loses observations recorded after that backup.
+
+Offline fixtures exercise migration, empty/latest/pending state, pruning,
+clean/abrupt restart and closed-backup restore. The retained-volume regression
+uses 20,000 answers, 20,000 terminal failures and two-broker state. Normal
+two-broker synchronous write p95 must remain below 10ms and bounded reads below
+100ms; maximum-64 fan-out, claims, pruning and disk growth are reported separately.
+These local fixture targets are regression checks, not deployment latency or
+live firmware/RF/CoreScope guarantees. Release hardware and soak validation
+remain #37.
 
 ### Passive topology evidence
 
@@ -895,6 +989,7 @@ src/
   mqtt/       broker connections (config-file loader + schema), topic templates, observer status, LetsMesh on-device JWT auth
   bots/       channel bots: channel discovery/creation, message decrypt, trigger matching; the shared reply queue owns send timing and reply-lifecycle metrics
   nodes/      the node/repeater registry `!lookup` reads/writes (advert parsing + verification) - backed by metrics/store.js, not its own in-memory state
+  regions/    strict bounded region-body parsing and normalized internal contracts; durable state uses metrics/
   health/     internal health-state snapshot (HTTP-agnostic; src/web/ is its consumer)
   metrics/    the observer's core, always-on SQLite-backed data store (node:sqlite) and its sample-persist-prune loop - not gated by the dashboard flag
   web/        optional live metrics dashboard (plain node:http + SSE) - a *viewer* over metrics/, gated by PACKETCAPTURE_METRICS_UI_ENABLED

@@ -6,9 +6,18 @@ import { advertSigner, signedAdvertPacket } from './signed-advert.js';
 import { RemoteRequestCoordinator } from '../../src/radio/remote-request-coordinator.js';
 import { RemoteRequestBudget } from '../../src/radio/remote-request-budget.js';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
+import { MqttManager } from '../../src/mqtt/mqtt-manager.js';
+import { parseRegionResponseBody } from '../../src/regions/region-response-parser.js';
+import { randomUUID } from 'node:crypto';
 
 const mode = process.argv[2];
 let store; let radio; let releaseStop; let releaseAdvert;
+let activeRun; let remoteRequestCalls = 0; let mqttPublishCalls = 0;
+if (mode === 'region-lifecycle') {
+  const originalTry = RemoteRequestCoordinator.prototype.tryRequest, originalPublish = MqttManager.prototype.publish;
+  RemoteRequestCoordinator.prototype.tryRequest = function (...args) { remoteRequestCalls++; return originalTry.call(this,...args); };
+  MqttManager.prototype.publish = function (...args) { mqttPublishCalls++; return originalPublish.call(this,...args); };
+}
 let resourcesBeforeStop = null;
 if (mode === 'delayed-stop') {
   const originalStop = MetricsSampler.prototype.stop;
@@ -19,7 +28,7 @@ if (mode === 'delayed-stop') {
 }
 const originalBegin = MetricsStore.prototype.beginObserverRun;
 MetricsStore.prototype.beginObserverRun = function (input) {
-  const result = originalBegin.call(this, input); store = this; return result;
+  const result = originalBegin.call(this, input); store = this; activeRun = result; return result;
 };
 const stopGate = new Promise((resolve) => { releaseStop = resolve; });
 const advertGate = new Promise((resolve) => { releaseAdvert = resolve; });
@@ -72,6 +81,13 @@ MetricsStore.prototype.close = function () {
 process.on('message', (message) => {
   if (message.action === 'snapshot') process.send({ snapshot: store.queryObserverRuns({ start: 0, end: Number.MAX_SAFE_INTEGER }),
     resourcesBeforeStop,
+    ...(mode === 'region-lifecycle' ? { regions: {
+      runId: activeRun.runId, remoteRequestCalls, mqttPublishCalls,
+      latest: store.getRegionLatest({ observerPublicKey: 'CD'.repeat(32),targetPublicKey: 'AC'.repeat(32),now:Date.now(),windowMs:72*3600000 }),
+      answers: store.queryRegionAnswers({ start:0,end:Number.MAX_SAFE_INTEGER }),
+      outcomes: store.queryRegionOutcomes({ start:0,end:Number.MAX_SAFE_INTEGER }),
+      first: store.queryRegionPublications({ brokerId:'first' }), second: store.queryRegionPublications({ brokerId:'second' })
+    } } : {}),
     summary: store.queryObserverRuntimeSummary(), nodes: store.countNodesByType('REPEATER'),
     resources: store.queryProcessSamples({ start: 0, end: Number.MAX_SAFE_INTEGER }),
     topology: store.queryTopologyPaths(),
@@ -87,6 +103,27 @@ process.on('message', (message) => {
       raw: Buffer.from('0D43AC019905E85C01020304', 'hex'), lastSnr: -1, lastRssi: -100 });
     radio.emit('radio.packet', { raw: Buffer.from('0D0001020304', 'hex'), lastSnr: -1, lastRssi: -100 });
     process.send({ topologyStorm: true });
+  }
+  if (message.action === 'region-seed' && mode === 'region-lifecycle') {
+    const at = Date.now()-4;
+    for (const [observedAt,body,brokerIds] of [[at,[0,0,0,0,...Buffer.from('*,Be,be-vlg')],['first','second']],
+      [at+1,[0,0,0,0,0,0,0,0],['first']]]) store.recordRegionResult({
+      outcome: { requestId: randomUUID(),runId:activeRun.runId,observerPublicKey:'CD'.repeat(32),targetPublicKey:'AC'.repeat(32),
+        startedAt:observedAt-1,completedAt:observedAt+1,clockAnomaly:false,status:'answered',reason:null,route:'direct' },
+      answer: { ...parseRegionResponseBody({ body }).answer,observedAt },brokerIds });
+    if (parseRegionResponseBody({ body:[0,0,0,0,...Buffer.from('bad,,list')] }).status !== 'malformed') throw new Error('Malformed region fixture unexpectedly accepted');
+    store.recordRegionResult({ outcome: { requestId:randomUUID(),runId:activeRun.runId,
+      observerPublicKey:'CD'.repeat(32),targetPublicKey:'AC'.repeat(32),startedAt:at,completedAt:at+3,
+      clockAnomaly:false,status:'failed',reason:'malformed-response',route:'direct' } });
+    const first = store.claimRegionPublication({ brokerId:'first',runId:activeRun.runId,now:Date.now() });
+    const second = store.claimRegionPublication({ brokerId:'second',runId:activeRun.runId,now:Date.now() });
+    store.resolveRegionPublication({ answerId:second.answerId,brokerId:'second',runId:activeRun.runId,
+      claimToken:second.claimToken,resolvedAt:Date.now(),status:'published' });
+    process.send({ regionFixture:true,claim:first });
+  }
+  if (message.action === 'region-prune' && mode === 'region-lifecycle') { store.pruneOlderThan(Date.now()+1); process.send({ regionPruned:true }); }
+  if (message.action === 'region-claim' && mode === 'region-lifecycle') {
+    process.send({ claim:store.claimRegionPublication({ brokerId:'first',runId:activeRun.runId,now:Date.now() }) });
   }
   if (message.action === 'stop') process.emit('SIGINT');
   if (message.action === 'release') { releaseStop(); releaseAdvert(); }

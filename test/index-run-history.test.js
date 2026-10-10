@@ -1,10 +1,13 @@
 import { test, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, copyFileSync } from 'node:fs';
+import { join, resolve, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MetricsStore } from '../src/metrics/store.js';
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { dropRegionSchema } from './fixtures/region-downgrade.js';
 
 const children = new Set(); const dirs = new Set();
 afterEach(async () => {
@@ -84,6 +87,83 @@ test('offline dashboard-disabled topology persists bounded duplicate receptions 
   const restarted = launch(env); await restarted.next(); const after = await snapshot(restarted);
   assert.deepEqual(after.topology, observed.topology); assert.equal(after.topologyDetails.total, 2);
   restarted.process.send({ action: 'stop' }); assert.equal((await restarted.exited).code, 0);
+});
+
+test('offline UI-disabled entrypoint upgrades v13 without inferred regions or lost legacy inventory/topology', async () => {
+  const env=environment(), path=env.PACKETCAPTURE_METRICS_UI_DB_PATH;
+  const store=new MetricsStore({ dbPath:path });
+  const run=store.beginObserverRun({ runId:randomUUID(),startedAt:0,observedAt:0,observedDurationMs:0,
+    appVersion:'2.4.0',nodeVersion:process.version,platform:process.platform,architecture:process.arch });
+  try {
+    store.upsertNode({ publicKeyHex:'AC'.repeat(32),name:'Kept offline',type:'REPEATER',heardAt:1000 });
+    store.recordTopologyObservation({ runId:run.runId,observerPublicKey:'CD'.repeat(32),receivedAt:1000,route:1,
+      kind:'flood-traversed',payloadVersion:0,hashWidth:1,prefixes:['AC'],transportCodes:null,containsRepeatedPrefix:false });
+    store.endObserverRun({ runId:run.runId,observedAt:2000,observedDurationMs:2000,reason:'SIGINT' });
+  } finally { store.close(); }
+  const db=new DatabaseSync(path);
+  try { db.exec(`${dropRegionSchema} PRAGMA user_version=13`); assert.equal(db.prepare('PRAGMA user_version').get().user_version,13); }
+  finally { db.close(); }
+  const child=launch(env,'region-lifecycle'); await child.next(); const observed=await snapshot(child);
+  assert.equal(observed.nodes,1); assert.equal(observed.topology.total,1); assert.equal(observed.topology.paths[0].receptionCount,1);
+  assert.equal(observed.regions.latest.presence,'unknown'); assert.equal(observed.regions.answers.total,0);
+  assert.equal(observed.regions.outcomes.total,0); assert.equal(observed.regions.first.total,0);
+  assert.equal(observed.regions.remoteRequestCalls,0); assert.equal(observed.regions.mqttPublishCalls,0);
+  child.process.send({ action:'stop' }); assert.equal((await child.exited).code,0);
+  const checked=new DatabaseSync(path);
+  try { assert.equal(checked.prepare('PRAGMA user_version').get().user_version,14);
+    assert.equal(checked.prepare('SELECT name FROM nodes').get().name,'Kept offline'); assert.deepEqual(checked.prepare('PRAGMA foreign_key_check').all(),[]); }
+  finally { checked.close(); }
+});
+
+for(const ending of ['clean','abrupt']) test(`offline entrypoint ${ending} restart preserves empty latest, pending history and original publication identity`, async () => {
+  const env=environment(), child=launch(env,'region-lifecycle'); await child.next();
+  child.process.send({ action:'region-seed' }); const seeded=await child.next(); assert.equal(seeded.regionFixture,true);
+  const observed=await snapshot(child); assert.equal(observed.regions.answers.total,2); assert.equal(observed.regions.outcomes.total,3);
+  assert.equal(observed.regions.latest.presence,'empty'); assert.deepEqual(observed.regions.latest.answer.regions,[]);
+  assert.equal(observed.regions.latest.latestOutcome.reason,'malformed-response');
+  assert.equal(observed.regions.first.publications[0].state,'publishing');
+  assert.equal(observed.regions.second.publications[0].state,'published');
+  child.process.send({ action:'region-prune' }); assert.equal((await child.next()).regionPruned,true);
+  const pruned=await snapshot(child); assert.equal(pruned.regions.answers.total,2); assert.equal(pruned.regions.outcomes.total,2);
+  assert.equal(pruned.regions.second.total,0); assert.equal(pruned.regions.first.total,2);
+  assert.equal(pruned.regions.remoteRequestCalls,0); assert.equal(pruned.regions.mqttPublishCalls,0);
+  if(ending==='clean') child.process.send({ action:'stop' }); else child.process.kill();
+  const ended=await child.exited; if(ending==='clean') assert.equal(ended.code,0,ended.output);
+  const restarted=launch(env,'region-lifecycle'); await restarted.next(); const after=await snapshot(restarted);
+  assert.equal(after.regions.latest.presence,'empty'); assert.deepEqual(after.regions.latest.answer,pruned.regions.latest.answer);
+  assert.deepEqual(after.regions.answers.answers,pruned.regions.answers.answers);
+  assert.ok(after.regions.first.publications.every(row=>row.state==='pending' && row.transportAcknowledgement==='unknown'));
+  assert.equal(after.regions.first.publications[0].observedAt,seeded.claim.answer.observedAt);
+  assert.equal(after.regions.first.publications[0].lastResultAt,null); assert.equal(after.regions.first.publications[0].attemptCount,1);
+  assert.equal(after.regions.remoteRequestCalls,0); assert.equal(after.regions.mqttPublishCalls,0);
+  assert.equal(after.snapshot.runs.find(run=>run.runId===observed.regions.runId).state,ending==='clean'?'clean':'unclean');
+  restarted.process.send({ action:'region-claim' }); const reclaimed=(await restarted.next()).claim;
+  assert.equal(reclaimed.requestId,seeded.claim.requestId); assert.equal(reclaimed.sourceRunId,seeded.claim.sourceRunId);
+  assert.deepEqual(reclaimed.answer,seeded.claim.answer); assert.notEqual(reclaimed.claimToken,seeded.claim.claimToken);
+  assert.equal(reclaimed.attemptCount,2); restarted.process.send({ action:'stop' }); assert.equal((await restarted.exited).code,0);
+});
+
+test('a verified closed-database backup restores source identity, empty latest and recoverable publication intent', async () => {
+  const env=environment(), path=env.PACKETCAPTURE_METRICS_UI_DB_PATH, child=launch(env,'region-lifecycle'); await child.next();
+  child.process.send({ action:'region-seed' }); const saved=await child.next(), observed=await snapshot(child);
+  child.process.send({ action:'stop' }); assert.equal((await child.exited).code,0);
+  // Copy only this fixture's closed, checkpointed database, never an active
+  // file with a live WAL. The restored file stays in the test's temp directory.
+  assert.equal(existsSync(path+'-wal'),false);
+  const backup=join(dirname(path),'verified-backup.sqlite3'); copyFileSync(path,backup);
+  const restored=new MetricsStore({ dbPath:backup });
+  try {
+    assert.deepEqual(restored.getRegionLatest({ observerPublicKey:'CD'.repeat(32),targetPublicKey:'AC'.repeat(32),now:Date.now(),windowMs:72*3600000 }).answer,
+      observed.regions.latest.answer);
+    const run=restored.beginObserverRun({ runId:randomUUID(),startedAt:Date.now(),observedAt:Date.now(),observedDurationMs:0,
+      appVersion:'2.4.0',nodeVersion:process.version,platform:process.platform,architecture:process.arch });
+    assert.equal(run.instanceId,observed.snapshot.runs[0].instanceId);
+    const reclaimed=restored.claimRegionPublication({ brokerId:'first',runId:run.runId,now:Date.now() });
+    assert.equal(reclaimed.requestId,saved.claim.requestId); assert.deepEqual(reclaimed.answer,saved.claim.answer);
+    assert.notEqual(reclaimed.claimToken,saved.claim.claimToken);
+  } finally { restored.close(); }
+  const checked=new DatabaseSync(backup);
+  try { assert.deepEqual(checked.prepare('PRAGMA foreign_key_check').all(),[]); } finally { checked.close(); }
 });
 function launch(env, mode = 'ordinary') {
   const process = spawn(globalThis.process.execPath, [resolve('test/fixtures/run-lifecycle-child.js'), mode],
