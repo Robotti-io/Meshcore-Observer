@@ -2,7 +2,7 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — first-wave backend/coordination features and research are complete. #32 is complete/user-pushed at bbe05f6. #33 T1–T4 are user-pushed through 13536b7; approved T5 and all four code/fixture acceptance criteria are complete locally on 2026-10-10. Twenty-one new real-entrypoint offline scenarios verify schema 13/14/15 upgrades, clean/abrupt restart, closed-backup restore, shared configured retention/source-run protection, startup failures and passive capture compatibility. Full single-worker functional/coverage runs pass 93 files / 1,122 tests; coverage, lint, diff and unchanged cost gates pass. Telemetry coverage p95 is 4.629ms saves and 47.169ms slowest bounded read. Schema stays 16 and collection is not activated. #33 is completed/native project Done with its progress label removed; #18/#23 remain OPEN/In progress for polling/reporting choices, #34/#35/#36 stay queued and #37 retains deployed-device/RF validation. T5 changes are ready for human review/push; next is #34 planning under its separate auth/polling boundaries.
+**Stage:** In progress — first-wave backend/coordination features and research are complete. #33 T1–T5 are user-pushed at 5e5c372; all four code/fixture criteria remain complete and #33 is completed/project Done. Schema 16 and the previously passing 1,122-test functional/coverage baseline are unchanged. #34 planning is now In progress: a finalized six-task plan and POLL-PLAN-01–06 propose default-off guest-only polling, reporter-scoped evidence, bounded saved contact routes, shared background fairness and owned durable scheduling/auth audit. Concrete auth/secret/storage approval is pending; no implementation or live polling has begun. #18/#23 remain OPEN/In progress; #35/#36 remain queued and #37 retains deployed-device/RF proof.
 Research records versioned capabilities and deployment limits. #29 delivers the validated shared internal seam with configurable limits, bounded ACK recovery, priority and idle lifecycle; the coordinator itself schedules no polls. #31 supplies the opt-in discovery producer; public reporting/dashboard, publication and telemetry remain in their owning issues.
 
 ## Operator outcome
@@ -34,7 +34,7 @@ Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acce
 - [x] [P1-09: OBS-02: Persist region answers and freshness](https://github.com/Robotti-io/Meshcore-Observer/issues/30)
 - [x] [P1-10: OBS-02: Query recently direct-heard repeater regions](https://github.com/Robotti-io/Meshcore-Observer/issues/31)
 - [x] [P1-11: OBS-02: Publish region declarations to CoreScope](https://github.com/Robotti-io/Meshcore-Observer/issues/32)
-- [ ] [P1-12: Persist supported repeater telemetry and range queries](https://github.com/Robotti-io/Meshcore-Observer/issues/33)
+- [x] [P1-12: Persist supported repeater telemetry and range queries](https://github.com/Robotti-io/Meshcore-Observer/issues/33)
 - [ ] [P1-13: Poll repeater telemetry within a configured hop radius](https://github.com/Robotti-io/Meshcore-Observer/issues/34)
 - [ ] [P1-14: Integrate historical reporting APIs](https://github.com/Robotti-io/Meshcore-Observer/issues/35)
 - [ ] [P1-15: Connect telemetry, node, bot, and runtime dashboard reporting](https://github.com/Robotti-io/Meshcore-Observer/issues/36)
