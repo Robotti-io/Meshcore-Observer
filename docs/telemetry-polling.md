@@ -1,10 +1,11 @@
 # Telemetry polling configuration
 
-Delivered phases: **#34 T1 startup contracts, T2 pure protocol helpers and T3 guarded shared owner**.
-Durable polling-state integration, the scheduler and active collection are later phases.
-Setting `PACKETCAPTURE_TELEMETRY_POLL_ENABLED`
-does not yet activate radio traffic. Saved telemetry freshness and shared history
-retention continue to operate independently.
+Delivered phases: **#34 T1–T5 startup, protocol, guarded owner, durable state and opt-in runtime producer**.
+Polling remains disabled by default. Explicitly enabling it with valid policy and
+guest-secret files now activates guarded collection after the startup delay and
+distributed component deadlines. T6 integrated acceptance remains pending; no
+live device, credential or deployment was used to validate T5. Saved telemetry
+freshness and shared history retention continue to operate independently.
 
 ## Startup settings
 
@@ -112,7 +113,7 @@ locally rather than copying secret contents into diagnostics.
 
 T1–T3 add no store migration, live polling producer, route change or contact mutation.
 T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
-T4 adds durable state; T5 wires opt-in collection; T6 proves offline acceptance.
+T4 adds durable state; T5 connects opt-in collection; T6 remains the final offline acceptance gate.
 Live radio/device validation and deployment activation remain separately scoped
 under #37. Authentication prefix/static-tag correlation limits are recorded in
 the approved #34 plan and will not be presented as nonce-based replay proof.
@@ -161,7 +162,8 @@ requires a synchronous public-server-time high-water read and authentication
 outcome save. T4 supplies their owned-store APIs; T5 connects the
 producer and callbacks. The existing generic binary primitive remains compatible for its
 trusted internal consumers; the telemetry producer must use these guarded entry
-points. Merely enabling polling still sends no login or telemetry requests.
+points. Enabled polling can send login and telemetry requests only after all
+eligibility, due-time, route, role, ownership and physical-budget gates pass.
 
 Login reads the complete bounded inventory and then the exact full-key contact
 inside the same generation-bound local command transaction. Both reads share
@@ -217,7 +219,7 @@ backup for an application downgrade.
 `recordTelemetryDirectEvidence` stores a newly verified zero-hop advert’s
 captured reporter, target, original receipt, source run and nonsecret event digest.
 It preserves the latest marker without incrementing existing advert metrics; T5
-will call it alongside the existing verified-advert path. Exact eligibility and
+calls it alongside the existing verified-advert path even with polling disabled. Exact eligibility and
 keyset candidate reads require repeater type, matching reporter, exclusive stale
 cutoff, no future receipt and a source run without known clock anomaly. Flood
 candidates additionally need nonrepeated traversed topology, a retained original
@@ -242,9 +244,9 @@ deadline has elapsed. Policy inspection does not slide the original reservation/
 its matching reservation in one transaction. The existing `recordTelemetryResult`
 contract remains unchanged; its internal transaction seam is inaccessible through
 HTTP. Any write failure rolls back results, latest pointers and scheduling state.
-The pending reservation then blocks replacement for its scope. T5 will pause all
-new telemetry on terminal persistence failure, retain at most one unsaved terminal
-and drain before store close. No producer/drain queue is introduced in T4.
+The pending reservation then blocks replacement for its scope. T5 pauses all
+new telemetry on terminal persistence failure, retains at most one unsaved terminal
+and drains before store close. No producer/drain queue is introduced in T4.
 
 `completeTelemetryAuthentication` separately saves the coordinator’s validated
 public context, original local dispatch/completion, actual route, fixed reason
@@ -270,4 +272,52 @@ retire reservations from another run and extend conservative cooldowns while
 keeping consumed attempts. It records no invented terminal response and does not
 resend old work. Current-run pending requests remain owned until terminal save or
 drain. Wall-clock rollback/future evidence defers admission instead of making stale
-state fresh. T5 must invoke recovery before admitting the new producer.
+state fresh. T5 invokes recovery before admitting the new producer.
+
+## Opt-in runtime scheduling and drain (#34 T5)
+
+The verified-advert consumer captures `origin_id` and original receipt time
+before asynchronous signature verification. A newly verified zero-hop repeater
+receipt supplies a reporter-scoped marker; a subsequent reporter change cannot
+reattribute it. Relayed/unverified/invalid-context receptions cannot supply direct
+eligibility. The existing inventory and advert-event deduplication are preserved.
+Marker errors use a fixed safe warning and do not interrupt capture or publication.
+
+Enabled startup constructs one scheduler on the existing store and coordinator.
+It first retires other-run reservations in pages of at most 100. Candidate pages
+hold at most 16 targets with a full-key cursor; each tick selects one due
+component. Initial reporter/target/component phases are deterministic offsets
+within the configured refresh cadence, anchored at scheduler startup. Saved
+deadlines survive restart; missing scopes discovered after their phase are due
+on that tick. Existing observations can extend that initial deadline. There is no
+catch-up batch. Clock agreement uses monotonic elapsed time and the durable
+wall-time high-water before RF permission is considered.
+
+The scheduler uses guarded data admission; when a guest session is absent, it
+attempts one due guest login instead. Successful proof must be saved synchronously
+before the owner grants its ephemeral session. The component is revisited on a
+later tick under the shared physical budget. Session expiry, disconnect/reporter
+change or failures require fresh proof; stored permission history is never a
+live grant. Slower cadence overrides are checked before spending RF on login;
+the store still enforces conservative current-cycle timing and attempt limits.
+Target profile overrides select only the approved decoder contracts. A query
+failure stores an outcome without inventing a reading; authentication failures
+remain only in authentication history.
+
+One validated terminal can await a local save. Repeated save failure blocks all
+new telemetry work, emits a fixed deduplicated warning and retries that same
+original result locally. A repaired authentication save does not retrospectively
+grant a session. An invalid/missing terminal leaves admission paused and refuses
+clean shutdown. A reservation followed by cancellation before physical dispatch
+remains a conservative scope block until restart recovery; no failure/reading is
+fabricated to release it.
+
+Shutdown stops producer admission before cancelling shared remote ownership,
+then drains telemetry while the store is open. Pending advert verification also
+settles before clean run closure/store close. Unresolved terminal persistence
+prevents a clean run marker and normal store closure, following the existing
+bounded shutdown failure path. Broker/UI availability has no role in collection.
+T5 validation uses isolated synthetic credentials, signed adverts and raw radio
+frames; T6 real-entrypoint final acceptance and #37 live-device proof remain
+separate gates. Enabling the feature is an operator action and was not performed
+on a real device during implementation.

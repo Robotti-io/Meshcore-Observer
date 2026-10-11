@@ -1246,7 +1246,7 @@ backup before migration 16; use the existing backup procedure above. These
 source-derived synthetic fixtures do not activate telemetry polling or replace
 #37's deployed-device/RF verification.
 
-### Telemetry polling startup, protocol and owner contracts (#34 T1–T4)
+### Telemetry polling startup, protocol and runtime contracts (#34 T1–T5)
 
 Polling defaults to disabled, a two-hop radius, 72-hour passive eligibility and
 a 24-hour per-component refresh objective. `.env.example` lists the matching
@@ -1260,8 +1260,8 @@ The [configuration guide](docs/telemetry-polling.md) describes strict version-1
 files, default/group/full-key precedence, verified target profile overrides,
 1–15 UTF-8-byte guest credentials and safe errors. The two JSON example files
 contain synthetic values only. Credentials/reference mappings stay outside the
-ordinary configuration object in private process memory. T1 provides startup
-contracts only: even setting enabled does not yet send login or data requests.
+ordinary configuration object in private process memory. Enabled polling uses
+these validated startup contracts before any login or data request.
 T2 adds pure full-contact-list/key/prefix/route validation, exact modern guest
 response and direct static-prefix ACK parsing, and temporary private login-byte
 preparation. These helpers perform no radio I/O or contact mutation; parsed
@@ -1275,7 +1275,11 @@ authentication audit/replay high-water and atomic polling reservations/results.
 Restart recovery advances cooldowns without replaying work or restoring sessions.
 Shared retention preserves minimum replay/direct/latest state and its source runs.
 Keep a verified closed backup before migration 17. T5 connects these APIs to
-passive capture and the opt-in producer; active collection remains inactive.
+always-on passive evidence and the opt-in producer. Component deadlines spread
+across the cadence; every physical login/query uses the shared radio budget.
+One unsaved terminal pauses polling and must drain before clean store closure.
+Polling remains disabled by default. T6 final integrated acceptance and #37
+separately authorized live-device validation remain pending.
 
 ## Troubleshooting
 

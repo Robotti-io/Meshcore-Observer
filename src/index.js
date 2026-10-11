@@ -18,6 +18,7 @@ import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
 import { RemoteRequestCoordinator } from './radio/remote-request-coordinator.js';
 import { RegionDiscoveryScheduler } from './regions/region-discovery-scheduler.js';
+import { TelemetryPollingScheduler } from './telemetry/polling-scheduler.js';
 import { NodeRegistry } from './nodes/node-registry.js';
 import { StatsReporter } from './metrics/stats-reporter.js';
 import { ServiceHealth } from './health/service-health.js';
@@ -126,6 +127,7 @@ async function main() {
   // so the empty map here at construction time is fine.
   const botsByName = new Map();
   const nodeRegistry = new NodeRegistry({ logger, store: metricsStore,
+    runId: runHistory.runId,
     directHeardWindowMs: config.nodeObservations.directHeardWindowMs });
   const statsReporter = new StatsReporter({ store: metricsStore });
   const airtimeCoordinator = new AirtimeCoordinator({ quietMs: config.botReplyQueue.quietMs });
@@ -150,7 +152,7 @@ async function main() {
   });
   floodAdvertScheduler.start();
 
-  // One owner shared by discovery and future telemetry producers. Pending
+  // One owner shared by discovery and telemetry producers. Pending
   // durable foreground work wins every admission.
   const remoteRequestCoordinator = new RemoteRequestCoordinator({
     radio: radioManager, airtimeCoordinator, logger, ...config.remoteRequests,
@@ -169,6 +171,11 @@ async function main() {
     brokerIds:config.brokers.filter(b=>b.enabled && b.regionPublication.enabled).map(b=>b.id)
   }) : null;
   regionDiscovery?.start();
+  const telemetryPolling = config.telemetryPolling.enabled ? new TelemetryPollingScheduler({
+    config: config.telemetryPolling, store: metricsStore, runId: runHistory.runId,
+    radio: radioManager, coordinator: remoteRequestCoordinator, logger
+  }) : null;
+  telemetryPolling?.start();
 
   // LetsMesh-style (token auth) brokers get a dedicated on-device-signed
   // JWT auth seam, kept separate from generic MQTT connection code per
@@ -369,6 +376,7 @@ async function main() {
   const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
     teardown: async () => {
       regionDiscovery?.stop();
+      telemetryPolling?.stop();
       regionPublisher.stop();
       // Detach persistence input and stop checkpoints before asynchronous teardown.
       packetPipeline.off('packet', recordNodeObservation);
@@ -381,6 +389,7 @@ async function main() {
       // then retire the radio later under the existing shutdown deadline.
       await remoteRequestCoordinator.stop();
       await regionDiscovery?.drain();
+      await telemetryPolling?.drain();
       await regionPublisher.drain();
       // Unsubscribe bots first, then stop outbound schedulers while storage
       // remains available to work already in progress.

@@ -1,6 +1,7 @@
 import { parseAdvertReceptionFromPacket } from './advert-parser.js';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { verifiedAdvertSchema } from './schemas.js';
+import { telemetryDirectEvidenceSchema, assertTelemetryState } from '../telemetry/poll-state-schemas.js';
 
 const validateAdvert = compileSchema(verifiedAdvertSchema);
 
@@ -36,6 +37,7 @@ export class NodeRegistry {
   #now;
   #store;
   #directHeardWindowMs;
+  #runId;
 
   /**
    * @param {{logger: object, store: object, directHeardWindowMs: number, parseAdvert?: Function, now?: () => number}} options
@@ -43,12 +45,13 @@ export class NodeRegistry {
    * see src/index.js) - persistence is no longer optional here, matching
    * every other feature MetricsStore now backs.
    */
-  constructor({ logger, store, directHeardWindowMs, parseAdvert = parseAdvertReceptionFromPacket, now = () => Date.now() }) {
+  constructor({ logger, store, directHeardWindowMs, runId, parseAdvert = parseAdvertReceptionFromPacket, now = () => Date.now() }) {
     this.#logger = logger;
     this.#store = store;
     this.#parseAdvert = parseAdvert;
     this.#now = now;
     this.#directHeardWindowMs = directHeardWindowMs;
+    this.#runId = runId;
   }
 
   /**
@@ -68,6 +71,9 @@ export class NodeRegistry {
       // Capture Observer reception time before asynchronous verification;
       // never derive recency from the remote advert timestamp.
       const receivedAt = Date.parse(decodedPacket.timestamp);
+      // Snapshot packet-owned identity before verification yields. Never ask
+      // the current radio identity to attribute an earlier reception.
+      const observerPublicKey = decodedPacket.origin_id;
       if (!await advert.isVerified()) {
         this.#logger.warn('services.nodeRegistry', 'dropped an advert whose signature did not verify', { type: advert.parsed.type });
         return;
@@ -79,6 +85,16 @@ export class NodeRegistry {
         return;
       }
       this.#store.recordVerifiedAdvert(observation);
+      if (this.#runId && hopCount === 0 && observation.type === 'REPEATER') {
+        const evidence = { runId: this.#runId, observerPublicKey, targetPublicKey: observation.publicKeyHex,
+          receivedAt, eventDigest, hopCount, provenance: 'verified-advert' };
+        try {
+          assertTelemetryState(telemetryDirectEvidenceSchema, evidence);
+          this.#store.recordTelemetryDirectEvidence(evidence);
+        } catch {
+          this.#logger.warn('services.nodeRegistry', 'Failed to save trusted telemetry direct evidence; this reception cannot grant telemetry eligibility.');
+        }
+      }
     } catch (err) {
       this.#logger.warn('services.nodeRegistry', 'failed to persist a verified advert', { error: err.message });
     }
