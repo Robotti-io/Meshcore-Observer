@@ -149,7 +149,7 @@ for(const ending of ['clean','abrupt']) test(`offline entrypoint ${ending} resta
   const pruned=await snapshot(child); assert.equal(pruned.regions.answers.total,2); assert.equal(pruned.regions.outcomes.total,2);
   assert.equal(pruned.regions.second.total,0); assert.equal(pruned.regions.first.total,2);
   assert.equal(pruned.regions.remoteRequestCalls,0); assert.equal(pruned.regions.mqttPublishCalls,0);
-  if(ending==='clean') child.process.send({ action:'stop' }); else child.process.kill();
+  if(ending==='clean') child.process.send({ action:'stop' }); else child.process.kill('SIGKILL');
   const ended=await child.exited; if(ending==='clean') assert.equal(ended.code,0,ended.output);
   const restarted=launch(env,'region-lifecycle'); await restarted.next(); const after=await snapshot(restarted);
   assert.equal(after.regions.latest.presence,'empty'); assert.deepEqual(after.regions.latest.answer,pruned.regions.latest.answer);
@@ -222,7 +222,13 @@ test('offline entrypoint checkpoints and records clean completion only after del
   assert.equal(alive.resources.samples.at(-1).cpuPercent, null); // First collection is the unavailable CPU baseline.
   assert.ok(alive.resources.samples[0].rssBytes > 0);
   child.process.send({ action: 'stop' });
-  const stopping = await snapshot(child);
+  // Shutdown defers teardown by a microtask; wait until the sampler has stopped
+  // (the fixture records the resource count then) rather than racing it.
+  let stopping = await snapshot(child);
+  for (let attempt = 0; stopping.resourcesBeforeStop === null && attempt < 50; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stopping = await snapshot(child);
+  }
   assert.equal(stopping.snapshot.runs[0].state, 'running');
   assert.equal(stopping.snapshot.runs[0].endedAt, null);
   assert.ok(stopping.resourcesBeforeStop >= alive.resources.total);

@@ -802,6 +802,13 @@ drains remote ownership before radio/storage teardown under the existing
 10-second deadline; failed teardown leaves the run unclosed for recovery rather
 than claiming a clean stop.
 
+If a connection reset cannot be confirmed, remote requests (region discovery and
+telemetry polling) stop and the Observer logs one `services.remoteRequests`
+warning with the required action; the dashboard health snapshot reports
+`remoteRequests.recoveryFailed: true`. When the radio is merely unconfirmed it
+resumes automatically after the radio reconnects. If the transport close itself
+could not be confirmed, restart Observer. Packet capture is unaffected.
+
 Results mean a tag-matched answer attributed by the trusted Companion to the
 submitted context. The binary envelope provides no full RF sender identity.
 Generation guards reject old-session callbacks, and a 32-entry retired-tag map
@@ -1176,12 +1183,16 @@ ambiguous observations remain local. Opt-out/removal preserves pending rows.
 
 Each broker has one in-flight job. Offline brokers accumulate durable pending
 work without counting transport attempts. Failures retry with capped exponential
-backoff and original content/time. An acknowledgement timeout retires that
-broker's MQTT client, discards its old outgoing queue and reconnects after five
-seconds through existing credentials/will configuration. That broker's packet
-and status delivery pauses during recovery; local capture and other brokers
-continue. A fixed warning explains retry and directs operators to verify client
-ACL permissions and broker availability. A failed local delivery-result save
+backoff and original content/time. The MQTT client is shared with packet and
+status delivery, so a single acknowledgement timeout only fails that attempt and
+leaves the connection alone. After three consecutive timeouts (a success resets
+the count) the Observer retires that broker's MQTT client, discards its old
+outgoing queue and reconnects after five seconds through existing
+credentials/will configuration. That broker's packet and status delivery pauses
+during that recovery; local capture and other brokers continue. A late
+acknowledgement for an earlier timed-out attempt can cause a duplicate
+(at-least-once) delivery of the same observation. A fixed warning explains retry
+and directs operators to verify client ACL permissions and broker availability. A failed local delivery-result save
 pauses that worker, retries the save only, and prevents a clean-shutdown claim.
 
 `published` means broker PUBACK, not verified CoreScope ingestion. Crash between

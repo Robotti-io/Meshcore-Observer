@@ -9,6 +9,13 @@ const config={ id:'one',enabled:true,transport:'tcp',tls:false,host:'fixture',po
 const input={ brokerId:'one',topic:'meshcore/client/'+'be'.repeat(32)+'/regions',timeoutMs:1000,
   payload:{ type:'REGIONS',timestamp:'2026-10-10T00:00:00.123Z',target:'ac'.repeat(32),regions:[],truncated:true } };
 const flush=async()=>{for(let i=0;i<10;i++)await Promise.resolve();};
+// Consecutive acknowledgement timeouts needed before the shared client is retired.
+async function timeOut(f,count) {
+  for(let i=0;i<count;i++) {
+    const pending=f.manager.publishRegion(input);await vi.advanceTimersByTimeAsync(1000);
+    assert.deepEqual(await pending,{ outcome:'failed' });
+  }
+}
 function fixture() {
   const clients=[],options=[];
   const broker=new MqttBroker({ config,logger,createClient:opts=>{
@@ -45,8 +52,8 @@ test('manager enforces opt-in even for a connected broker when a caller supplies
 test('timeout retires old client, preserves will on recovery and rejects late callbacks/events',async()=>{
   vi.useFakeTimers({ toFake:['setTimeout','clearTimeout'] });const f=fixture();
   const will={ topic:'status',payload:'offline' };f.broker.connect(will);await flush();const old=f.clients[0];old.emit('connect');
-  const pending=f.manager.publishRegion(input);await vi.advanceTimersByTimeAsync(1000);
-  assert.deepEqual(await pending,{ outcome:'failed' });assert.deepEqual(old.ends,[true]);assert.equal(f.broker.getState(),'retrying');
+  await timeOut(f,3);
+  assert.deepEqual(old.ends,[true]);assert.equal(f.broker.getState(),'retrying');
   old.calls[0].callback();old.emit('connect');old.emit('offline');old.emit('reconnect');old.emit('error',Error('private'));
   assert.equal(f.broker.getState(),'retrying');
   await vi.advanceTimersByTimeAsync(5000);await flush();assert.equal(f.clients.length,2);
@@ -55,9 +62,21 @@ test('timeout retires old client, preserves will on recovery and rejects late ca
   f.clients[1].calls[0].callback();assert.deepEqual(await retry,{ outcome:'sent' });await f.broker.close();
   assert.equal(vi.getTimerCount(),0);
 });
+test('isolated acknowledgement timeouts keep the shared client and a success resets the run',async()=>{
+  vi.useFakeTimers({ toFake:['setTimeout','clearTimeout'] });const f=fixture();
+  f.broker.connect();await flush();const client=f.clients[0];client.emit('connect');
+  await timeOut(f,2);
+  assert.deepEqual(client.ends,[]);assert.equal(f.broker.getState(),'connected');assert.equal(f.clients.length,1);
+  const ok=f.manager.publishRegion(input);client.calls.at(-1).callback();assert.deepEqual(await ok,{ outcome:'sent' });
+  await timeOut(f,2);
+  assert.deepEqual(client.ends,[]);assert.equal(f.broker.getState(),'connected');
+  await timeOut(f,1);
+  assert.deepEqual(client.ends,[true]);assert.equal(f.broker.getState(),'retrying');
+  await f.broker.close();assert.equal(vi.getTimerCount(),0);
+});
 test('stop cancels timeout recovery and pending credential generation cannot resurrect a stopped client',async()=>{
   vi.useFakeTimers({ toFake:['setTimeout','clearTimeout'] });const f=fixture();f.broker.connect();await flush();f.clients[0].emit('connect');
-  const pending=f.manager.publishRegion(input);await vi.advanceTimersByTimeAsync(1000);await pending;await f.broker.close();
+  await timeOut(f,3);await f.broker.close();
   await vi.advanceTimersByTimeAsync(5000);assert.equal(f.clients.length,1);assert.equal(vi.getTimerCount(),0);
   let release;let created=0;
   const broker=new MqttBroker({ config:{ ...config,auth:{ method:'token',audience:'fixture' } },logger,

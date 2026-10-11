@@ -19,7 +19,7 @@ const add = (time, delay) => Math.min(MAX_TIME, time + delay);
 /** One producer, no RF replay queue. The shared owner retains session authority;
  * the store retains deadlines. Exactly one terminal can await a local save. */
 export class TelemetryPollingScheduler {
-  #config; #policy; #store; #runId; #radio; #coordinator; #logger; #wall; #mono; #createId;
+  #config; #excluded; #policy; #store; #runId; #radio; #coordinator; #logger; #wall; #mono; #createId;
   #started = false; #stopped = false; #timer = null; #pending = null;
   #cursor = null; #observer = null; #recoveryCursor = null; #recovered = false;
   #anchor = null; #lastMono = 0; #highWater = 0; #clockPaused = false;
@@ -30,7 +30,7 @@ export class TelemetryPollingScheduler {
     if (!configValid(config)) throw new Error('Invalid telemetry polling configuration');
     this.#policy = Object.fromEntries(Object.keys(telemetryStatePolicySchema.properties).map(k => [k, config[k]]));
     assertTelemetryState(telemetryRecoverySchema, { runId, observedAt: 0, policy: this.#policy });
-    this.#config = config; this.#store = store; this.#runId = runId; this.#radio = radio;
+    this.#config = config; this.#excluded = new Set(config.excludedTargets ?? []); this.#store = store; this.#runId = runId; this.#radio = radio;
     this.#coordinator = coordinator; this.#logger = logger; this.#wall = wallNow; this.#mono = monotonicNow; this.#createId = createId;
   }
   start() {
@@ -110,6 +110,7 @@ export class TelemetryPollingScheduler {
   }
   #eligible(request, current, admitted, variant, reservation) {
     if (!snapshotValid(current) || this.#stopped || this.#unsaved || (this.#unconfirmed && !reservation)) return false;
+    if (this.#excluded.has(request.targetPublicKey)) return false;
     if (!current.ready || current.generation !== admitted.generation
       || current.observerPublicKey?.toUpperCase() !== admitted.observerPublicKey) return false;
     const clock = this.#clock();
@@ -151,6 +152,7 @@ export class TelemetryPollingScheduler {
     let selected = null;
     for (const candidate of page.candidates) {
       this.#cursor = candidate.targetPublicKey;
+      if (this.#excluded.has(candidate.targetPublicKey)) continue;
       for (const variant of this.#variants(candidate.targetPublicKey)) {
         const scope = this.#scope(candidate.targetPublicKey, variant);
         if (!this.#store.getTelemetryPollState(scope)) this.#initialize(scope, clock.wall);

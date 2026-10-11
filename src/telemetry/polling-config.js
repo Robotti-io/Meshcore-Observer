@@ -17,7 +17,7 @@ const MESSAGES = Object.freeze({
   policy: 'Invalid telemetry polling policy file: use version 1, allowed fields and bounded full public-key target/group assignments',
   secrets: 'Invalid telemetry polling secret file: use version 1, bounded references and guest passwords of 1 to 15 UTF-8 bytes without controls or invalid encoding',
   read: 'Cannot read telemetry polling files: supply readable regular UTF-8 JSON files of at most 65536 bytes',
-  assignments: 'Invalid telemetry polling assignments: target and group IDs must be unique, group membership unambiguous and total distinct targets <= 256',
+  assignments: 'Invalid telemetry polling assignments: target and group IDs must be unique, group membership unambiguous, excluded targets not also assigned and total distinct targets <= 256',
   references: 'Invalid telemetry polling credential references: every default, group and target reference must exist in the secret file',
   components: 'Invalid telemetry polling components: enable at least one of status, sensors or neighbours'
 });
@@ -102,6 +102,8 @@ export function loadTelemetryPolling(input) {
     } else if (!assigned.has(target.targetPublicKey)) assigned.set(target.targetPublicKey, policy.defaultCredentialRef);
   }
   if (assigned.size > TELEMETRY_POLL_MAX_TARGETS) fail('assignments');
+  // Exclusion is an operator veto; listing the same key as assigned is contradictory.
+  if ((policy.excludedTargets ?? []).some(key => assigned.has(key))) fail('assignments');
   if ([...references].some(ref => !secrets.has(ref))) fail('references');
 
   const config = { ...settings,
@@ -111,7 +113,8 @@ export function loadTelemetryPolling(input) {
     targetProfiles: (policy.targets ?? []).filter(target => target.statusProfile || target.emitterProfile).map(target => ({
       targetPublicKey: target.targetPublicKey, statusProfile: { ...(target.statusProfile ?? TELEMETRY_POLL_STATUS_DEFAULT) },
       emitterProfile: target.emitterProfile ?? 'unknown'
-    }))
+    })),
+    excludedTargets: [...(policy.excludedTargets ?? [])]
   };
   if (!Object.values(config.components).some(Boolean)) fail('components');
   if (!configValid(config)) fail('settings');

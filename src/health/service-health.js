@@ -14,6 +14,7 @@
  * of sync with reality.
  */
 const DEFAULT_REPLY_QUEUE_STATS = { size: 0 };
+const DEFAULT_REMOTE_REQUESTS = { getStatus: () => ({ recoveryFailed: false }) };
 
 export class ServiceHealth {
   #now;
@@ -22,6 +23,7 @@ export class ServiceHealth {
   #mqttManager;
   #bots;
   #replyQueue;
+  #remoteRequests;
 
   #radioLastConnectedAt = null;
   #radioReconnectCount = 0;
@@ -41,7 +43,7 @@ export class ServiceHealth {
   #brokerDeliveries = new Map();
 
   /**
-   * @param {{radioManager: object, mqttManager: object, packetPipeline: object, bots: {name: string, enabled: boolean, bot: object}[], replyQueue?: {getStats: () => object}, now?: () => Date}} options
+   * @param {{radioManager: object, mqttManager: object, packetPipeline: object, bots: {name: string, enabled: boolean, bot: object}[], replyQueue?: {getStats: () => object}, remoteRequests?: {getStatus: () => {recoveryFailed: boolean}}, now?: () => Date}} options
    * `bots` is a list of every configured channel bot (see channel-bot.js),
    * each paired with whether it's enabled - a bot instance still exists but
    * is never started when disabled, so `enabled` can't be read off it.
@@ -55,6 +57,7 @@ export class ServiceHealth {
     packetPipeline,
     bots,
     replyQueue = { getStats: () => DEFAULT_REPLY_QUEUE_STATS },
+    remoteRequests = DEFAULT_REMOTE_REQUESTS,
     now = () => new Date()
   }) {
     this.#now = now;
@@ -63,6 +66,7 @@ export class ServiceHealth {
     this.#mqttManager = mqttManager;
     this.#bots = bots;
     this.#replyQueue = replyQueue;
+    this.#remoteRequests = remoteRequests;
 
     radioManager.on('radio.connected', () => {
       this.#radioLastConnectedAt = this.#now();
@@ -131,7 +135,10 @@ export class ServiceHealth {
         repeatsConfirmed: bot.getRepeatsConfirmed(),
         repeatsUnconfirmed: bot.getRepeatsUnconfirmed()
       })),
-      replyQueue: this.#replyQueue.getStats()
+      replyQueue: this.#replyQueue.getStats(),
+      // Additive: true while the remote request owner is fail-closed after an
+      // unconfirmed radio reset (see RemoteRequestCoordinator#latchRecovery).
+      remoteRequests: { ...this.#remoteRequests.getStatus() }
     };
   }
 }

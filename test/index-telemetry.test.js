@@ -91,7 +91,7 @@ for(const ending of ['clean','abrupt'])test(`supported/partial/empty observation
   assert.equal(common.observation.data.rxAirtimeSeconds,null);assert.equal(common.observation.data.batteryMillivolts,3300);
   const empty=before.latest.find(x=>x.variant.component==='neighbours'&&x.variant.params.offset===0);
   assert.deepEqual(empty.observation.data.entries,[]);assert.equal(empty.observation.data.reportedTotal,0);
-  if(ending==='clean')await stop(child);else{child.process.kill();await child.exited;}
+  if(ending==='clean')await stop(child);else{child.process.kill('SIGKILL');await child.exited;}
   const next=launch(env);await next.next();const after=await command(next,'snapshot');sameData(before,after);
   assert.notEqual(after.runId,before.runId);assert.equal(after.runs.runs.find(x=>x.runId===before.runId).state,ending==='clean'?'clean':'unclean');
   const now=Date.now()+73*HOUR,stale=await command(next,'snapshot',{now});assert.ok(stale.latest.every(x=>x.freshness==='stale'));

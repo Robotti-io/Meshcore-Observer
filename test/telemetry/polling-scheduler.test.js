@@ -246,6 +246,17 @@ test('store clock read failure after a binary terminal does not discard its orig
   assert.equal(f.history().outcomes.length, 1); assert.equal(f.history().outcomes[0].clockAnomaly, true);
   assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /PRIVATE-SECRET/);
 });
+test('excluded targets receive no login or data request', async () => {
+  const f = rig(); f.config.excludedTargets = [TARGET]; f.scheduler = f.make();
+  await f.start(); await f.tick(5000, 5000);
+  assert.equal(f.calls.length, 0); assert.equal(f.sent.length, 0);
+  assert.equal(f.history().outcomes.length, 0);
+});
+test('an unexcluded target is still polled when a different target is excluded', async () => {
+  const f = rig(); f.config.excludedTargets = ['EE'.repeat(32)]; f.scheduler = f.make();
+  await f.start(); await f.tick(5000, 5000);
+  assert.ok(f.sent.length > 0); assert.ok(f.sent.every(request => request.targetPublicKey === TARGET));
+});
 test('component profile overrides are target-scoped and never inferred from a guest proof', async () => {
   const f = rig({ all: true }); f.config.targetProfiles = [{ targetPublicKey: TARGET,
     statusProfile: { layout: 'common48', evidence: 'established' }, emitterProfile: 'positive-channels' }];

@@ -54,6 +54,8 @@ export class RemoteRequestCoordinator {
   #retired = new Map();
   #stopped = false;
   #recoveryFailed = false;
+  #recoveryGeneration = null;
+  #recoveryClearable = false;
   #airtime;
   #hasForegroundWork;
   #budget;
@@ -193,7 +195,7 @@ export class RemoteRequestCoordinator {
     isEligible ??= () => true;
     const expectedRoute = anonymous ? 'direct' : options.expectedRoute;
     if (this.#stopped) return this.#defer('stopped');
-    if (this.#recoveryFailed) return this.#defer('recovery-failed');
+    if (this.#recoveryFailed && !this.#clearRecovery()) return this.#defer('recovery-failed');
     // Keep one bounded tombstone until a cancelled shared-queue callback
     // drains. Repeated expiry must not accumulate callbacks behind a hang.
     if (this.#current || this.#commandPending) return this.#defer('busy');
@@ -261,6 +263,37 @@ export class RemoteRequestCoordinator {
   }
 
   #defer(reason) { return Promise.resolve({ status: 'deferred', reason }); }
+
+  /** Operator-visible state; callers must not infer more than this boolean. */
+  getStatus() { return Object.freeze({ recoveryFailed: this.#recoveryFailed }); }
+
+  // Unconfirmed reset ownership blocks every remote request. Say so once, with
+  // the required action, instead of deferring silently forever.
+  #latchRecovery(recovery, generation) {
+    if (this.#recoveryFailed) return;
+    this.#recoveryFailed = true;
+    this.#recoveryGeneration = generation;
+    // An unconfirmed transport close makes RadioManager fail closed as well;
+    // no later connection can prove the old one is gone, so require a restart.
+    this.#recoveryClearable = recovery === 'failed';
+    this.#logger.warn('services.remoteRequests', this.#recoveryClearable
+      ? 'Remote request recovery could not confirm the radio connection was reset. Region discovery and telemetry polling are paused until the radio reconnects.'
+      : 'Remote request recovery could not confirm the radio transport closed. Region discovery and telemetry polling are disabled until Observer is restarted.',
+    { outcome: 'recovery-failed', recovery, generation });
+  }
+
+  // A later connection generation is a new command channel: the uncertain
+  // acknowledgement ownership belonged to the retired one.
+  #clearRecovery() {
+    if (!this.#recoveryClearable) return false;
+    const snapshot = this.#radio.getConnectionSnapshot();
+    if (snapshot.generation === null || snapshot.generation === this.#recoveryGeneration) return false;
+    this.#recoveryFailed = false; this.#recoveryGeneration = null; this.#recoveryClearable = false;
+    this.#logger.info('services.remoteRequests',
+      'Remote request recovery cleared after the radio reconnected. Region discovery and telemetry polling may resume.',
+      { outcome: 'recovery-cleared', generation: snapshot.generation });
+    return true;
+  }
 
   #admissionReason() {
     try { if (this.#hasForegroundWork() !== false) return 'foreground'; }
@@ -728,10 +761,10 @@ export class RemoteRequestCoordinator {
       reason: invalidationReason })).then((result) => {
       const known = recoveryStatuses.has(result?.status);
       const recovery = known ? result.status : 'failed';
-      this.#recoveryFailed = recovery !== 'reset' && recovery !== 'stale-generation';
+      if (recovery !== 'reset' && recovery !== 'stale-generation') this.#latchRecovery(recovery, current.context.generation);
       this.#finish(current, 'failed', reason, { recovery }, known);
     }, () => {
-      this.#recoveryFailed = true;
+      this.#latchRecovery('failed', current.context.generation);
       // Without evidence of generation retirement, only RadioManager's
       // eventual abort may release the uncertain command transaction.
       this.#finish(current, 'failed', reason, { recovery: 'failed' }, false);

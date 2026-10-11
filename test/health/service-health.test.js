@@ -306,3 +306,13 @@ test('reports the injected replyQueue\'s live size, not a snapshot taken once', 
   stats = { size: 0 };
   assert.deepEqual(health.snapshot().replyQueue, stats);
 });
+
+test('reports remote request recovery state, defaulting to healthy', () => {
+  const base = { radioManager: fakeRadioManager(), mqttManager: fakeMqttManager(), packetPipeline: fakePacketPipeline(), bots: [] };
+  assert.deepEqual(new ServiceHealth(base).snapshot().remoteRequests, { recoveryFailed: false });
+  let failed = true;
+  const health = new ServiceHealth({ ...base, remoteRequests: { getStatus: () => ({ recoveryFailed: failed }) } });
+  assert.deepEqual(health.snapshot().remoteRequests, { recoveryFailed: true });
+  failed = false;
+  assert.deepEqual(health.snapshot().remoteRequests, { recoveryFailed: false });
+});

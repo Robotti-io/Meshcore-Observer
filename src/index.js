@@ -291,7 +291,8 @@ async function main() {
     mqttManager,
     packetPipeline,
     bots,
-    replyQueue
+    replyQueue,
+    remoteRequests: remoteRequestCoordinator
   });
   const runtimeEvents = new RuntimeEvents({ store: metricsStore, runId: runHistory.runId, logger,
     maxPerMinute: config.metricsUi.runtimeEventMaxPerMinute });

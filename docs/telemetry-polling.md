@@ -78,6 +78,15 @@ at every object boundary.
   evidence. Omission keeps common48/unknown status and unknown sensor decoding.
   Login firmware level or repeater name does not establish these profiles.
 
+- `excludedTargets` is an optional list (at most 256 unique, complete uppercase
+  64-hex-character public keys) of repeaters that are never sent a login or data
+  request. Use it for repeaters whose operator changed the guest password, so
+  the Observer stops spending airtime on logins that cannot succeed. Without an
+  exclusion, a denied login is retried once per authentication cooldown (24 hours
+  by default). A key may
+  not be both excluded and assigned in `targets` or a group: startup fails
+  rather than guessing which wins. Edits require a restart, like all policy.
+
 Assignments choose credentials/profile interpretation only. They never make a
 target eligible, prove a route or authorize a management command. Independent
 evidence, contact and shared-owner gates must all pass. Guest firmware may expose only battery

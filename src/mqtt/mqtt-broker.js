@@ -2,6 +2,10 @@ import mqtt from 'mqtt';
 
 const RECONNECT_PERIOD_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
+// The client is shared with packet capture, so a single slow acknowledgement
+// must not drop it. Only a run of consecutive timeouts is treated as a stuck
+// connection worth retiring.
+const REGION_ACK_TIMEOUTS_BEFORE_RETIRE = 3;
 
 function protocolFor(transport, tls) {
   if (transport === 'wss') {
@@ -35,6 +39,7 @@ export class MqttBroker {
   #recoveryTimer = null;
   #lastWill = null;
   #boundedReject = null;
+  #ackTimeouts = 0;
 
   /**
    * @param {{config: object, logger: object, createClient?: typeof mqtt.connect, getUsername?: () => (string|Promise<string>), getPassword?: () => (string|Promise<string>), onConnect?: () => void}} options
@@ -86,6 +91,7 @@ export class MqttBroker {
 
     this.#stopping = false;
     const generation=++this.#generation;
+    this.#ackTimeouts=0;
     this.#lastWill=will;
     this.#state = 'connecting';
     this.#logger.info('services.mqtt', 'connecting to broker', { broker: this.#config.id });
@@ -138,8 +144,12 @@ export class MqttBroker {
   }
 
   /** QoS acknowledgement deadline for the durable region worker only.
-   * Retire the timed-out client before a durable retry can be admitted;
-   * otherwise MQTT.js could retain an unbounded collection of old attempts. */
+   * One timeout fails just that publish and keeps the shared connection.
+   * After REGION_ACK_TIMEOUTS_BEFORE_RETIRE consecutive timeouts, retire the
+   * client before a durable retry can be admitted; otherwise MQTT.js could
+   * retain an unbounded collection of old attempts. Below the threshold at
+   * most that many unacknowledged attempts stay in the client's queue, so a
+   * late acknowledgement can cause an at-least-once duplicate delivery. */
   publishBounded(topic,payload,{ qos,retain,timeoutMs }) {
     if(!this.isConnected() || this.#boundedReject) return Promise.reject(new Error('Region broker unavailable'));
     const client=this.#client;
@@ -148,10 +158,11 @@ export class MqttBroker {
       const settle=error=>{
         if(finished) return;
         finished=true;clearTimeout(timer);this.#boundedReject=null;
-        if(error) reject(error);else resolve();
+        if(error) reject(error);else { this.#ackTimeouts=0;resolve(); }
       };
       const timer=setTimeout(()=>{
-        if(this.#client===client) {
+        if(this.#client===client && ++this.#ackTimeouts>=REGION_ACK_TIMEOUTS_BEFORE_RETIRE) {
+          this.#ackTimeouts=0;
           this.#generation += 1;this.#client=null;this.#state='retrying';
           // Forced end discards this client's outgoing QoS queue. Late
           // callbacks/events belong to the retired client, never a new one.
@@ -161,8 +172,10 @@ export class MqttBroker {
             if(!this.#stopping) this.connect(this.#lastWill);
           },RECONNECT_PERIOD_MS);
           this.#recoveryTimer.unref();
+          settle(new Error('Region broker acknowledgement timed out; connection retired for recovery'));
+          return;
         }
-        settle(new Error('Region broker acknowledgement timed out; connection retired for recovery'));
+        settle(new Error('Region broker acknowledgement timed out'));
       },timeoutMs);
       timer.unref();this.#boundedReject=settle;
       try { client.publish(topic,payload,{ qos,retain },error=>settle(error)); }

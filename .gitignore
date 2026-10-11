@@ -11,3 +11,5 @@ artifacts/
 .claude/
 data/
 docs/working_docs
+
+.DS_Store

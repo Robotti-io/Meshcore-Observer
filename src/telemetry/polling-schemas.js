@@ -71,6 +71,9 @@ export const telemetryPollPolicySchema = object({ version: { const: 1 }, default
   targets: { type: 'array', maxItems: TELEMETRY_POLL_MAX_TARGETS, items: object({ targetPublicKey: publicKey,
     credentialRef: reference, statusProfile: verifiedStatusProfile, emitterProfile: { const: 'positive-channels' }
   }, ['targetPublicKey']) },
+  // Operator-maintained exclusions, e.g. repeaters whose guest password changed.
+  // An excluded repeater is never sent a login or data request.
+  excludedTargets: { type: 'array', maxItems: TELEMETRY_POLL_MAX_TARGETS, uniqueItems: true, items: publicKey },
   groups: { type: 'array', maxItems: TELEMETRY_POLL_MAX_GROUPS, items: object({ id: reference,
     credentialRef: reference, targetPublicKeys: { type: 'array', minItems: 1,
       maxItems: TELEMETRY_POLL_MAX_TARGETS, uniqueItems: true, items: publicKey }
@@ -86,11 +89,16 @@ export const telemetryPollSecretsSchema = object({ version: { const: 1 }, secret
   } }, additionalProperties: false
 } });
 
-export const telemetryPollConfigSchema = object({ ...settingsProperties,
+const pollConfigProperties = { ...settingsProperties,
   components, neighbourParams: object(neighbourProperties), statusProfile,
   emitterProfile: { const: 'unknown' }, permissionMask: { const: 0 },
   targetProfiles: { type: 'array', maxItems: TELEMETRY_POLL_MAX_TARGETS, items: object({
     targetPublicKey: publicKey, statusProfile, emitterProfile: { enum: ['unknown', 'positive-channels'] }
-  }) }
-});
+  }) },
+  excludedTargets: { type: 'array', maxItems: TELEMETRY_POLL_MAX_TARGETS, uniqueItems: true, items: publicKey }
+};
+// Optional so configurations built before exclusions existed remain valid;
+// the startup loader always supplies the list.
+export const telemetryPollConfigSchema = object(pollConfigProperties,
+  Object.keys(pollConfigProperties).filter(key => key !== 'excludedTargets'));
 export const telemetryPollTargetSchema = object({ targetPublicKey: publicKey });

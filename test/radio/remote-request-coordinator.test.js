@@ -316,6 +316,46 @@ test('anonymous read closure failure is bounded and blocks all subsequent reques
   assert.equal((await f.coordinator.tryRequest(request())).reason, 'recovery-failed'); clean(f);
 });
 
+const recoveryWarnings = f => f.logger.warn.mock.calls.filter(call => call[2]?.outcome === 'recovery-failed');
+const nextGeneration = f => {
+  const real = f.radio.getConnectionSnapshot.bind(f.radio);
+  return vi.spyOn(f.radio, 'getConnectionSnapshot').mockImplementation(() => ({ ...real(), generation: real().generation + 1 }));
+};
+
+test('unconfirmed reset recovery warns once, shows in status and clears when the radio reconnects', async () => {
+  const f = await setup();
+  assert.deepEqual(f.coordinator.getStatus(), { recoveryFailed: false });
+  const invalidate = vi.spyOn(f.radio, 'invalidateConnection').mockRejectedValue(Error('SECRET'));
+  const result = f.coordinator.tryRequest(request()); await flush(); await tick(1000); await result;
+  assert.deepEqual(f.coordinator.getStatus(), { recoveryFailed: true });
+  for (let i = 0; i < 3; i++) assert.equal((await f.coordinator.tryRequest(request())).reason, 'recovery-failed');
+  assert.equal(recoveryWarnings(f).length, 1);
+  assert.match(recoveryWarnings(f)[0][1], /paused until the radio reconnects/);
+  assert.equal(JSON.stringify(f.logger.warn.mock.calls).includes('SECRET'), false);
+  // The same generation never clears it: only a new command channel can.
+  assert.equal((await f.coordinator.tryRequest(request())).reason, 'recovery-failed');
+  // The mocked reset never aborts the old command, so it is still held ('busy');
+  // a real reconnect aborts it. Passing the recovery check is what matters here.
+  nextGeneration(f);
+  assert.equal((await f.coordinator.tryRequest(request())).reason, 'busy');
+  assert.deepEqual(f.coordinator.getStatus(), { recoveryFailed: false });
+  assert.equal(f.logger.info.mock.calls.filter(call => call[2]?.outcome === 'recovery-cleared').length, 1);
+  invalidate.mockRestore();
+  const waiting = f.radio.runCommand(() => {}).catch(e => e.code); await flush(); await f.radio.stop(); await waiting;
+});
+
+test('an unconfirmed transport close requires restart and is never cleared by a later generation', async () => {
+  const f = await setup({ sdk: true, preflightTimeoutMs: 1000 });
+  f.connections[0].close.mockImplementation(() => new Promise(() => {}));
+  const result = regionRequest(f); await flush(); await tick(1000); await tick(100);
+  assert.equal((await result).recovery, 'close-timeout');
+  assert.equal(f.coordinator.getStatus().recoveryFailed, true);
+  assert.equal(recoveryWarnings(f).length, 1); assert.match(recoveryWarnings(f)[0][1], /restarted/);
+  nextGeneration(f);
+  assert.equal((await regionRequest(f)).reason, 'recovery-failed');
+  assert.equal(f.coordinator.getStatus().recoveryFailed, true); clean(f);
+});
+
 test('anonymous requests without a trusted reservation hook have no eligibility, byte generation or connection effects', async () => {
   const f = await setup(); const predicate = vi.fn();
   const bytes = vi.fn(); const c = new RemoteRequestCoordinator({ ...ownershipControls, radio: f.radio, ...limits, uniquenessBytes: bytes });

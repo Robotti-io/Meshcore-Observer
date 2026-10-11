@@ -56,7 +56,8 @@ test('disabled defaults are inert, secret-free and independent of existing telem
   const config = loadConfig(base());
   assert.deepEqual(config.telemetryPolling, { ...TELEMETRY_POLL_DEFAULTS,
     components: TELEMETRY_POLL_COMPONENT_DEFAULTS, neighbourParams: TELEMETRY_POLL_NEIGHBOUR_DEFAULTS,
-    statusProfile: TELEMETRY_POLL_STATUS_DEFAULT, emitterProfile: 'unknown', permissionMask: 0, targetProfiles: [] });
+    statusProfile: TELEMETRY_POLL_STATUS_DEFAULT, emitterProfile: 'unknown', permissionMask: 0, targetProfiles: [],
+    excludedTargets: [] });
   assert.deepEqual(config.telemetry, { freshnessWindowMs: 72 * 3600000 });
   assert.equal(config.metricsUi.retentionDays, 0);
   assert.equal(config.telemetryPolling.enabled, false);
@@ -238,6 +239,21 @@ test('guest password byte limits reject controls, invalid Unicode, blank, oversi
     const config = enabled(files(policy(), s));
     assert.equal(await samplePassword(config, D), password);
   }
+});
+
+test('excluded targets are strict, bounded, unique, frozen and never also assigned', () => {
+  const p = { version: 1, defaultCredentialRef: 'defaultPrivateRef', excludedTargets: [C, D] };
+  const config = enabled(files(p));
+  assert.deepEqual(config.excludedTargets, [C, D]);
+  assert.throws(() => { config.excludedTargets.push(A); }, TypeError);
+  assert.deepEqual(enabled(files({ version: 1, defaultCredentialRef: 'defaultPrivateRef' })).excludedTargets, []);
+  for (const excludedTargets of [[C, C], ['c'.repeat(64)], ['C'.repeat(63)], [7], 'C'.repeat(64),
+    Array.from({ length: 257 }, (_, index) => index.toString(16).toUpperCase().padStart(64, '0'))]) {
+    safeError(() => enabled(files({ ...p, excludedTargets })));
+  }
+  // An exclusion contradicting a group or target assignment is rejected, not silently resolved.
+  safeError(() => enabled(files({ ...policy(), excludedTargets: [A] })));
+  safeError(() => enabled(files({ ...policy(), excludedTargets: [C] })));
 });
 
 test('component/page/profile choices are strict and unknown interpretations remain conservative', () => {

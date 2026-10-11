@@ -183,7 +183,7 @@ for (const phase of ['before-reservation', 'after-reservation', 'after-send', 'b
 for (const ending of ['clean', 'abrupt', 'backup']) test(`real ${ending} restart preserves collected data/deadlines/public replay evidence without restoring session authority`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f); await due(child);
   await child.ask({ action: 'tick', ms: 10000 }); const before = await child.ask({ action: 'tick', ms: 10000 });
-  if (ending === 'abrupt') { child.process.kill(); await child.exited; } else await child.stop();
+  if (ending === 'abrupt') { child.process.kill('SIGKILL'); await child.exited; } else await child.stop();
   if (ending === 'backup') { const path = f.env.PACKETCAPTURE_METRICS_UI_DB_PATH, backup = join(f.dir, 'backup.sqlite3');
     assert.equal(existsSync(path + '-wal'), false); copyFileSync(path, backup); f.env.PACKETCAPTURE_METRICS_UI_DB_PATH = backup; }
   const next = await launch(f, { suffix: 'restart', startAt: START + 30000 });
