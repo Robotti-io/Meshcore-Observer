@@ -87,7 +87,7 @@ const completionContext = object({ requestId: uuid, targetPublicKey: key,
   generation: { ...epoch, minimum: 1 }, observerPublicKey: key });
 const deferredReason = { enum: [...REGION_PREFLIGHT_DEFERRALS, 'reservation-unavailable',
   'recovery-failed', 'busy', 'stopped', 'disconnected', 'not-ready', 'preflight-paused',
-  'foreground', 'rate-limited', 'quiet-air', 'ineligible', 'queue-timeout'] };
+  'foreground', 'rate-limited', 'quiet-air', 'ineligible', 'queue-timeout', 'background-turn'] };
 const failureFields = {
   status: { const: 'failed' }, reason: { enum: [...REGION_FAILURE_REASONS, 'preflight-timeout'] },
   context: completionContext,

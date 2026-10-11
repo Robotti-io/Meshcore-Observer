@@ -8,6 +8,23 @@ import { remoteCoordinatorLimitsSchema, remoteDispatchOptionsSchema, remoteBinar
 import { RemoteRequestBudget } from './remote-request-budget.js';
 import { REGION_QUERY_DEFAULTS, regionQueryTargetSchema } from '../regions/region-query-schemas.js';
 import { parseRegionContactFrame, prepareRegionContactRead } from '../regions/region-radio-adapter.js';
+import { createBackgroundAdmissions } from './background-admissions.js';
+import { compileSchema as compile } from '../validation/ajv.js';
+import { telemetryPollConfigSchema } from '../telemetry/polling-schemas.js';
+import { withTelemetryGuestPassword } from '../telemetry/polling-config.js';
+import { createTelemetryGuestSessions } from '../telemetry/telemetry-guest-sessions.js';
+import { createTelemetryContactInventory } from '../telemetry/telemetry-contact-inventory.js';
+import { prepareTelemetryContactInventory, prepareTelemetryContactRead, parseTelemetryContactFrame,
+  parseTelemetryGuestLogin, parseTelemetryLoginAck, withPreparedTelemetryGuestLogin } from '../telemetry/telemetry-radio-adapter.js';
+import * as ownerSchemas from '../telemetry/telemetry-owner-schemas.js';
+
+const ownerValidators = new Map(Object.entries(ownerSchemas).filter(([name]) => name.endsWith('Schema'))
+  .map(([, schema]) => [schema, compile(schema)]));
+const pollingValid = compile(telemetryPollConfigSchema);
+function ownerValid(schema, value) { return ownerValidators.get(schema)(value); }
+function assertOwner(schema, value) {
+  if (!ownerValid(schema, value)) throw new Error('Invalid telemetry owner data');
+}
 
 const limitsValid = compileSchema(remoteCoordinatorLimitsSchema);
 const optionsValid = compileSchema(remoteDispatchOptionsSchema);
@@ -44,6 +61,10 @@ export class RemoteRequestCoordinator {
   #preflightTimeoutMs;
   #wallNow;
   #pausedGeneration = null;
+  #background;
+  #guestSessions;
+  #guestScope = null;
+  #sessionOnChange = null;
 
   constructor({ radio, airtimeCoordinator, hasForegroundWork, logger,
     ackTimeoutMs = REMOTE_REQUEST_DEFAULTS.ackTimeoutMs,
@@ -71,6 +92,85 @@ export class RemoteRequestCoordinator {
     // The injectable policy isolates ownership tests. Runtime always creates
     // the validated bounded budget here; producer DTOs cannot replace it.
     this.#budget = budget ?? new RemoteRequestBudget({ minIntervalMs, maxPerMinute, now: () => this.#time() });
+    this.#background = createBackgroundAdmissions({ now: () => this.#time(),
+      lifetimeMs: Math.max(minIntervalMs * 2, ackTimeoutMs + responseTimeoutMaxMs) });
+    this.#guestSessions = createTelemetryGuestSessions({ now: this.#now,
+      quarantineMs: ackTimeoutMs + responseTimeoutMaxMs + 60000 });
+  }
+
+  /** Internal producer demand, coalesced into two expiring slots. */
+  noteBackgroundDemand(input) { this.#background.note(input); }
+
+  async tryGuestLogin(request, config, hooks) {
+    assertOwner(ownerSchemas.telemetryGuestRequestSchema, request);
+    const descriptor = Object.freeze({ ...request, operation: 'guest-login', params: Object.freeze({}) });
+    this.#assertTelemetry(config, hooks, true);
+    hooks = { ...hooks };
+    try { await withTelemetryGuestPassword(config, { targetPublicKey: descriptor.targetPublicKey }, () => true); }
+    catch { return { status: 'deferred', reason: 'credential-unavailable' }; }
+    return this.#ownedTelemetry(descriptor, config, hooks, true);
+  }
+
+  tryTelemetryRequest(request, config, hooks) {
+    assertOwner(ownerSchemas.telemetryOwnedRequestSchema, request);
+    this.#assertTelemetry(config, hooks, false);
+    const component = request.operation === 'telemetry' ? 'sensors' : request.operation;
+    if (!config.components[component] || (component === 'neighbours'
+      && Object.keys(config.neighbourParams).some(key => request.params[key] !== config.neighbourParams[key]))) {
+      return this.#defer('ineligible');
+    }
+    return this.#ownedTelemetry(request, config, hooks, false);
+  }
+
+  #assertTelemetry(config, hooks, login) {
+    if (!pollingValid(config) || !config.enabled || typeof hooks?.isEligible !== 'function'
+      || typeof hooks?.reserve !== 'function' || (login && (typeof hooks.getReplayHighWater !== 'function'
+      || typeof hooks.recordAuthentication !== 'function'))) throw new Error('Telemetry owner requires enabled validated policy and synchronous trusted gates');
+  }
+
+  #telemetryScope(snapshot) {
+    if (!ownerValid(ownerSchemas.telemetryOwnerSnapshotSchema, snapshot)) { this.#clearGuestSessions(); return false; }
+    const scope = snapshot.ready && snapshot.generation !== null && snapshot.observerPublicKey
+      ? `${snapshot.generation}:${snapshot.observerPublicKey.toUpperCase()}` : null;
+    if (this.#guestScope && scope !== this.#guestScope) this.#clearGuestSessions();
+    return this.#guestSessions.observe(snapshot);
+  }
+
+  #clearGuestSessions() {
+    this.#guestSessions.clear(); this.#guestScope = null;
+    if (this.#sessionOnChange) {
+      this.#radio.off('radio.connected', this.#sessionOnChange);
+      this.#radio.off('radio.disconnected', this.#sessionOnChange);
+      this.#sessionOnChange = null;
+    }
+  }
+
+  #watchGuestSessions(context) {
+    this.#guestScope = `${context.generation}:${context.observerPublicKey}`;
+    if (this.#sessionOnChange) return;
+    this.#sessionOnChange = () => {
+      const snapshot = this.#radio.getConnectionSnapshot();
+      if (!ownerValid(ownerSchemas.telemetryOwnerSnapshotSchema, snapshot)) { this.#clearGuestSessions(); return; }
+      const scope = snapshot.ready && snapshot.generation !== null && snapshot.observerPublicKey
+        ? `${snapshot.generation}:${snapshot.observerPublicKey.toUpperCase()}` : null;
+      if (scope !== this.#guestScope) this.#clearGuestSessions();
+    };
+    this.#radio.on('radio.connected', this.#sessionOnChange);
+    this.#radio.on('radio.disconnected', this.#sessionOnChange);
+  }
+
+  #ownedTelemetry(request, config, hooks, login) {
+    if (request.targetPublicKey.startsWith('00000000')) return this.#defer('unsafe-prefix');
+    const snapshot = this.#radio.getConnectionSnapshot();
+    if (!this.#telemetryScope(snapshot)) return this.#defer('not-ready');
+    const reason = login ? this.#guestSessions.loginReason(request.targetPublicKey)
+      : this.#guestSessions.has(request.targetPublicKey, config) ? null : 'guest-session-unavailable';
+    if (reason) return this.#defer(reason);
+    return this.#request(request, { expectedRoute: 'direct' }, hooks.isEligible, hooks.reserve,
+      { config, hooks: { ...hooks }, login }).then(result => {
+      assertOwner(ownerSchemas.telemetryOwnerCompletionSchema, result);
+      return result;
+    });
   }
 
   /** Trusted eligibility is executable policy, separate from the DTO.
@@ -79,9 +179,15 @@ export class RemoteRequestCoordinator {
    */
   tryRequest(request, options = {}, isEligible, reserve) {
     assertRemoteRequest(request);
+    return this.#request(request, options, isEligible, reserve);
+  }
+
+  #request(request, options = {}, isEligible, reserve, telemetry = null) {
     if (!optionsValid(options)) throw new Error(`Invalid remote dispatch options: ${formatErrors(optionsValid.errors)}`);
     const descriptor = Object.freeze({ ...request, params: Object.freeze({ ...request.params }) });
     const anonymous = descriptor.operation === 'anonymous-regions';
+    const source = anonymous ? 'regions' : telemetry ? 'telemetry' : null;
+    if (source && !this.#stopped) this.#background.note({ source });
     if (anonymous && options.expectedRoute === 'flood') throw new Error('Anonymous regions require a direct route');
     if (anonymous && (typeof isEligible !== 'function' || typeof reserve !== 'function')) return this.#defer('reservation-unavailable');
     isEligible ??= () => true;
@@ -94,13 +200,17 @@ export class RemoteRequestCoordinator {
     const snapshot = this.#radio.getConnectionSnapshot();
     if (snapshot.generation === null) return this.#defer('disconnected');
     if (!snapshot.ready) return this.#defer('not-ready');
-    if (anonymous && this.#pausedGeneration === snapshot.generation) return this.#defer('preflight-paused');
+    if ((anonymous || telemetry) && this.#pausedGeneration === snapshot.generation) return this.#defer('preflight-paused');
     if (anonymous && !targetValid({ targetPublicKey: snapshot.observerPublicKey?.toUpperCase() })) return this.#defer('not-ready');
     const admission = this.#admissionReason();
     if (admission) return this.#defer(admission);
     if (!this.#airtime.canRunWhenQuiet()) return this.#defer('quiet-air');
-    try { if (!synchronousPermission(isEligible, descriptor, snapshot)) return this.#defer('ineligible'); }
+    try { if (!synchronousPermission(isEligible, descriptor, snapshot)) {
+      if (source) this.#background.withdraw(source);
+      return this.#defer('ineligible');
+    } }
     catch {
+      if (source) this.#background.withdraw(source);
       this.#logger.warn('services.remoteRequests', 'remote request eligibility check failed', {
         requestId: descriptor.requestId, operation: descriptor.operation, phase: 'admission', outcome: 'eligibility-error'
       });
@@ -109,21 +219,21 @@ export class RemoteRequestCoordinator {
     if (this.#stopped) return this.#defer('stopped');
     if (this.#current || this.#commandPending) return this.#defer('busy');
     if (!this.#isGeneration(snapshot.generation)) return this.#defer('disconnected');
-    const prepared = prepareRemoteRequest(descriptor, anonymous ? undefined : this.#uniquenessBytes());
+    const prepared = telemetry?.login ? null : prepareRemoteRequest(descriptor, anonymous ? undefined : this.#uniquenessBytes());
     let resolveCompletion;
     let releaseCommand;
     const completion = new Promise((resolve) => { resolveCompletion = resolve; });
     const acknowledgement = new Promise((resolve) => { releaseCommand = resolve; });
     const context = Object.freeze({ requestId: descriptor.requestId, targetPublicKey: descriptor.targetPublicKey,
       operation: descriptor.operation, params: descriptor.params,
-      generation: snapshot.generation, observerPublicKey: anonymous ? snapshot.observerPublicKey.toUpperCase() : snapshot.observerPublicKey });
-    const current = { descriptor, expectedRoute, isEligible, reserve, anonymous, prepared, context,
+      generation: snapshot.generation, observerPublicKey: anonymous || telemetry ? snapshot.observerPublicKey.toUpperCase() : snapshot.observerPublicKey });
+    const current = { descriptor, expectedRoute, isEligible, reserve, anonymous, telemetry, source, prepared, context,
       phase: 'queued', tag: null, route: null, timer: null, deadline: null, expire: null,
       connection: null, signal: null, onAbort: null, onFrame: null, resolveCompletion,
       releaseCommand, acknowledgement, completion, onChange: null };
     this.#current = current;
     current.onChange = () => {
-      if (current.phase !== 'recovery' && !this.#isGeneration(current.context.generation)) this.#finish(current, 'failed', 'disconnected');
+      if (current.phase !== 'recovery' && !this.#currentScope(current)) this.#finish(current, 'failed', 'disconnected');
     };
     this.#radio.on('radio.disconnected', current.onChange);
     this.#radio.on('radio.connected', current.onChange);
@@ -141,6 +251,7 @@ export class RemoteRequestCoordinator {
 
   stop() {
     this.#stopped = true;
+    this.#clearGuestSessions(); this.#background.clear();
     const current = this.#current;
     if (!current) return Promise.resolve();
     if (current.phase === 'preflight') this.#recover(current, 'stopped', 'preflight-cancelled');
@@ -167,6 +278,13 @@ export class RemoteRequestCoordinator {
     return snapshot.generation === generation && snapshot.ready;
   }
 
+  #currentScope(current) {
+    const snapshot = this.#radio.getConnectionSnapshot();
+    if (!current.telemetry) return this.#isGeneration(current.context.generation);
+    return this.#telemetryScope(snapshot) && snapshot.generation === current.context.generation
+      && snapshot.observerPublicKey.toUpperCase() === current.context.observerPublicKey;
+  }
+
   #arm(current, delay, expire) {
     clearTimeout(current.timer);
     current.deadline = this.#time() + delay;
@@ -188,13 +306,22 @@ export class RemoteRequestCoordinator {
 
   async #dispatch(current, connection, transaction) {
     if (this.#current !== current || current.phase !== 'queued' || this.#expired(current)) return;
-    if (transaction.generation !== current.context.generation || transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+    if (transaction.generation !== current.context.generation || transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
     const admission = this.#admissionReason();
     if (admission) { this.#finish(current, 'deferred', admission); return; }
-    if (current.anonymous) {
+    if (current.source && !this.#background.allowed(current.source)) {
+      this.#finish(current, 'deferred', 'background-turn'); return;
+    }
+    if (current.telemetry) {
+      this.#listen(current, connection, transaction);
+      if (!await this.#telemetryPreflight(current, connection)) return this.#awaitCommand(current, transaction);
+      if (this.#current !== current) return;
+      current.phase = 'ready';
+      this.#arm(current, this.#limits.ackTimeoutMs, () => this.#finish(current, 'deferred', 'queue-timeout'));
+    } else if (current.anonymous) {
       this.#listen(current, connection, transaction);
       let resolvePreflight;
       const preflight = new Promise(resolve => { resolvePreflight = resolve; });
@@ -222,10 +349,20 @@ export class RemoteRequestCoordinator {
   }
 
   #send(current, connection, transaction) {
+    if (current.telemetry?.login) {
+      return withPreparedTelemetryGuestLogin(current.telemetry.config, { targetPublicKey: current.context.targetPublicKey },
+        frame => this.#sendPrepared(current, connection, transaction, frame)).catch(() => {
+        if (this.#current === current) this.#finish(current, 'failed', 'credential-unavailable');
+      });
+    }
+    return this.#sendPrepared(current, connection, transaction);
+  }
+
+  #sendPrepared(current, connection, transaction, privateFrame) {
     // Airtime's callback is deferred by a microtask. Check again at the
     // physical-send boundary so new priority work or stop cannot slip past.
     if (this.#current !== current || !['queued', 'ready'].includes(current.phase) || this.#expired(current)) return;
-    if (transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+    if (transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected'); return;
     }
     const admission = this.#admissionReason();
@@ -236,36 +373,62 @@ export class RemoteRequestCoordinator {
         return;
       }
     } catch { this.#finish(current, 'failed', 'eligibility-error'); return; }
-    if (this.#current !== current || transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+    if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
     // Eligibility is trusted executable policy; recheck priority after it.
     const finalAdmission = this.#admissionReason();
     if (finalAdmission) { this.#finish(current, 'deferred', finalAdmission); return; }
-    if (this.#current !== current || transaction.signal.aborted || !this.#isGeneration(current.context.generation)) {
+    if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected'); return;
     }
     if (this.#expired(current)) return;
-    if (current.anonymous) {
+    if (current.telemetry) {
+      if (current.telemetry.login) {
+        const proof = current.inventory.snapshot({ monotonicNow: this.#now() });
+        if (proof.status !== 'complete') { this.#finish(current, 'deferred', proof.reason); return; }
+      } else if (!this.#guestSessions.has(current.context.targetPublicKey, current.telemetry.config)) {
+        this.#finish(current, 'deferred', 'guest-session-unavailable'); return;
+      }
+    }
+    if (current.source && !this.#background.allowed(current.source)) { this.#finish(current, 'deferred', 'background-turn'); return; }
+    if (current.anonymous || current.telemetry) {
       try {
         // Only literal synchronous permission allows RF. Promises and failed
         // storage reservations cannot accidentally grant permission.
         if (!synchronousPermission(current.reserve, current.context)) { this.#finish(current, 'deferred', 'reservation-unavailable'); return; }
       } catch { this.#finish(current, 'failed', 'eligibility-error'); return; }
-      if (this.#current !== current || transaction.signal.aborted || !this.#isGeneration(current.context.generation)) return;
+      if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) return;
       const afterReservation = this.#admissionReason();
       if (afterReservation) { this.#finish(current, 'deferred', afterReservation); return; }
       if (this.#expired(current)) return;
+      if (current.telemetry) {
+        try {
+          if (!synchronousPermission(current.isEligible, current.descriptor, this.#radio.getConnectionSnapshot())) {
+            this.#finish(current, 'deferred', 'ineligible'); return;
+          }
+        } catch { this.#finish(current, 'failed', 'eligibility-error'); return; }
+        if (this.#current !== current || !this.#currentScope(current)) return;
+      }
+    }
+    if (current.telemetry) {
+      try {
+        const clock = { wall: this.#wallNow(), monotonic: this.#now() };
+        assertOwner(ownerSchemas.telemetryOwnerClockSchema, clock);
+        current.dispatchClock = clock.wall;
+      } catch { this.#finish(current, 'failed', 'clock-anomaly'); return; }
     }
     if (!this.#budget.recordAttempt()) { this.#finish(current, 'deferred', 'rate-limited'); return; }
+    if (current.source) this.#background.sent(current.source);
     current.phase = 'ack';
     if (!current.onFrame) this.#listen(current, connection, transaction);
     this.#arm(current, this.#limits.ackTimeoutMs, () => this.#recover(current, 'ack-timeout', 'ack-timeout'));
     try {
-      const command = current.prepared.command;
-      if (current.anonymous) current.dispatchedAt = this.#wallNow();
-      const write = current.anonymous ? connection.sendToRadioFrame(command.frameBytes)
+      const command = current.prepared?.command;
+      if (current.anonymous || current.telemetry) current.dispatchedAt = current.telemetry ? current.dispatchClock : this.#wallNow();
+      const write = privateFrame ? connection.sendToRadioFrame(privateFrame)
+        : current.anonymous ? connection.sendToRadioFrame(command.frameBytes)
         : connection.sendCommandSendBinaryReq(Array.from(Buffer.from(command.targetPublicKey, 'hex')), command.requestBytes);
       Promise.resolve(write).catch(() => {
         if (this.#current === current && current.phase === 'ack') this.#recover(current, 'write-error', 'write-error');
@@ -299,16 +462,124 @@ export class RemoteRequestCoordinator {
       transaction.signal.removeEventListener('abort', onTerminated));
   }
 
+  async #telemetryPreflight(current, connection) {
+    current.phase = 'preflight';
+    current.preflightStarted = this.#now();
+    const timeout = current.telemetry.config.preflightTimeoutMs;
+    this.#arm(current, timeout, () => this.#recover(current, 'preflight-timeout', 'preflight-timeout'));
+    if (current.telemetry.login) {
+      current.inventory = createTelemetryContactInventory({ targetPublicKey: current.context.targetPublicKey,
+        radius: current.telemetry.config.radius, startedAt: current.preflightStarted, timeoutMs: timeout });
+      current.preflightKind = 'inventory';
+      if (!await this.#readTelemetryContact(current, connection, prepareTelemetryContactInventory())) return false;
+      if (this.#current !== current) return false;
+    }
+    current.phase = 'preflight'; current.preflightKind = 'target';
+    return this.#readTelemetryContact(current, connection,
+      prepareTelemetryContactRead({ targetPublicKey: current.context.targetPublicKey }));
+  }
+
+  #readTelemetryContact(current, connection, frame) {
+    const token = Symbol('contact-read'); current.readToken = token;
+    const completion = new Promise(resolve => { current.resolvePreflight = resolve; });
+    try {
+      Promise.resolve(connection.sendToRadioFrame(frame)).catch(() => {
+        if (this.#current === current && current.phase === 'preflight' && current.readToken === token)
+          this.#recover(current, 'write-error', 'preflight-write-error');
+      });
+    } catch { this.#recover(current, 'write-error', 'preflight-write-error'); }
+    return completion;
+  }
+
+  #onTelemetryPreflight(current, bytes) {
+    const config = current.telemetry.config;
+    if (current.preflightKind === 'inventory') {
+      const parsed = current.inventory.accept({ bytes, monotonicNow: this.#now() });
+      if (parsed.status === 'pending') return;
+      if (parsed.status === 'complete') {
+        current.inventoryProof = parsed;
+        current.preflightKind = 'between';
+        current.readToken = null;
+        current.resolvePreflight(true); return;
+      }
+      // An incomplete local stream may still be arriving. Reset ownership
+      // before another command can reuse the same untagged response channel.
+      this.#recover(current, parsed.reason, 'preflight-protocol-error'); return;
+    }
+    if (current.preflightKind === 'between') {
+      const parsed = current.inventory.accept({ bytes, monotonicNow: this.#now() });
+      if (parsed.status !== 'complete') this.#recover(current, parsed.reason, 'preflight-protocol-error');
+      return;
+    }
+    const parsed = parseTelemetryContactFrame({ targetPublicKey: current.context.targetPublicKey, bytes, radius: config.radius });
+    if (parsed.status === 'ignored') return;
+    if (parsed.status === 'malformed') { this.#recover(current, 'protocol-error', 'preflight-protocol-error'); return; }
+    if (parsed.status === 'unavailable') {
+      if (parsed.reason === 'preflight-unsupported') this.#pausedGeneration = current.context.generation;
+      this.#finish(current, 'deferred', parsed.reason); return;
+    }
+    if (current.inventoryProof && JSON.stringify(parsed.contact.route) !== JSON.stringify(current.inventoryProof.contact.route)) {
+      this.#finish(current, 'deferred', 'contacts-changed'); return;
+    }
+    current.contact = parsed.contact;
+    current.readToken = null;
+    current.phase = 'ready';
+    current.resolvePreflight(true);
+  }
+
+  #onGuestFrame(current, bytes) {
+    const input = { targetPublicKey: current.context.targetPublicKey, bytes };
+    if (current.phase === 'ack') {
+      const ack = parseTelemetryLoginAck(input);
+      if (ack.status === 'ignored') return;
+      if (ack.status === 'malformed') { this.#recover(current, 'protocol-error', 'protocol-error'); return; }
+      if (ack.status !== 'sent-proof') {
+        // A Sent with the wrong target/route leaves login ownership uncertain.
+        if (ack.reason !== 'login-command-error') this.#recover(current, ack.reason, 'protocol-error');
+        else this.#finish(current, 'failed', 'command-error', { errorCode: ack.errorCode, errorReason: 'unknown' });
+        return;
+      }
+      current.tag = ack.tag; current.route = ack.route;
+      current.phase = 'response';
+      this.#arm(current, Math.min(this.#limits.responseTimeoutMaxMs, Math.max(1000, ack.estimatedTimeoutMs + 1000)),
+        () => this.#finish(current, 'failed', 'response-timeout'));
+      current.releaseCommand(); return;
+    }
+    const parsed = parseTelemetryGuestLogin(input);
+    if (parsed.status === 'ignored') return;
+    if (parsed.status !== 'guest-proof') { this.#finish(current, 'failed', parsed.reason); return; }
+    try {
+      const value = current.telemetry.hooks.getReplayHighWater(current.context);
+      if (value && typeof value.then === 'function') Promise.resolve(value).catch(() => {});
+      const state = { serverTimestamp: value };
+      assertOwner(ownerSchemas.telemetryReplayReadSchema, state);
+      if (state.serverTimestamp !== null && parsed.serverTimestamp <= state.serverTimestamp) {
+        this.#finish(current, 'failed', 'auth-replay'); return;
+      }
+    } catch { this.#finish(current, 'failed', 'auth-state-unavailable'); return; }
+    current.receivedAt = this.#wallNow();
+    this.#finish(current, 'completed', null, { proof: Object.freeze(parsed) });
+  }
+
   #onFrame(current, bytes) {
-    if (this.#current !== current || current.phase === 'recovery') return;
-    if (!this.#isGeneration(current.context.generation) || current.signal.aborted) {
+    if (this.#current !== current || current.phase === 'recovery' || current.finishing) return;
+    if (!this.#currentScope(current) || current.signal.aborted) {
       this.#finish(current, 'failed', 'disconnected');
+      return;
+    }
+    if (current.telemetry && frameValid({ bytes }) && (bytes[0] === 0x8A
+      || (bytes[0] === 3 && current.phase !== 'preflight'))) {
+      this.#clearGuestSessions();
+      if (current.phase === 'preflight') this.#recover(current, 'contacts-changed', 'preflight-protocol-error');
+      else if (current.phase === 'ack') this.#recover(current, 'contacts-changed', 'protocol-error');
+      else this.#finish(current, 'failed', 'contacts-changed');
       return;
     }
     if (current.phase === 'ready') return; // Contact complete; RF has not started.
     if (this.#expired(current)) return;
     const frame = { bytes };
     if (current.phase === 'preflight') {
+      if (current.telemetry) { this.#onTelemetryPreflight(current, bytes); return; }
       const contact = parseRegionContactFrame({ targetPublicKey: current.context.targetPublicKey, bytes });
       if (contact.status === 'ignored') return;
       if (contact.status === 'malformed') { this.#recover(current, 'protocol-error', 'preflight-protocol-error'); return; }
@@ -325,6 +596,7 @@ export class RemoteRequestCoordinator {
       current.resolvePreflight(true);
       return;
     }
+    if (current.telemetry?.login) { this.#onGuestFrame(current, bytes); return; }
     if (!frameValid(frame)) return;
     const parsed = parseRemoteResponseFrame(frame);
     if (parsed.status === 'ignored') return;
@@ -353,7 +625,7 @@ export class RemoteRequestCoordinator {
         current.releaseCommand();
       }
     } else if (envelope.kind === 'binary-response' && envelope.tag === current.tag) {
-      if (current.anonymous) current.receivedAt = this.#wallNow();
+      if (current.anonymous || current.telemetry) current.receivedAt = this.#wallNow();
       this.#finish(current, 'completed', null, { body: envelope.body, provenance: 'companion-tag-attributed' });
     }
   }
@@ -373,7 +645,37 @@ export class RemoteRequestCoordinator {
   }
 
   #finish(current, status, reason, extra = {}, releaseCommand = true) {
-    if (this.#current !== current) return;
+    if (this.#current !== current || current.finishing) return;
+    current.finishing = true;
+    if (current.source && current.dispatchedAt === undefined && !['foreground', 'quiet-air', 'rate-limited',
+      'background-turn', 'busy'].includes(reason)) this.#background.withdraw(current.source);
+    if (current.telemetry) {
+      if (current.telemetry.login && current.dispatchedAt !== undefined) {
+        this.#guestSessions.retire(current.context.targetPublicKey);
+        try {
+          const completedAt = this.#wallNow();
+          if (status === 'completed' && (!this.#currentScope(current) || this.#stopped)) {
+            status = 'failed'; reason = 'guest-session-unavailable';
+          }
+          if (completedAt < current.dispatchedAt || (current.receivedAt !== undefined
+            && (current.receivedAt < current.dispatchedAt || current.receivedAt > completedAt))) {
+            status = 'failed'; reason = 'clock-anomaly';
+          }
+          const record = { context: current.context, dispatchedAt: current.dispatchedAt,
+            completedAt, status, reason, route: current.route, ...(extra.proof ? { proof: extra.proof } : {}) };
+          assertOwner(ownerSchemas.telemetryAuthenticationRecordSchema, record);
+          if (!synchronousPermission(current.telemetry.hooks.recordAuthentication, Object.freeze(record))) throw new Error('not saved');
+          if (status === 'completed' && (!this.#currentScope(current) || this.#stopped
+            || !this.#guestSessions.grant(current.context.targetPublicKey, current.telemetry.config))) {
+            status = 'failed'; reason = 'guest-session-unavailable';
+          }
+          if (status === 'completed') this.#watchGuestSessions(current.context);
+        } catch { status = 'failed'; reason = 'auth-persistence'; }
+      }
+      const admissionOnly = status === 'deferred' && ['foreground', 'quiet-air', 'rate-limited', 'background-turn',
+        'busy', 'queue-timeout', 'reservation-unavailable', 'ineligible'].includes(reason);
+      if (status !== 'completed' && !admissionOnly) this.#guestSessions.revoke(current.context.targetPublicKey);
+    }
     this.#detach(current);
     if (current.tag !== null) {
       this.#pruneRetired();
@@ -415,7 +717,9 @@ export class RemoteRequestCoordinator {
       'protocol-error': 'Remote request acknowledgement was malformed; the captured radio connection is being reset to prevent incorrect command attribution.',
       'request-cancelled': 'Remote request stopped before acknowledgement; the captured radio connection is being reset because acknowledgement ownership is uncertain.'
     };
-    this.#logger.warn('services.remoteRequests', explanations[invalidationReason], {
+    this.#logger.warn('services.remoteRequests', current.telemetry && invalidationReason.startsWith('preflight-')
+      ? 'Telemetry contact read ownership is uncertain; the captured radio connection is being reset before further commands. Capture may pause during reconnection.'
+      : explanations[invalidationReason], {
       requestId: current.context.requestId, operation: current.context.operation,
       generation: current.context.generation, phase, outcome: reason
     });

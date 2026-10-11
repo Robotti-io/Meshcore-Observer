@@ -1,7 +1,7 @@
 # Telemetry polling configuration
 
-Delivered phases: **#34 T1 startup contracts and T2 pure protocol helpers**.
-The shared radio login owner, scheduler and active collection are later phases.
+Delivered phases: **#34 T1 startup contracts, T2 pure protocol helpers and T3 guarded shared owner**.
+Durable polling-state integration, the scheduler and active collection are later phases.
 Setting `PACKETCAPTURE_TELEMETRY_POLL_ENABLED`
 does not yet activate radio traffic. Saved telemetry freshness and shared history
 retention continue to operate independently.
@@ -110,8 +110,8 @@ operator values, references, filenames or parser excerpts. Configuration failure
 terminates startup before store/radio/network work. Verify files and references
 locally rather than copying secret contents into diagnostics.
 
-T1/T2 add no store migration, live session/login, poll timer, route change or
-telemetry request. T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
+T1–T3 add no store migration, live polling producer, route change or contact mutation.
+T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
 T4 adds durable state; T5 wires opt-in collection; T6 proves offline acceptance.
 Live radio/device validation and deployment activation remain separately scoped
 under #37. Authentication prefix/static-tag correlation limits are recorded in
@@ -151,3 +151,56 @@ server clock; raw proof cannot independently identify the full key or reject all
 same-target delayed replies. The later shared owner must enforce current
 reporter/generation, replay/timing, reservation and session lifecycle gates before
 using proof. No successful parser result on its own activates data collection.
+
+## Guarded shared radio owner (#34 T3)
+
+The existing coordinator now provides narrow internal `tryGuestLogin` and
+`tryTelemetryRequest` entry points. They require enabled validated startup policy,
+synchronous eligibility and durable-reservation callbacks. Login additionally
+requires a synchronous public-server-time high-water read and authentication
+outcome save. T4 supplies their owned-store implementation; T5 connects the
+producer. The existing generic binary primitive remains compatible for its
+trusted internal consumers; the telemetry producer must use these guarded entry
+points. Merely enabling polling still sends no login or telemetry requests.
+
+Login reads the complete bounded inventory and then the exact full-key contact
+inside the same generation-bound local command transaction. Both reads share
+the original configured preflight deadline. The route must remain consistent
+between reads. Every login/data send rechecks current reporter/generation,
+eligibility, foreground work, quiet air, shared physical budget and a synchronous
+saved reservation. Data also requires an unexpired guest session and another
+exact-key route read. Physical write failures consume budget; local contact reads
+and deferrals do not. Unknown outcomes reset the captured connection before the
+untagged local/ACK channel can be reused.
+
+Guest proof must follow the exact direct static-prefix ACK; early, foreign and
+duplicate proof cannot grant authority. The ACK wait is bounded by existing
+limits, and its estimated response wait is clamped to the shared ceiling. Require
+server timestamp greater than the durable high-water when one exists. Missing,
+invalid or asynchronous state/save callbacks fail closed. Save the safe outcome
+before granting any session. Permission/legacy/protocol/denial failures are
+separate authentication outcomes; they do not invent data responses. Captured
+local dispatch/receipt/completion times remain distinct from the public server
+clock. Local completion rollback prevents session authority.
+
+At most 32 guest sessions bind the original private policy object, full target
+key, current reporter and connection generation, with the configured monotonic
+TTL. Restart restores none. A bounded pair of listeners invalidates idle
+authority on disconnect/identity change and drains at stop; no session timer or
+poll queue is introduced. Known contact mutation and route/auth failures revoke
+reuse. Ordinary foreground/quiet/budget/producer-turn deferrals preserve a valid
+session while granting no send permission.
+
+Login prefixes have a separate 32-entry quarantine. Its lifetime is the shared
+ACK ceiling plus response ceiling plus 60 seconds; unexpired evidence is never
+evicted to make space, so saturation defers login. Expiry is not nonce proof:
+same-target delayed replies and externally mutated contacts remain the approved
+protocol limitations. Distinct guest/management credentials remain essential.
+
+Region and telemetry demands coalesce into two expiring slots. A physical send,
+including a failed write, rotates the next turn and consumes its demand. A peer
+withdrawing unavailable preflight/eligibility, or an expired demand, cannot keep
+blocking the available producer. Demand lifetime derives from existing limits:
+the greater of twice shared minimum spacing and ACK plus response ceilings.
+There is no accumulating queue, catch-up burst or guarantee under sustained
+foreground/busy air. These guards require no internet, MQTT or dashboard.

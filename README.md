@@ -1246,7 +1246,7 @@ backup before migration 16; use the existing backup procedure above. These
 source-derived synthetic fixtures do not activate telemetry polling or replace
 #37's deployed-device/RF verification.
 
-### Telemetry polling startup and protocol contracts (#34 T1–T2)
+### Telemetry polling startup, protocol and owner contracts (#34 T1–T3)
 
 Polling defaults to disabled, a two-hop radius, 72-hour passive eligibility and
 a 24-hour per-component refresh objective. `.env.example` lists the matching
@@ -1266,8 +1266,12 @@ T2 adds pure full-contact-list/key/prefix/route validation, exact modern guest
 response and direct static-prefix ACK parsing, and temporary private login-byte
 preparation. These helpers perform no radio I/O or contact mutation; parsed
 proof is not a live session or full-key/nonce attestation. Legacy/privileged or
-unfamiliar proof fails closed. Later approved phases supply the shared owner,
-durable scheduling and collection.
+unfamiliar proof fails closed. T3 adds guarded shared-owner login/data admission,
+saved authentication before bounded session reuse, server-time replay checks and
+fair physical turns with anonymous-region work. These internal paths require
+trusted eligibility/reservation/authentication persistence callbacks; T4 supplies
+the owned-store integration, and T5 supplies the producer. Active collection
+remains inactive until that integration is delivered.
 
 ## Troubleshooting
 

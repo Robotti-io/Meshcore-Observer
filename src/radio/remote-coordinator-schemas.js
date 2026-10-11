@@ -46,6 +46,11 @@ export const remoteDispatchOptionsSchema = {
   properties: { expectedRoute: { enum: ['direct', 'flood'] } }
 };
 
+export const remoteBackgroundDemandSchema = {
+  type: 'object', additionalProperties: false, required: ['source'],
+  properties: { source: { enum: ['regions', 'telemetry'] } }
+};
+
 // Only associate a malformed binary layout with a known tag. The full
 // parser and future domain owner still validate the response body.
 export const remoteBinaryHeaderSchema = {

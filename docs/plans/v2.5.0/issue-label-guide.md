@@ -143,3 +143,7 @@ The initial mapping covers the 20 epic/Pillar 1 issues; the additional table cov
 - #34 T2 delivery on 2026-10-10: T1 user-pushed cacddb0; pure contact/path/guest-login validation complete locally with 26 new scenarios and 1,165 functional/coverage tests passing. Keep #34/#18 OPEN, native project In progress and existing classification/progress labels. T2 awaits review/push; T3–T6 remain pending. #23 stays completed/Done.
 
   Tracking verification: #34/#18 bodies were updated with fresh concurrent-edit guards and exact readback; OPEN states and all classification/progress labels were preserved. The signed-in native #34 project shows In progress alongside the completed T2 stage. Screenshot: `p1-13-t2-completed.jpg` in the task artifact directory. #23 was not reopened or changed.
+
+
+- #34 T3 delivery on 2026-10-11: T1/T2 user-pushed through 3032f31; guarded shared-owner sessions and fair admissions complete locally with 50 new cases / 1,215 functional and CI coverage tests passing. Keep #34/#18 OPEN, native project In progress and all existing classification/progress labels. T3 awaits human review/push; T4–T6 remain pending. #23 stays completed/Done.
+- T3 tracking readback on 2026-10-11: #34/#18 bodies match the final local delivery evidence after link rendering; concurrent-edit guards, OPEN states, titles and all six/seven existing labels verified exactly. The signed-in native project shows both #34 and #18 In progress. #23 remains completed/Done. Review screenshot: `p1-13-t3-completed.jpg` in the task artifact directory.
