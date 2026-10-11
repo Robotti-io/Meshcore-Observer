@@ -2,7 +2,7 @@
 
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — first-wave backend/coordination features and research are complete. #33 T1–T5 are user-pushed at 5e5c372; all four code/fixture criteria remain complete and #33 is completed/project Done. Schema 16 and the previously passing 1,122-test functional/coverage baseline are unchanged. #34 planning is now In progress: a finalized six-task plan and POLL-PLAN-01–06 propose default-off guest-only polling, reporter-scoped evidence, bounded saved contact routes, shared background fairness and owned durable scheduling/auth audit. Concrete auth/secret/storage approval is pending; no implementation or live polling has begun. #18/#23 remain OPEN/In progress; #35/#36 remain queued and #37 retains deployed-device/RF proof.
+**Stage:** In progress — first-wave backend/coordination features and research are complete. #33 is complete/user-pushed at 5e5c372; the #34 planning commit is user-pushed at 5d1a2c2. The user approved POLL-PLAN-01–06 and T1 implementation on 2026-10-10. #34 T1 is complete locally: strict default-off startup configuration, bounded protected files, private immutable full-key credential resolution, safe errors and synthetic examples. All 94 files / 1,139 functional and CI coverage tests pass; lint/diff and unchanged cost gates pass. Schema remains 16 and no telemetry login/polling is active. #23’s complete reviewed dataset/region/credential decisions meet all four acceptance criteria; #23 is closed as completed/project Done with only its progress label removed. #18/#34 remain OPEN/In progress; T1 is ready human review/push, T2 is next, and T3–T6/#35/#36/#37 retain their owning implementation/live gates.
 Research records versioned capabilities and deployment limits. #29 delivers the validated shared internal seam with configurable limits, bounded ACK recovery, priority and idle lifecycle; the coordinator itself schedules no polls. #31 supplies the opt-in discovery producer; public reporting/dashboard, publication and telemetry remain in their owning issues.
 
 ## Operator outcome
@@ -24,7 +24,7 @@ Own reusable observation/persistence, reporting semantics, and shared remote-req
 Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acceptance criteria, validation expectations, and implementation-plan approval decisions.
 
 - [x] [P1-01: Protocol, firmware, and library capability assessment](https://github.com/Robotti-io/Meshcore-Observer/issues/22)
-- [ ] [P1-02: Reporting semantics, identity, retention, and data ownership](https://github.com/Robotti-io/Meshcore-Observer/issues/23)
+- [x] [P1-02: Reporting semantics, identity, retention, and data ownership](https://github.com/Robotti-io/Meshcore-Observer/issues/23)
 - [x] [P1-03: Persist Observer run and shutdown history](https://github.com/Robotti-io/Meshcore-Observer/issues/24)
 - [x] [P1-04: Sample process resources and selected runtime events](https://github.com/Robotti-io/Meshcore-Observer/issues/25)
 - [x] [P1-05: Persist verified node adverts and direct-heard evidence](https://github.com/Robotti-io/Meshcore-Observer/issues/26)

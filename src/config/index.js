@@ -9,6 +9,9 @@ import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMER
   regionQueryEnvSchema, regionQueryConfigSchema } from '../regions/region-query-schemas.js';
 import { assertRegionQueryInput } from '../regions/region-query-validation.js';
 import { TELEMETRY_FRESHNESS_DEFAULT_HOURS, TELEMETRY_FRESHNESS_ENV_KEY, telemetryEnvSchema } from '../telemetry/telemetry-schemas.js';
+import { TELEMETRY_POLL_DEFAULTS, TELEMETRY_POLL_NUMERIC_SETTINGS, TELEMETRY_POLL_ENABLED_ENV_KEY,
+  TELEMETRY_POLL_CONFIG_ENV_KEY, TELEMETRY_POLL_SECRETS_ENV_KEY, telemetryPollEnvSchema } from '../telemetry/polling-schemas.js';
+import { loadTelemetryPolling, TelemetryPollingConfigError } from '../telemetry/polling-config.js';
 
 const DEFAULT_BOTS_CONFIG_FILE = 'bots.config.json';
 const DEFAULT_BROKERS_CONFIG_FILE = 'brokers.config.json';
@@ -25,6 +28,7 @@ const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
 const regionEnvValid = compileSchema(regionEnvSchema);
 const regionQueryEnvValid = compileSchema(regionQueryEnvSchema);
 const telemetryEnvValid = compileSchema(telemetryEnvSchema);
+const telemetryPollEnvValid = compileSchema(telemetryPollEnvSchema);
 
 function readString(env, key, fallback = null) {
   const value = env[key];
@@ -185,6 +189,25 @@ function readTelemetry(env) {
   return { freshnessWindowMs: hours * 3600000 };
 }
 
+function readTelemetryPolling(env) {
+  const keys = [TELEMETRY_POLL_ENABLED_ENV_KEY, TELEMETRY_POLL_CONFIG_ENV_KEY, TELEMETRY_POLL_SECRETS_ENV_KEY,
+    ...TELEMETRY_POLL_NUMERIC_SETTINGS.map(setting => setting.key)];
+  const raw = Object.fromEntries(keys.filter(key => env[key] !== undefined).map(key => [key, env[key]]));
+  // Do not echo supplied strings, paths, reference names or AJV instance paths.
+  if (!telemetryPollEnvValid(raw)) throw new ConfigError('Invalid telemetry polling environment: use true/false, whole numbers and nonempty file paths; omit optional values to use defaults');
+  const settings = { ...TELEMETRY_POLL_DEFAULTS };
+  if (raw[TELEMETRY_POLL_ENABLED_ENV_KEY] !== undefined) settings.enabled = raw[TELEMETRY_POLL_ENABLED_ENV_KEY].trim().toLowerCase() === 'true';
+  for (const { field, key, scale } of TELEMETRY_POLL_NUMERIC_SETTINGS) {
+    if (raw[key] !== undefined) settings[field] = Number(raw[key].trim()) * scale;
+  }
+  try {
+    return loadTelemetryPolling({ settings, policyPath: raw[TELEMETRY_POLL_CONFIG_ENV_KEY] ?? null,
+      secretsPath: raw[TELEMETRY_POLL_SECRETS_ENV_KEY] ?? null });
+  } catch (error) {
+    throw new ConfigError(error instanceof TelemetryPollingConfigError ? error.message : 'Invalid telemetry polling startup configuration');
+  }
+}
+
 function readRegions(env) {
   const key = REGION_ANSWER_FRESHNESS_ENV_KEY;
   const raw = env[key] === undefined ? {} : { [key]: env[key] };
@@ -305,6 +328,7 @@ export function loadConfig(env = process.env) {
     nodeObservations: readNodeObservations(env),
     topology: readTopology(env),
     telemetry: readTelemetry(env),
+    telemetryPolling: readTelemetryPolling(env),
     regions: readRegions(env),
     remoteRequests: readRemoteRequests(env)
   };

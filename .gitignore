@@ -3,6 +3,8 @@ node_modules/
 .env.local
 bots.config.json
 brokers.config.json
+telemetry.config.json
+telemetry.secrets.json
 *.log
 coverage/
 artifacts/

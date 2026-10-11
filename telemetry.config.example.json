@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "defaultCredentialRef": "default",
+  "components": { "status": true, "sensors": true, "neighbours": true },
+  "neighbours": { "version": 0, "count": 3, "offset": 0, "orderBy": 0, "prefixLength": 32 },
+  "groups": [
+    {
+      "id": "synthetic-group",
+      "credentialRef": "groupGuest",
+      "targetPublicKeys": ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"]
+    }
+  ],
+  "targets": [
+    {
+      "targetPublicKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      "credentialRef": "targetGuest"
+    }
+  ]
+}

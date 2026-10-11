@@ -55,8 +55,9 @@ use each broker's stable `auth.passwordEnv` mapping (see the MQTT section).
 
 ## Configure
 
-Configuration is entirely environment-driven, with two optional local files
-for convenience during development.
+Runtime settings are environment-driven. Optional JSON files configure bots,
+brokers and protected telemetry policy/credentials; they can use local paths or
+read-only container mounts.
 
 ### 1. Environment variables
 
@@ -1244,6 +1245,24 @@ explains upgrade/recovery and retained-history limits. Keep a verified closed
 backup before migration 16; use the existing backup procedure above. These
 source-derived synthetic fixtures do not activate telemetry polling or replace
 #37's deployed-device/RF verification.
+
+### Telemetry polling startup contracts (#34 T1)
+
+Polling defaults to disabled, a two-hop radius, 72-hour passive eligibility and
+a 24-hour per-component refresh objective. `.env.example` lists the matching
+code defaults and override bounds. Explicit invalid values fail before store,
+radio or network startup, including when disabled.
+
+Protected policy and secret files must be supplied together through
+`PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE` and
+`PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE`; disabled omission reads neither.
+The [configuration guide](docs/telemetry-polling.md) describes strict version-1
+files, default/group/full-key precedence, verified target profile overrides,
+1–15 UTF-8-byte guest credentials and safe errors. The two JSON example files
+contain synthetic values only. Credentials/reference mappings stay outside the
+ordinary configuration object in private process memory. T1 provides startup
+contracts only: even setting enabled does not yet send login or data requests.
+Later approved phases supply protocol guards, durable scheduling and collection.
 
 ## Troubleshooting
 
