@@ -1,7 +1,8 @@
 # Telemetry polling configuration
 
-Delivered phase: **#34 T1 startup contracts only**. The scheduler, login flow and
-active collection are later phases. Setting `PACKETCAPTURE_TELEMETRY_POLL_ENABLED`
+Delivered phases: **#34 T1 startup contracts and T2 pure protocol helpers**.
+The shared radio login owner, scheduler and active collection are later phases.
+Setting `PACKETCAPTURE_TELEMETRY_POLL_ENABLED`
 does not yet activate radio traffic. Saved telemetry freshness and shared history
 retention continue to operate independently.
 
@@ -109,9 +110,44 @@ operator values, references, filenames or parser excerpts. Configuration failure
 terminates startup before store/radio/network work. Verify files and references
 locally rather than copying secret contents into diagnostics.
 
-T1 adds no store migration, session, login, poll timer, route change or telemetry
-request. T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
+T1/T2 add no store migration, live session/login, poll timer, route change or
+telemetry request. T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
 T4 adds durable state; T5 wires opt-in collection; T6 proves offline acceptance.
 Live radio/device validation and deployment activation remain separately scoped
 under #37. Authentication prefix/static-tag correlation limits are recorded in
 the approved #34 plan and will not be presented as nonce-based replay proof.
+
+## Pure protocol/contact checks (#34 T2)
+
+The new helpers are not connected to the radio owner. They prepare only a full
+unfiltered contact list read (command 4), an exact-key read (command 30), or a
+private guest-login frame (command 26). Private login bytes are consumed through
+a trusted callback and cleared when the callback settles; no transport is called
+by these helpers. Invalid inputs and callback failures produce fixed errors.
+
+A bounded reducer validates start/contact/end framing and exactly the declared
+number of distinct contacts, at most 1,024. It retains only full keys and minimal
+selected-target route evidence, never names, locations or raw frames. All contact
+types participate in target login-prefix collision checks. An incomplete/filtered
+listing, duplicate key, non-repeater target, prefix collision or known new-contact
+push cannot prove safe login association. Configured monotonic deadline/rollback
+guards also apply to completed proof; large tables can time out before reaching
+the contact-count bound. Timeout or missing evidence defers instead of probing.
+
+Saved path metadata encodes prefix width and relay count. Widths 1–3 and at most
+64 path bytes are supported; target distance is relay count plus one. Unknown
+paths and reserved width 4 are rejected. An existing direct route is only local
+contact evidence: these helpers label outbound delivery unverified and never
+reverse passive paths or edit contacts.
+
+Login success requires the pinned modern 14-byte shape, admin flag zero,
+permission byte exactly zero and firmware protocol level 2. Nonzero permission
+bits, eight-byte legacy success and unfamiliar protocol levels are unavailable.
+Firmware level is not a firmware-version/layout/sensor-profile attestation.
+Login denial requires the exact eight-byte reserved-zero shape. A login ACK must
+select direct routing and echo the static first-four-byte key prefix as its tag.
+That tag is not a nonce. The response exposes only a six-byte prefix and public
+server clock; raw proof cannot independently identify the full key or reject all
+same-target delayed replies. The later shared owner must enforce current
+reporter/generation, replay/timing, reservation and session lifecycle gates before
+using proof. No successful parser result on its own activates data collection.

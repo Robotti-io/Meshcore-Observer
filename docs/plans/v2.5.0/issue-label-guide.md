@@ -138,3 +138,8 @@ The initial mapping covers the 20 epic/Pillar 1 issues; the additional table cov
 - #33 completion on 2026-10-10: TELEMETRY-PLAN-01–05 and T1–T5/all four code-fixture acceptance complete. T1–T4 user-pushed 13536b7; T5 complete locally, 1,122 functional/coverage tests and unchanged cost/lint gates pass. Close as completed; remove `status:in-progress`; verify native project #1 Done. Preserve configuration/enhancement/release/pillar classifications. #18/#23 remain OPEN/In progress; #34 owns auth/polling and #37 deployed-device/RF verification.
 
 - #23 completion on 2026-10-10: finalized POLL-PLAN-01–06 approval resolves the last scoped decision; consolidated dataset/region/auth contracts meet all four criteria. Issue CLOSED/COMPLETED and native project Done verified; remove only `status:in-progress`, retain decision/security/configuration/release/pillar labels. #18/#34 remain OPEN/In progress; #34 T1 complete locally and T2–T6 pending. This closes decisions, not polling implementation.
+
+
+- #34 T2 delivery on 2026-10-10: T1 user-pushed cacddb0; pure contact/path/guest-login validation complete locally with 26 new scenarios and 1,165 functional/coverage tests passing. Keep #34/#18 OPEN, native project In progress and existing classification/progress labels. T2 awaits review/push; T3–T6 remain pending. #23 stays completed/Done.
+
+  Tracking verification: #34/#18 bodies were updated with fresh concurrent-edit guards and exact readback; OPEN states and all classification/progress labels were preserved. The signed-in native #34 project shows In progress alongside the completed T2 stage. Screenshot: `p1-13-t2-completed.jpg` in the task artifact directory. #23 was not reopened or changed.
