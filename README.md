@@ -896,7 +896,7 @@ and verify a consistent backup of the closed database. A live WAL may contain
 committed data absent from the main file: do not copy only the main file while
 the database is active or discard sidecars from an unverified backup. The tests
 verify restore from a closed, checkpointed database. Keep the matching
-application version and configuration with the backup. Migrations 14, 15 and 16 are
+application version and configuration with the backup. Migrations 14–17 are
 transactional on failure; an application downgrade after a successful upgrade
 requires a compatible pre-upgrade backup, not deleting tables or lowering the
 schema version manually. Preserve the upgraded database before any restore;
@@ -1246,7 +1246,7 @@ backup before migration 16; use the existing backup procedure above. These
 source-derived synthetic fixtures do not activate telemetry polling or replace
 #37's deployed-device/RF verification.
 
-### Telemetry polling startup, protocol and owner contracts (#34 T1–T3)
+### Telemetry polling startup, protocol and owner contracts (#34 T1–T4)
 
 Polling defaults to disabled, a two-hop radius, 72-hour passive eligibility and
 a 24-hour per-component refresh objective. `.env.example` lists the matching
@@ -1269,9 +1269,13 @@ proof is not a live session or full-key/nonce attestation. Legacy/privileged or
 unfamiliar proof fails closed. T3 adds guarded shared-owner login/data admission,
 saved authentication before bounded session reuse, server-time replay checks and
 fair physical turns with anonymous-region work. These internal paths require
-trusted eligibility/reservation/authentication persistence callbacks; T4 supplies
-the owned-store integration, and T5 supplies the producer. Active collection
-remains inactive until that integration is delivered.
+trusted eligibility/reservation/authentication persistence callbacks. T4 adds
+migration 17 and the owned-store APIs for reporter-scoped evidence, safe
+authentication audit/replay high-water and atomic polling reservations/results.
+Restart recovery advances cooldowns without replaying work or restoring sessions.
+Shared retention preserves minimum replay/direct/latest state and its source runs.
+Keep a verified closed backup before migration 17. T5 connects these APIs to
+passive capture and the opt-in producer; active collection remains inactive.
 
 ## Troubleshooting
 

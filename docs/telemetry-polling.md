@@ -119,7 +119,7 @@ the approved #34 plan and will not be presented as nonce-based replay proof.
 
 ## Pure protocol/contact checks (#34 T2)
 
-The new helpers are not connected to the radio owner. They prepare only a full
+These pure helpers perform preparation/parsing; T3 connects them through the guarded radio owner. They prepare only a full
 unfiltered contact list read (command 4), an exact-key read (command 30), or a
 private guest-login frame (command 26). Private login bytes are consumed through
 a trusted callback and cleared when the callback settles; no transport is called
@@ -158,8 +158,8 @@ The existing coordinator now provides narrow internal `tryGuestLogin` and
 `tryTelemetryRequest` entry points. They require enabled validated startup policy,
 synchronous eligibility and durable-reservation callbacks. Login additionally
 requires a synchronous public-server-time high-water read and authentication
-outcome save. T4 supplies their owned-store implementation; T5 connects the
-producer. The existing generic binary primitive remains compatible for its
+outcome save. T4 supplies their owned-store APIs; T5 connects the
+producer and callbacks. The existing generic binary primitive remains compatible for its
 trusted internal consumers; the telemetry producer must use these guarded entry
 points. Merely enabling polling still sends no login or telemetry requests.
 
@@ -204,3 +204,70 @@ blocking the available producer. Demand lifetime derives from existing limits:
 the greater of twice shared minimum spacing and ACK plus response ceilings.
 There is no accumulating queue, catch-up burst or guarantee under sustained
 foreground/busy air. These guards require no internet, MQTT or dashboard.
+
+## Owned durable evidence, authentication and polling state (#34 T4)
+
+Migration 17 adds three datasets to the same always-on MetricsStore, even with
+polling/dashboard disabled. Stop Observer and verify a closed database backup
+before upgrading; use the README backup procedure. Each migration is atomic.
+Older inventories/results do not backfill reporter-scoped evidence or create
+authentication authority. A successful upgrade requires a compatible pre-upgrade
+backup for an application downgrade.
+
+`recordTelemetryDirectEvidence` stores a newly verified zero-hop advert’s
+captured reporter, target, original receipt, source run and nonsecret event digest.
+It preserves the latest marker without incrementing existing advert metrics; T5
+will call it alongside the existing verified-advert path. Exact eligibility and
+keyset candidate reads require repeater type, matching reporter, exclusive stale
+cutoff, no future receipt and a source run without known clock anomaly. Flood
+candidates additionally need nonrepeated traversed topology, a retained original
+receipt and unique full-key prefix resolution across every node type, within
+radius. Unknown, remaining-route and colliding evidence cannot grant eligibility.
+Candidate pages return eligible targets, not a ready-to-transmit queue; T5 owns
+distributed component selection and due checks. Passive evidence never proves a
+saved outbound contact route.
+
+`reserveTelemetryPoll` validates an approved canonical component/parameter scope,
+owned active run, current evidence and clock, then saves request identity, attempt
+count and conservative deadline synchronously. Local contact checks and
+`deferTelemetryPoll` consume no RF attempts. A saved reservation is permission
+bookkeeping, not evidence that a command was sent. Shared physical rate limits
+and live guest authority remain the coordinator’s responsibility. Retry failures
+back off to the configured cap; exhausted/unsupported component cycles wait for
+refresh. Slower policy can extend deadlines; faster policy cannot shorten saved
+ones. New cycles adopt the current validated configuration after that prior
+deadline has elapsed. Policy inspection does not slide the original reservation/completion anchor.
+
+`completeTelemetryPoll` writes the original #33 outcome/observation and advances
+its matching reservation in one transaction. The existing `recordTelemetryResult`
+contract remains unchanged; its internal transaction seam is inaccessible through
+HTTP. Any write failure rolls back results, latest pointers and scheduling state.
+The pending reservation then blocks replacement for its scope. T5 will pause all
+new telemetry on terminal persistence failure, retain at most one unsaved terminal
+and drain before store close. No producer/drain queue is introduced in T4.
+
+`completeTelemetryAuthentication` separately saves the coordinator’s validated
+public context, original local dispatch/completion, actual route, fixed reason
+and modern public proof. Success requires direct guest-only proof matching the
+target prefix, nonanomalous time and server timestamp strictly above the stored
+high-water. Invalid/privileged/mismatched/replayed success cannot commit. Denied/unsafe/replayed
+authentication advances the longer target cooldown, blocking all data components;
+transport/timeout failures use ordinary capped retry backoff. Authentication failure
+never fabricates a status/sensor/neighbour result. `getTelemetryAuthReplayState`
+returns only the greatest accepted public server timestamp. That guard survives
+restart/pruning, with its original request/source run retained separately from a
+newer failed attempt. No database row grants or restores a live guest session.
+
+Shared original-time days retention removes authentication history only when
+both dispatch and completion precede the cutoff; equality survives. Latest direct
+markers, replay high-water, active/latest poll state and required run FKs remain.
+They can become stale and confer no permanent freshness. Indefinite retention
+still has no lifetime disk ceiling. There is no new cleanup timer, store, raw
+frame archive, credential/reference/fingerprint field or public API.
+
+After reopen, `recoverTelemetryPollReservations` uses bounded request-ID pages to
+retire reservations from another run and extend conservative cooldowns while
+keeping consumed attempts. It records no invented terminal response and does not
+resend old work. Current-run pending requests remain owned until terminal save or
+drain. Wall-clock rollback/future evidence defers admission instead of making stale
+state fresh. T5 must invoke recovery before admitting the new producer.

@@ -28,7 +28,7 @@ test('migration 16 preserves v15 inventory/run/bot/region/polling and capture da
   f.close();
   const prior = f.inspect(db => { db.exec(dropTelemetrySchema+' PRAGMA user_version=15;'); return legacy(db); });
   f.open(); f.close(); f.inspect(db => {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 16);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 17);
     assert.deepEqual(legacy(db), prior);
     assert.ok(Object.values(telemetrySnapshot(db)).every(rows => rows.length === 0));
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
@@ -44,7 +44,7 @@ test('sequential v13/v14 upgrades recreate later schemas atomically without inte
       db.exec(`PRAGMA user_version=${version}`);
     });
     f.open(); f.close(); f.inspect(db => {
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 16);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 17);
       assert.equal(db.prepare('SELECT name FROM nodes').get().name, 'Kept');
       assert.ok(Object.values(telemetrySnapshot(db)).every(rows => rows.length === 0));
       assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
@@ -57,7 +57,7 @@ test('fresh migration and repeated reopening are idempotent and preserve saved t
   const prior = f.inspect(telemetrySnapshot);
   for (let n = 0; n < 3; n++) {
     f.open(); f.close(); f.inspect(db => {
-      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 16); assert.deepEqual(telemetrySnapshot(db), prior);
+      assert.equal(db.prepare('PRAGMA user_version').get().user_version, 17); assert.deepEqual(telemetrySnapshot(db), prior);
     });
   }
 });
@@ -73,12 +73,12 @@ test('a final-index failure rolls back all migration-16 tables/indexes and versi
     assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name LIKE 'idx_telemetry_%' AND name!='idx_telemetry_latest_decoded'").get().n, 0);
     db.exec('DROP INDEX idx_telemetry_latest_decoded');
   });
-  f.open(); f.close(); f.inspect(db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 16));
+  f.open(); f.close(); f.inspect(db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 17));
 });
 
 test('migration supplies indexes for scope/time/run queries and both protected latest pointers', () => {
   const f = fixture(); f.close(); f.inspect(db => {
-    const names = db.prepare("SELECT name FROM sqlite_schema WHERE type='index' AND name LIKE 'idx_telemetry_%'").all().map(row => row.name);
+    const names = db.prepare("SELECT name FROM sqlite_schema WHERE type='index' AND name LIKE 'idx_telemetry_%' AND name NOT LIKE 'idx_telemetry_poll_%' AND name NOT LIKE 'idx_telemetry_auth_%' AND name NOT LIKE 'idx_telemetry_direct_%'").all().map(row => row.name);
     assert.deepEqual(names.sort(), ['idx_telemetry_latest_decoded', 'idx_telemetry_latest_observation', 'idx_telemetry_observations_at',
       'idx_telemetry_observations_scope_at', 'idx_telemetry_outcomes_at', 'idx_telemetry_outcomes_run_at', 'idx_telemetry_outcomes_scope_at']);
     const references = db.prepare("SELECT * FROM pragma_foreign_key_list('telemetry_query_outcomes')").all();

@@ -19,6 +19,8 @@ import { regionPruneSchema } from '../regions/region-schemas.js';
 import { telemetryMigration } from './telemetry-migration.js';
 import { createTelemetryHistory } from './telemetry-history.js';
 import { createTelemetryReads } from './telemetry-reads.js';
+import { telemetryPollMigration } from './telemetry-poll-migration.js';
+import { createTelemetryPollState } from './telemetry-poll-state.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -534,7 +536,8 @@ const MIGRATIONS = [
   topologyMigration,
   regionMigration,
   regionPollMigration,
-  telemetryMigration
+  telemetryMigration,
+  telemetryPollMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -615,6 +618,7 @@ export class MetricsStore {
   #telemetryReads;
   #regionPoll;
   #telemetry;
+  #telemetryPoll;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -658,11 +662,13 @@ export class MetricsStore {
       this.#regionReads = createRegionReads(this.#db);
       this.#telemetryReads = createTelemetryReads(this.#db);
       this.#regionPoll = createRegionPollState(this.#db, requireRegionRun, this.#regions.recordWithinTransaction);
-      this.#telemetry = createTelemetryHistory(this.#db, (runId) => {
+      const requireTelemetryRun = (runId) => {
         const run = this.#activeRunId === runId ? this.getObserverRun({ runId }) : null;
         if (!run || run.state !== 'running') throw new Error('Telemetry writes require the active owned run');
         return run;
-      });
+      };
+      this.#telemetry = createTelemetryHistory(this.#db, requireTelemetryRun);
+      this.#telemetryPoll = createTelemetryPollState(this.#db, requireTelemetryRun, this.#telemetry.recordWithinTransaction);
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1755,6 +1761,7 @@ export class MetricsStore {
     this.#db.exec('BEGIN');
     try {
       this.#telemetry.prune(cutoffMs);
+      this.#telemetryPoll.prune(cutoffMs);
       this.#regionReads.prune(cutoffMs);
       this.#db.prepare('DELETE FROM topology_observations WHERE received_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM topology_capture_samples WHERE sample_at < ?').run(cutoffMs);
@@ -1780,6 +1787,18 @@ export class MetricsStore {
   recordTopologyObservation(evidence) { return this.#topology.record(evidence); }
   recordRegionResult(result) { return this.#regions.record(result); }
   recordTelemetryResult(result) { return this.#telemetry.record(result); }
+  recordTelemetryDirectEvidence(input) { return this.#telemetryPoll.direct(input); }
+  getTelemetryEligibility(input) { return this.#telemetryPoll.eligible(input); }
+  queryTelemetryPollCandidates(input) { return this.#telemetryPoll.candidates(input); }
+  getTelemetryPollState(input) { return this.#telemetryPoll.state(input); }
+  getTelemetryPollHighWater() { return this.#telemetryPoll.highWater(); }
+  getTelemetryAuthReplayState(input) { return this.#telemetryPoll.replay(input); }
+  reserveTelemetryPoll(input) { return this.#telemetryPoll.reserve(input); }
+  deferTelemetryPoll(input) { return this.#telemetryPoll.defer(input); }
+  completeTelemetryPoll(input) { return this.#telemetryPoll.complete(input); }
+  completeTelemetryAuthentication(input) { return this.#telemetryPoll.authenticate(input); }
+  recoverTelemetryPollReservations(input) { return this.#telemetryPoll.recover(input); }
+  queryTelemetryAuthenticationOutcomes(input) { return this.#telemetryPoll.authenticationHistory(input); }
   getTelemetryLatest(query) { return this.#telemetryReads.latest(query); }
   queryTelemetryObservations(query) { return this.#telemetryReads.observations(query); }
   queryTelemetryOutcomes(query) { return this.#telemetryReads.outcomes(query); }

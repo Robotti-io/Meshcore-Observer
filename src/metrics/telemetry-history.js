@@ -47,53 +47,56 @@ export function createTelemetryHistory(db, requireRun) {
     AND (received_at IS NULL OR received_at<?)
     AND NOT EXISTS(SELECT 1 FROM telemetry_observations s WHERE s.request_id=telemetry_query_outcomes.request_id)`);
 
-  return {
-    record(input) {
-      assertTelemetryResult(input);
-      const run = requireRun(input.outcome.runId), o = input.outcome, observation = input.observation;
-      const scope = [o.observerPublicKey, o.targetPublicKey, o.variant.component, telemetryVariantKey(o.variant)];
-      db.exec('BEGIN');
+  function recordWithinTransaction(input) {
+    assertTelemetryResult(input);
+    const run = requireRun(input.outcome.runId), o = input.outcome, observation = input.observation;
+    const scope = [o.observerPublicKey, o.targetPublicKey, o.variant.component, telemetryVariantKey(o.variant)];
+    const old = outcomeById.get(o.requestId);
+    if (old) {
+      const saved = observationByRequest.get(o.requestId);
+      let prior;
       try {
-        const old = outcomeById.get(o.requestId);
-        if (old) {
-          const saved = observationByRequest.get(o.requestId);
-          let prior;
-          try {
-            const { variantJson, decoderVersion, ...fields } = old;
-            prior = { decoderVersion, outcome: { ...fields, variant: JSON.parse(variantJson), clockAnomaly: Boolean(fields.clockAnomaly) },
-              ...(saved ? { observation: JSON.parse(saved.normalizedJson) } : {}) };
-            assertTelemetryResult(prior);
-          } catch { throw new Error('Invalid stored telemetry data'); }
-          if (json(prior) !== json(input)) throw new Error('Telemetry result request identity conflict');
-          db.exec('COMMIT');
-          return { requestId: o.requestId, observationId: saved?.id ?? null, duplicate: true,
-            latestUpdated: false, decodedLatestUpdated: false, observationTimeConflict: Boolean(saved?.conflict) };
-        }
-        insertOutcome.run(o.requestId,o.runId,...scope,json(o.variant),input.decoderVersion,o.startedAt,o.completedAt,
-          o.receivedAt,Number(o.clockAnomaly),o.tag,o.route,o.status,o.reason);
-        let observationId = null, latestUpdated = false, decodedLatestUpdated = false, observationTimeConflict = false;
-        if (observation) {
-          const at = observation.observedAt;
-          observationTimeConflict = Boolean(collision.get(...scope,at).conflict);
-          // Original anomalous evidence is saved, not rewritten. A run's known
-          // clock anomaly or a request predating its source run is history-only.
-          const eligible = !o.clockAnomaly && !run.wallTimeAnomaly && o.startedAt >= run.startedAt;
-          observationId = Number(insertObservation.run(o.requestId,...scope,o.status,at,observation.quality,
-            json(observation),Number(eligible),Number(observationTimeConflict)).lastInsertRowid);
-          if (observationTimeConflict) markCollision.run(...scope,at);
-          if (eligible) {
-            const previous = latest.get(...scope);
-            latestUpdated = newer(at,o.requestId,previous?.usefulAt ?? null,previous?.usefulRequestId ?? null);
-            decodedLatestUpdated = observation.quality === 'decoded'
-              && newer(at,o.requestId,previous?.decodedAt ?? null,previous?.decodedRequestId ?? null);
-            if (latestUpdated || decodedLatestUpdated) saveLatest.run(...scope,
-              latestUpdated ? observationId : previous.observationId,
-              decodedLatestUpdated ? observationId : previous?.decodedObservationId ?? null);
-          }
-        }
-        db.exec('COMMIT');
-        return { requestId: o.requestId, observationId, duplicate: false, latestUpdated, decodedLatestUpdated, observationTimeConflict };
-      } catch (error) { db.exec('ROLLBACK'); throw error; }
+        const { variantJson, decoderVersion, ...fields } = old;
+        prior = { decoderVersion, outcome: { ...fields, variant: JSON.parse(variantJson), clockAnomaly: Boolean(fields.clockAnomaly) },
+          ...(saved ? { observation: JSON.parse(saved.normalizedJson) } : {}) };
+        assertTelemetryResult(prior);
+      } catch { throw new Error('Invalid stored telemetry data'); }
+      if (json(prior) !== json(input)) throw new Error('Telemetry result request identity conflict');
+      return { requestId: o.requestId, observationId: saved?.id ?? null, duplicate: true,
+        latestUpdated: false, decodedLatestUpdated: false, observationTimeConflict: Boolean(saved?.conflict) };
+    }
+    insertOutcome.run(o.requestId,o.runId,...scope,json(o.variant),input.decoderVersion,o.startedAt,o.completedAt,
+      o.receivedAt,Number(o.clockAnomaly),o.tag,o.route,o.status,o.reason);
+    let observationId = null, latestUpdated = false, decodedLatestUpdated = false, observationTimeConflict = false;
+    if (observation) {
+      const at = observation.observedAt;
+      observationTimeConflict = Boolean(collision.get(...scope,at).conflict);
+      // Original anomalous evidence is saved, not rewritten. A run's known
+      // clock anomaly or a request predating its source run is history-only.
+      const eligible = !o.clockAnomaly && !run.wallTimeAnomaly && o.startedAt >= run.startedAt;
+      observationId = Number(insertObservation.run(o.requestId,...scope,o.status,at,observation.quality,
+        json(observation),Number(eligible),Number(observationTimeConflict)).lastInsertRowid);
+      if (observationTimeConflict) markCollision.run(...scope,at);
+      if (eligible) {
+        const previous = latest.get(...scope);
+        latestUpdated = newer(at,o.requestId,previous?.usefulAt ?? null,previous?.usefulRequestId ?? null);
+        decodedLatestUpdated = observation.quality === 'decoded'
+          && newer(at,o.requestId,previous?.decodedAt ?? null,previous?.decodedRequestId ?? null);
+        if (latestUpdated || decodedLatestUpdated) saveLatest.run(...scope,
+          latestUpdated ? observationId : previous.observationId,
+          decodedLatestUpdated ? observationId : previous?.decodedObservationId ?? null);
+      }
+    }
+    return { requestId: o.requestId, observationId, duplicate: false, latestUpdated, decodedLatestUpdated, observationTimeConflict };
+  }
+  return {
+    recordWithinTransaction,
+    record(input) {
+      // Validate and establish ownership before opening the transaction.
+      assertTelemetryResult(input); requireRun(input.outcome.runId);
+      db.exec('BEGIN');
+      try { const result = recordWithinTransaction(input); db.exec('COMMIT'); return result; }
+      catch (error) { db.exec('ROLLBACK'); throw error; }
     },
 
     // Internal only: MetricsStore already owns the validated, child-first shared
