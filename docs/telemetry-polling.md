@@ -1,10 +1,10 @@
 # Telemetry polling configuration
 
-Delivered phases: **#34 T1–T5 startup, protocol, guarded owner, durable state and opt-in runtime producer**.
+Delivered phases: **#34 T1–T6 startup, protocol, guarded owner, durable state, opt-in runtime producer and offline acceptance**.
 Polling remains disabled by default. Explicitly enabling it with valid policy and
 guest-secret files now activates guarded collection after the startup delay and
-distributed component deadlines. T6 integrated acceptance remains pending; no
-live device, credential or deployment was used to validate T5. Saved telemetry
+distributed component deadlines. Integrated acceptance uses synthetic offline
+transport frames; no live device, credential or deployment is used. Saved telemetry
 freshness and shared history retention continue to operate independently.
 
 ## Startup settings
@@ -37,7 +37,7 @@ Use `telemetry.config.example.json` and `telemetry.secrets.example.json` as
 are not community credentials. Choose an intentional guest-only credential;
 there is no guessed or built-in password. Keep it different from the management
 password. Firmware may grant management access before the host can reject a
-mistaken credential; later phases will stop further queries on unsafe role proof.
+mistaken credential; the shared owner stops further queries on unsafe role proof.
 Guest login itself establishes transient remote ACL/session state.
 
 Store operator files under local names `telemetry.config.json` and
@@ -79,8 +79,8 @@ at every object boundary.
   Login firmware level or repeater name does not establish these profiles.
 
 Assignments choose credentials/profile interpretation only. They never make a
-target eligible, prove a route or authorize a management command. Those gates
-arrive in the subsequent approved phases. Guest firmware may expose only battery
+target eligible, prove a route or authorize a management command. Independent
+evidence, contact and shared-owner gates must all pass. Guest firmware may expose only battery
 and MCU temperature; environmental readings can remain unavailable.
 
 ## Version 1 secret file and private memory
@@ -113,7 +113,7 @@ locally rather than copying secret contents into diagnostics.
 
 T1–T3 add no store migration, live polling producer, route change or contact mutation.
 T2 validates protocol/contact shapes; T3 adds the guarded shared owner;
-T4 adds durable state; T5 connects opt-in collection; T6 remains the final offline acceptance gate.
+T4 adds durable state; T5 connects opt-in collection; T6 validates integrated offline acceptance.
 Live radio/device validation and deployment activation remain separately scoped
 under #37. Authentication prefix/static-tag correlation limits are recorded in
 the approved #34 plan and will not be presented as nonce-based replay proof.
@@ -318,6 +318,73 @@ settles before clean run closure/store close. Unresolved terminal persistence
 prevents a clean run marker and normal store closure, following the existing
 bounded shutdown failure path. Broker/UI availability has no role in collection.
 T5 validation uses isolated synthetic credentials, signed adverts and raw radio
-frames; T6 real-entrypoint final acceptance and #37 live-device proof remain
-separate gates. Enabling the feature is an operator action and was not performed
+frames. T6 adds real-entrypoint offline acceptance; #37 retains live-device proof.
+Enabling the feature is an operator action and was not performed
 on a real device during implementation.
+
+## Operator handoff and effective coverage (#34 T6)
+
+Offline collection needs the local Companion, a writable owned SQLite database,
+fresh passive evidence, usable pre-existing contact routes, and explicitly
+supplied guest policy/secret files. It needs no internet, MQTT broker or enabled
+dashboard. Local packet capture, verified inventory, topology and bot replies
+remain independent consumers. Dashboard/API presentation is owned by #35/#36;
+absence of a public telemetry view does not mean collection stopped.
+
+Before deliberate activation, establish the target firmware's modern guest role
+proof, confirm the chosen guest password differs from management, and verify
+contact routes and full-key uniqueness. Use independently established profiles
+only when their layout/emitter meaning is known. Unknown profiles remain partial;
+guest access may provide battery/MCU temperature without environmental fields.
+Neighbours are one bounded page, possibly empty, rather than proof of every
+nearby repeater. Login firmware level alone never establishes decoder profiles.
+Legacy, privileged, denied or replayed login proof cannot authorize data.
+
+Stop the Observer and preserve a verified closed database backup before changing
+runtime policy or upgrading. Follow the README backup procedure: verify normal
+shutdown, retain the entire closed SQLite file, and restore that file as a unit.
+Do not hot-copy only the main file while WAL transactions or another owner are
+active. A failed terminal save leaves shutdown unconfirmed and the reservation
+recoverable; restarting is recovery, not evidence that the missing reply was
+saved. Keep the original files when investigating storage faults.
+
+Supply the two private file paths and deliberately set
+`PACKETCAPTURE_TELEMETRY_POLL_ENABLED=true` only for authorized collection.
+Omission stays false. Validate synthetic configuration first; production startup
+rejects invalid explicit settings/files before opening the store or transport.
+Secret mounts remain read-only and restricted to the Observer operator. Restart
+is required for policy/credential edits. To pause RF collection, stop the process,
+set the enabled flag false, and restart; retain the database and evidence.
+Disabled collection still records verified reporter-scoped direct markers.
+
+Refresh cadence describes an objective. With the default shared budget of one
+physical remote request per minute there are at most **1,440 request slots/day**
+before quiet-air, foreground work and errors. A fresh guest login plus three
+components costs at least **four slots per target**, so an isolated first sweep
+of 100 targets requires at least **400 minutes (6h 40m)**. This is a lower bound,
+not a capacity guarantee: distributed component phases, the ten-minute session
+lifetime, additional logins, retries and region discovery can increase it. Both
+background producers share the same cap and fair admissions; foreground work
+wins. Raising the physical budget changes RF load, not passive eligibility or
+firmware permissions. No performance target or default budget changed in T6.
+
+Use saved per-component deadlines/outcomes and retained-history coverage to
+interpret missing data. Stale/out-of-radius/ambiguous evidence, missing or flood
+contacts and prefix collisions defer rather than probing. Disconnect/reporter
+changes revoke live sessions; neither restart nor backup restore grants one.
+Persisted server-time replay markers survive those operations. A repeater clock
+reset can therefore defer login even with a correct guest password. Local clock
+rollback also pauses collection until clock agreement returns. These are safe
+deferred states: do not discard history or weaken role/route checks to make them
+look successful. A persistence warning means one original terminal is being
+retried locally with new collection paused; it never schedules an RF replay.
+
+The T6 fixture runs the real entrypoint, SDK frame dispatch, radio manager,
+packet decoder, guest owner, scheduler and SQLite lifecycle with synthetic
+transport and controlled clocks. It checks actual reserve-before-send boundaries,
+all three components, default-off capture/bot behavior, busy air, rejection paths,
+timeouts, both auth/data save failures, stop at ACK/reply waits, ten crash
+boundaries, clean/abrupt restart, and closed-backup restore. No operator secret,
+real socket, radio login, firmware/contact edit or deployment is exercised.
+Pinned protocol fixtures establish code behavior; #37 owns separately authorized
+named-device/RF/soak proof and rollout readiness.

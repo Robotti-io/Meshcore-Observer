@@ -1246,7 +1246,7 @@ backup before migration 16; use the existing backup procedure above. These
 source-derived synthetic fixtures do not activate telemetry polling or replace
 #37's deployed-device/RF verification.
 
-### Telemetry polling startup, protocol and runtime contracts (#34 T1–T5)
+### Telemetry polling startup, protocol, runtime and offline acceptance (#34 T1–T6)
 
 Polling defaults to disabled, a two-hop radius, 72-hour passive eligibility and
 a 24-hour per-component refresh objective. `.env.example` lists the matching
@@ -1278,8 +1278,13 @@ Keep a verified closed backup before migration 17. T5 connects these APIs to
 always-on passive evidence and the opt-in producer. Component deadlines spread
 across the cadence; every physical login/query uses the shared radio budget.
 One unsaved terminal pauses polling and must drain before clean store closure.
-Polling remains disabled by default. T6 final integrated acceptance and #37
-separately authorized live-device validation remain pending.
+Polling remains disabled by default. T6 offline fixtures prove the real
+entrypoint's three components, failure/stop/crash recovery and closed-backup
+restore. The guide's [operator handoff](docs/telemetry-polling.md#operator-handoff-and-effective-coverage-34-t6)
+explains deliberate activation, safe shutdown and effective coverage: at the
+default one-request/minute shared budget, one guest login plus three components
+costs at least four request slots per target. Actual device/RF/soak proof remains
+separately scoped to #37.
 
 ## Troubleshooting
 
