@@ -492,10 +492,11 @@ Optional identifier/kind/source evidence remains null for these messages.
 Legacy rows without acceptance timestamps are reported as retained unknown
 acceptance, outside range counts, rather than inferred from reply completion.
 `getEarliestBotAcceptanceAt` reports retained bot coverage independently of
-packet samples. Group pages are capped at 200 rows. New sender aggregates and
-individual history are not exposed by the existing HTTP dashboard. The focused
-historical reporting APIs are implemented in #35; dashboard presentation
-remains tracked in #36, and browsable individual history is still deferred.
+packet samples. Group pages are capped at 200 rows. The dashboard now exposes
+bounded accepted usage and completion-outcome summaries with sender, command,
+bot, and range semantics; browsable individual history remains deferred. The
+focused historical reporting APIs are implemented in #35 and their dashboard
+surfaces are connected through #36.
 
 Interaction history uses `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` (default
 `0`, unlimited), even with the dashboard disabled. Completed interaction
@@ -521,8 +522,9 @@ provide internal `[start, end)` reporting reads. `earliestEventAt` reports the
 earliest retained event for the selected type independently of the requested
 range. Migration 10 preserves current inventory and existing metrics/bot state;
 it does not invent events or direct evidence for legacy nodes. The existing
-HTTP dashboard continues to show its current inventory views; historical event
-APIs are implemented in #35 and new dashboard event views are tracked in #36.
+HTTP dashboard keeps current inventory separate from retained advert-event
+totals and type breakdowns; historical event APIs are implemented in #35 and
+their bounded repeater evidence surface is connected through #36.
 
 Detailed advert events use shared metrics retention, by first reception time.
 History cleanup preserves inventory, first discovery and direct-heard evidence,
@@ -618,7 +620,8 @@ alive time, strictly before the cutoff. Running runs, instance identity and
 parents referenced by retained SQLite foreign-key children survive cleanup.
 Process samples/events expire child-first before parent cleanup. Public
 run/resource reporting is implemented through the focused #35 API slice;
-dashboard integration remains #36.
+the dashboard overview now presents bounded process samples, runtime events,
+and telemetry history from those routes through #36.
 
 Process resource history is always on, using the same configurable sample
 interval (default 10 seconds, minimum 1 second), even with the dashboard off

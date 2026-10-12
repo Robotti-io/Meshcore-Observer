@@ -89,6 +89,20 @@ export function renderDashboardHtml() {
     <div class="tile"><h2>Repeaters added</h2><p class="metric-value"><span id="overview-repeaters-added">0</span><span id="overview-repeaters-added-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
     <div class="tile"><h2>Repeaters updated</h2><p class="metric-value"><span id="overview-repeaters-updated">0</span><span id="overview-repeaters-updated-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
   </div>
+  <section class="reporting-panel" aria-labelledby="overview-operational-heading">
+    <h3 id="overview-operational-heading">Operational history</h3>
+    <p class="section-note">Process samples, runtime events, and telemetry history are retained-range evidence. Values remain unavailable until that report loads.</p>
+    <div id="overview-reporting-tiles" class="tile-grid">
+      <div class="tile"><h4>Process samples</h4><p id="reporting-process-samples">Unavailable</p></div>
+      <div class="tile"><h4>Runtime events</h4><p id="reporting-runtime-events">Unavailable</p></div>
+      <div class="tile"><h4>Telemetry observations</h4><p id="reporting-telemetry-observations">Unavailable</p></div>
+      <div class="tile"><h4>Telemetry outcomes</h4><p id="reporting-telemetry-outcomes">Unavailable</p></div>
+    </div>
+    <p class="data-status" id="overview-reporting-status">Loading operational history…</p>
+    <div class="table-scroll" role="region" aria-label="Recent runtime events" tabindex="0">
+      <table id="runtime-events-table"><thead><tr><th>Time</th><th>Event</th><th>Service</th><th>State</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
 </section>
 
 <section class="dashboard-view" id="view-packets" data-view="packets" hidden>
@@ -141,6 +155,27 @@ export function renderDashboardHtml() {
     <div class="tile"><h2>Expired</h2><p id="queue-expired">0</p></div>
     <div class="tile"><h2>Failed</h2><p id="queue-failed">0</p></div>
   </div>
+  <section class="reporting-panel" aria-labelledby="bot-reporting-heading">
+    <h3 id="bot-reporting-heading">Accepted usage and outcomes</h3>
+    <p class="section-note">Accepted commands are counted at queue acceptance; outcomes are counted when delivery completes.</p>
+    <div id="bot-reporting-tiles" class="tile-grid">
+      <div class="tile"><h4>Accepted</h4><p id="bot-accepted">Unavailable</p></div>
+      <div class="tile"><h4>Distinct sender names</h4><p id="bot-distinct-senders">Unavailable</p></div>
+      <div class="tile"><h4>Sent</h4><p id="bot-outcome-sent">Unavailable</p></div>
+      <div class="tile"><h4>Failed</h4><p id="bot-outcome-failed">Unavailable</p></div>
+      <div class="tile"><h4>Expired</h4><p id="bot-outcome-expired">Unavailable</p></div>
+      <div class="tile"><h4>Cancelled</h4><p id="bot-outcome-cancelled">Unavailable</p></div>
+    </div>
+    <p class="data-status" id="bot-reporting-status">Loading bot reporting…</p>
+    <div class="split-layout">
+      <div class="table-scroll" role="region" aria-label="Accepted bot usage groups" tabindex="0">
+        <table id="bot-usage-table"><thead><tr><th>Bot</th><th>Command</th><th>Sender</th><th>Accepted</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="table-scroll" role="region" aria-label="Bot outcome groups" tabindex="0">
+        <table id="bot-outcomes-table"><thead><tr><th>Bot</th><th>Command</th><th>Outcome</th><th>Count</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </section>
   <p id="bots-empty-state" class="empty-state" hidden>No channel bots are configured.</p>
   <div id="bot-commands-container"></div>
 </section>
@@ -152,6 +187,27 @@ export function renderDashboardHtml() {
     <div class="tile"><h2>Added</h2><p id="nodes-added">0</p></div>
     <div class="tile"><h2>Updated</h2><p id="nodes-updated">0</p></div>
   </div>
+  <section class="reporting-panel" aria-labelledby="repeater-reporting-heading">
+    <h3 id="repeater-reporting-heading">Repeater evidence</h3>
+    <p class="section-note">Advert events, topology paths, and telemetry history are retained-range evidence; the inventory below is current state.</p>
+    <div id="repeater-reporting-tiles" class="tile-grid">
+      <div class="tile"><h4>Advert events</h4><p id="repeater-advert-events">Unavailable</p></div>
+      <div class="tile"><h4>Advert nodes</h4><p id="repeater-advert-nodes">Unavailable</p></div>
+      <div class="tile"><h4>Topology paths</h4><p id="repeater-topology-paths">Unavailable</p></div>
+      <div class="tile"><h4>Coverage samples</h4><p id="repeater-topology-coverage">Unavailable</p></div>
+      <div class="tile"><h4>Telemetry observations</h4><p id="repeater-telemetry-observations">Unavailable</p></div>
+      <div class="tile"><h4>Telemetry outcomes</h4><p id="repeater-telemetry-outcomes">Unavailable</p></div>
+      <div class="tile"><h4>Latest observation</h4><p id="repeater-telemetry-latest">Unavailable</p></div>
+      <div class="tile"><h4>Latest outcome</h4><p id="repeater-telemetry-latest-outcome">Unavailable</p></div>
+    </div>
+    <p class="data-status" id="repeater-reporting-status">Loading repeater evidence…</p>
+    <div class="table-scroll" role="region" aria-label="Advert totals by type" tabindex="0">
+      <table id="repeater-adverts-table"><thead><tr><th>Type</th><th>Events</th><th>New</th><th>Rehearsals</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="table-scroll" role="region" aria-label="Bounded topology paths" tabindex="0">
+      <table id="repeater-topology-table"><thead><tr><th>Path</th><th>Kind</th><th>Receptions</th><th>Last received</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
   <div class="search-bar">
     <input type="search" id="nodes-search" placeholder="Search by name or public key prefix…" aria-label="Search repeaters">
   </div>

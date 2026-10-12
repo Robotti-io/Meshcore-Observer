@@ -679,7 +679,9 @@ test('GET / returns the dashboard HTML page, referencing its stylesheet and brow
     // A representative sample of the element ids the browser script binds
     // to, so a rename of one in the template without updating the other
     // fails a test instead of only failing silently in a browser.
-    for (const id of ['packets-decoded', 'chart-wrap', 'range-presets', 'queue-size', 'queue-sent', 'bot-commands-container']) {
+    for (const id of ['packets-decoded', 'chart-wrap', 'range-presets', 'queue-size', 'queue-sent', 'bot-commands-container',
+      'overview-reporting-tiles', 'runtime-events-table', 'bot-accepted', 'bot-usage-table', 'repeater-advert-events',
+      'repeater-telemetry-latest', 'repeater-adverts-table', 'repeater-topology-table']) {
       assert.match(body, new RegExp(`id="${id}"`), `expected an element with id="${id}"`);
     }
   });

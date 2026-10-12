@@ -24,7 +24,14 @@ import {
   createSectionState,
   beginSectionRequest,
   completeSectionRequest,
-  failSectionRequest
+  failSectionRequest,
+  formatReportingValue,
+  summarizeBotReporting,
+  summarizeAdvertReporting,
+  summarizeProcessReporting,
+  summarizeRuntimeReporting,
+  summarizeTelemetryReporting,
+  summarizeTopologyReporting
 } from './dashboard-logic.js';
 
 // The dashboard's "Repeaters" section is deliberately scoped to REPEATER
@@ -81,6 +88,8 @@ let lastLiveSuccessAt = null;
 let lastLiveAnnouncementState = null;
 let uptimeHasRendered = false;
 const rangeSectionStateByView = new Map();
+const reportingSectionStateByKey = new Map();
+const reportingDataByKey = new Map();
 let lastNodesSuccessAt = null;
 // Per-bot operational status (enabled/ready) - live, not range-aware, so
 // it's kept separately from the range-queried command data and folded
@@ -361,6 +370,156 @@ function renderBrokerDeliveries(brokerDeliveriesResponse) {
 function renderNodeTotals(nodeTotalsResponse) {
   document.getElementById('nodes-added').textContent = nodeTotalsResponse.totals.added;
   document.getElementById('nodes-updated').textContent = nodeTotalsResponse.totals.updated;
+}
+
+function reportingState(key) {
+  let state = reportingSectionStateByKey.get(key);
+  if (!state) {
+    state = createSectionState();
+    reportingSectionStateByKey.set(key, state);
+  }
+  return state;
+}
+
+function setReportingStatus(elementId, state, message) {
+  const element = document.getElementById(elementId);
+  if (!element) return;
+  element.className = 'data-status ' + state;
+  element.textContent = message;
+}
+
+function renderBoundedRows(tableId, rows, columns, emptyText) {
+  const body = document.querySelector('#' + tableId + ' tbody');
+  body.innerHTML = '';
+  if (rows.length === 0) {
+    const row = body.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = columns.length;
+    cell.textContent = emptyText;
+    return;
+  }
+  for (const source of rows) {
+    const row = body.insertRow();
+    for (const column of columns) row.insertCell().textContent = column(source);
+  }
+}
+
+function renderBotReporting(usageResponse, outcomeResponse) {
+  const summary = summarizeBotReporting(usageResponse, outcomeResponse);
+  for (const [id, value] of [
+    ['bot-accepted', summary.accepted],
+    ['bot-distinct-senders', summary.distinctSenderNames],
+    ['bot-outcome-sent', summary.outcomes.sent],
+    ['bot-outcome-failed', summary.outcomes.failed],
+    ['bot-outcome-expired', summary.outcomes.expired],
+    ['bot-outcome-cancelled', summary.outcomes.cancelled]
+  ]) document.getElementById(id).textContent = formatReportingValue(value);
+  renderBoundedRows('bot-usage-table', summary.usageGroups.slice(0, 25), [
+    (row) => row.botName ?? 'Unknown',
+    (row) => row.trigger ?? 'Unknown',
+    (row) => row.sender ?? 'Unknown',
+    (row) => row.count
+  ], 'No accepted bot usage in this range.');
+  renderBoundedRows('bot-outcomes-table', summary.outcomeGroups.slice(0, 25), [
+    (row) => row.botName ?? 'Unknown',
+    (row) => row.trigger ?? 'Unknown',
+    (row) => row.outcome ?? 'Unknown',
+    (row) => row.count
+  ], 'No completed bot outcomes in this range.');
+}
+
+function renderOperationalReporting(historyResponse, samplesResponse, runtimeResponse, observationsResponse, outcomesResponse) {
+  const process = summarizeProcessReporting(historyResponse, samplesResponse);
+  const runtime = summarizeRuntimeReporting(runtimeResponse);
+  const telemetry = summarizeTelemetryReporting(observationsResponse, outcomesResponse);
+  for (const [id, value] of [
+    ['reporting-process-samples', process.samples],
+    ['reporting-runtime-events', runtime.events],
+    ['reporting-telemetry-observations', telemetry.observations],
+    ['reporting-telemetry-outcomes', telemetry.outcomes]
+  ]) document.getElementById(id).textContent = formatReportingValue(value);
+  renderBoundedRows('runtime-events-table', runtime.rows.slice(0, 25), [
+    (row) => formatTimestamp(row.observedAt),
+    (row) => row.kind ?? 'Unknown',
+    (row) => row.serviceId ?? 'Unknown',
+    (row) => row.state ?? 'Unknown'
+  ], 'No runtime events in this range.');
+}
+
+function renderRepeaterReporting(advertResponse, topologyResponse, coverageResponse, observationsResponse, outcomesResponse) {
+  const adverts = summarizeAdvertReporting(advertResponse);
+  const topology = summarizeTopologyReporting(topologyResponse, coverageResponse);
+  const telemetry = summarizeTelemetryReporting(observationsResponse, outcomesResponse);
+  for (const [id, value] of [
+    ['repeater-advert-events', adverts.events],
+    ['repeater-advert-nodes', adverts.distinctNodes],
+    ['repeater-topology-paths', topology.paths],
+    ['repeater-topology-coverage', topology.coverageSamples],
+    ['repeater-telemetry-observations', telemetry.observations],
+    ['repeater-telemetry-outcomes', telemetry.outcomes],
+    ['repeater-telemetry-latest', telemetry.latestObservation ? formatTimestamp(telemetry.latestObservation.observedAt) : null],
+    ['repeater-telemetry-latest-outcome', telemetry.latestOutcome?.status ?? null]
+  ]) document.getElementById(id).textContent = formatReportingValue(value);
+  renderBoundedRows('repeater-adverts-table', adverts.byType, [
+    (row) => row.type,
+    (row) => row.events,
+    (row) => row.newDiscoveries,
+    (row) => row.rehears
+  ], 'No advert events in this range.');
+  renderBoundedRows('repeater-topology-table', topology.rows.slice(0, 25), [
+    (row) => row.pathHex ?? ('#' + row.pathId),
+    (row) => row.kind ?? 'Unknown',
+    (row) => row.receptionCount,
+    (row) => formatTimestamp(row.lastReceivedAt)
+  ], 'No retained topology paths.');
+}
+
+function reportingRequestDefinitions(view, params) {
+  const range = buildQueryString(params);
+  if (view === 'overview') {
+    return [
+      { key: 'overview-process-history', path: '/api/metrics/process/history?' + range },
+      { key: 'overview-process-samples', path: '/api/metrics/process/samples?' + range },
+      { key: 'overview-runtime-events', path: '/api/metrics/runtime-events?' + range },
+      { key: 'overview-telemetry-observations', path: '/api/metrics/telemetry/observations?' + range + '&limit=25' },
+      { key: 'overview-telemetry-outcomes', path: '/api/metrics/telemetry/outcomes?' + range + '&limit=25' }
+    ];
+  }
+  if (view === 'bots') {
+    return [
+      { key: 'bots-usage', path: '/api/metrics/bots/usage?' + range + '&limit=25' },
+      { key: 'bots-outcomes', path: '/api/metrics/bots/outcomes?' + range + '&limit=25' }
+    ];
+  }
+  if (view === 'repeaters') {
+    return [
+      { key: 'repeaters-adverts', path: '/api/metrics/adverts?' + range + '&limit=25' },
+      { key: 'repeaters-topology-paths', path: '/api/metrics/topology/paths?limit=25' },
+      { key: 'repeaters-topology-coverage', path: '/api/metrics/topology/coverage?' + range + '&limit=25' },
+      { key: 'repeaters-telemetry-observations', path: '/api/metrics/telemetry/observations?' + range + '&limit=25' },
+      { key: 'repeaters-telemetry-outcomes', path: '/api/metrics/telemetry/outcomes?' + range + '&limit=25' }
+    ];
+  }
+  return [];
+}
+
+async function fetchJson(path, signal) {
+  const response = await fetch(path, { signal });
+  if (!response.ok) throw new Error(path + ' failed (' + response.status + ')');
+  return response.json();
+}
+
+function renderReportingSection(view, results) {
+  for (const [key, data] of results) reportingDataByKey.set(key, data);
+  if (view === 'overview') {
+    renderOperationalReporting(reportingDataByKey.get('overview-process-history'), reportingDataByKey.get('overview-process-samples'),
+      reportingDataByKey.get('overview-runtime-events'), reportingDataByKey.get('overview-telemetry-observations'), reportingDataByKey.get('overview-telemetry-outcomes'));
+  } else if (view === 'bots') {
+    renderBotReporting(reportingDataByKey.get('bots-usage'), reportingDataByKey.get('bots-outcomes'));
+  } else if (view === 'repeaters') {
+    renderRepeaterReporting(reportingDataByKey.get('repeaters-adverts'), reportingDataByKey.get('repeaters-topology-paths'),
+      reportingDataByKey.get('repeaters-topology-coverage'), reportingDataByKey.get('repeaters-telemetry-observations'), reportingDataByKey.get('repeaters-telemetry-outcomes'));
+  }
 }
 
 function renderMetricTrend(elementId, delta) {
@@ -808,17 +967,46 @@ function refreshRangeData({ supersede = false } = {}) {
     try {
       setRangeLoadingStatus(view, viewLabel, lastSuccessAt);
       const qs = buildQueryString({ ...params, view });
-      const response = await fetch('/api/metrics/dashboard?' + qs, { signal: controller.signal });
-      if (!response.ok) {
-        throw new Error('dashboard ' + view + ' query failed (' + response.status + ')');
+      const definitions = reportingRequestDefinitions(view, params);
+      for (const definition of definitions) {
+        const key = definition.key;
+        reportingSectionStateByKey.set(key, beginSectionRequest(reportingState(key), generation));
       }
-      const result = await response.json();
+      const dashboardResult = fetchJson('/api/metrics/dashboard?' + qs, controller.signal);
+      const focusedResults = await Promise.allSettled(definitions.map(async (definition) => ({
+        definition,
+        data: await fetchJson(definition.path, controller.signal)
+      })));
+      const result = await dashboardResult;
       if (result.view !== view || !result.data) {
         throw new Error('dashboard response did not match requested view');
       }
       if (controller.signal.aborted || !rangeRefreshGeneration.isCurrent(generation)) return;
 
       renderDashboardView(view, result.data);
+      const focusedData = new Map();
+      let focusedFailures = 0;
+      for (const settled of focusedResults) {
+        if (settled.status === 'fulfilled') {
+          focusedData.set(settled.value.definition.key, settled.value.data);
+          const key = settled.value.definition.key;
+          const previous = reportingState(key);
+          reportingSectionStateByKey.set(key, completeSectionRequest(previous, generation, settled.value.data, Date.now()));
+        } else if (!controller.signal.aborted) {
+          focusedFailures += 1;
+          const failedDefinition = definitions[focusedResults.indexOf(settled)];
+          if (failedDefinition) {
+            const key = failedDefinition.key;
+            reportingSectionStateByKey.set(key, failSectionRequest(reportingState(key), generation, settled.reason));
+          }
+        }
+      }
+      if (focusedData.size > 0) renderReportingSection(view, focusedData);
+      if (definitions.length > 0) {
+        const statusId = view === 'overview' ? 'overview-reporting-status' : view === 'bots' ? 'bot-reporting-status' : 'repeater-reporting-status';
+        setReportingStatus(statusId, focusedFailures === 0 ? 'ready' : 'error',
+          focusedFailures === 0 ? 'Updated with retained-range evidence.' : 'Some retained-range reports are unavailable; successful sections remain visible.');
+      }
       const updatedAt = Date.now();
       rangeSectionStateByView.set(
         view,

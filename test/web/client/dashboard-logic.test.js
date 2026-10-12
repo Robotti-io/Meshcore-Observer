@@ -19,7 +19,13 @@ import {
   completeSectionRequest,
   failSectionRequest,
   formatReportingScope,
-  formatReportingValue
+  formatReportingValue,
+  summarizeBotReporting,
+  summarizeAdvertReporting,
+  summarizeProcessReporting,
+  summarizeRuntimeReporting,
+  summarizeTelemetryReporting,
+  summarizeTopologyReporting
 } from '../../../src/web/client/dashboard-logic.js';
 
 test('formatDuration renders only as many leading units as needed', () => {
@@ -109,6 +115,30 @@ test('formatReportingValue does not turn missing evidence into zero', () => {
   assert.equal(formatReportingValue(undefined, 'No retained sample'), 'No retained sample');
   assert.equal(formatReportingValue(1234567), '1,234,567');
   assert.equal(formatReportingValue('ready'), 'ready');
+});
+
+test('focused reporting summaries preserve accepted usage, completion outcomes, and bounded groups', () => {
+  const summary = summarizeBotReporting({ totals: { accepted: 4, distinctSenderNames: 2 }, groups: { groups: [{ botName: 'echo', count: 4 }] } },
+    { totals: { sent: 3, failed: 1, expired: 0, cancelled: 0 }, groups: { groups: [{ outcome: 'sent', count: 3 }] } });
+  assert.deepEqual(summary.outcomes, { sent: 3, failed: 1, expired: 0, cancelled: 0 });
+  assert.equal(summary.accepted, 4);
+  assert.deepEqual(summary.usageGroups, [{ botName: 'echo', count: 4 }]);
+  assert.deepEqual(summarizeBotReporting().outcomes, { sent: null, failed: null, expired: null, cancelled: null });
+});
+
+test('focused reporting summaries keep advert, process, runtime, telemetry, and topology empty states explicit', () => {
+  assert.deepEqual(summarizeAdvertReporting(), { events: null, distinctNodes: null, newDiscoveries: null, rehears: null, byType: [], nodes: [] });
+  assert.deepEqual(summarizeProcessReporting({ buckets: [{ sampleCount: 2, failedEvents: 1 }] }, { total: 2 }), {
+    buckets: [{ sampleCount: 2, failedEvents: 1 }], latest: { sampleCount: 2, failedEvents: 1 }, samples: 2,
+    suppressedEvents: null, failedEvents: 1
+  });
+  assert.deepEqual(summarizeRuntimeReporting({ total: 1, events: [{ kind: 'radio.connected' }] }), { events: 1, rows: [{ kind: 'radio.connected' }] });
+  assert.deepEqual(summarizeTelemetryReporting({ total: 1, observations: [{ observationId: 2 }] }, { total: 1, outcomes: [{ status: 'answered' }] }), {
+    observations: 1, outcomes: 1, latestObservation: { observationId: 2 }, latestOutcome: { status: 'answered' }
+  });
+  assert.deepEqual(summarizeTopologyReporting({ total: 2, paths: [{ pathId: 1 }] }, { total: 3 }), {
+    paths: 2, rows: [{ pathId: 1 }], coverageSamples: 3
+  });
 });
 
 test('resolveRangeQuery returns {range} for a preset, and null for an unapplied custom range', () => {

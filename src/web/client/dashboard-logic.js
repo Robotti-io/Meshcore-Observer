@@ -130,6 +130,77 @@ export function formatReportingValue(value, unavailable = 'Unavailable') {
 }
 
 /**
+ * Normalizes the focused bot reporting responses into the small shape the
+ * browser needs for tiles and bounded tables. Missing response sections stay
+ * empty so an unavailable report cannot be mistaken for zero activity.
+ */
+export function summarizeBotReporting(usage = {}, outcomes = {}) {
+  const usageTotals = usage.totals ?? {};
+  const outcomeTotals = outcomes.totals ?? {};
+  return {
+    accepted: usageTotals.accepted ?? null,
+    distinctSenderNames: usageTotals.distinctSenderNames ?? null,
+    outcomes: {
+      sent: outcomeTotals.sent ?? null,
+      failed: outcomeTotals.failed ?? null,
+      expired: outcomeTotals.expired ?? null,
+      cancelled: outcomeTotals.cancelled ?? null
+    },
+    usageGroups: usage.groups?.groups ?? [],
+    outcomeGroups: outcomes.groups?.groups ?? []
+  };
+}
+
+/** @returns {{events: number|null, distinctNodes: number|null, newDiscoveries: number|null, rehears: number|null, byType: object[], nodes: object[]}} */
+export function summarizeAdvertReporting(response = {}) {
+  return {
+    events: response.totals?.events ?? null,
+    distinctNodes: response.totals?.distinctNodes ?? null,
+    newDiscoveries: response.totals?.newDiscoveries ?? null,
+    rehears: response.totals?.rehears ?? null,
+    byType: Array.isArray(response.byType) ? response.byType : [],
+    nodes: response.nodes?.nodes ?? []
+  };
+}
+
+/** @returns {{buckets: object[], latest: object|null, samples: number|null, suppressedEvents: number|null, failedEvents: number|null}} */
+export function summarizeProcessReporting(history = {}, samples = {}) {
+  const buckets = Array.isArray(history.buckets) ? history.buckets : [];
+  const latest = buckets.length > 0 ? buckets[buckets.length - 1] : null;
+  return {
+    buckets,
+    latest,
+    samples: samples.total ?? null,
+    suppressedEvents: latest?.suppressedEvents ?? null,
+    failedEvents: latest?.failedEvents ?? null
+  };
+}
+
+/** @returns {{events: number|null, rows: object[]}} */
+export function summarizeRuntimeReporting(response = {}) {
+  return { events: response.total ?? null, rows: Array.isArray(response.events) ? response.events : [] };
+}
+
+/** @returns {{observations: number|null, outcomes: number|null, latestObservation: object|null, latestOutcome: object|null}} */
+export function summarizeTelemetryReporting(observations = {}, outcomes = {}) {
+  return {
+    observations: observations.total ?? null,
+    outcomes: outcomes.total ?? null,
+    latestObservation: observations.observations?.[0] ?? null,
+    latestOutcome: outcomes.outcomes?.[0] ?? null
+  };
+}
+
+/** @returns {{paths: number|null, rows: object[], coverageSamples: number|null}} */
+export function summarizeTopologyReporting(paths = {}, coverage = {}) {
+  return {
+    paths: paths.total ?? null,
+    rows: Array.isArray(paths.paths) ? paths.paths : [],
+    coverageSamples: coverage.total ?? null
+  };
+}
+
+/**
  * Resolves the range selector's current UI state into the query object
  * GET /api/metrics/history and friends expect - null if a custom range is
  * selected but hasn't been applied yet (both bounds still unset), so the
