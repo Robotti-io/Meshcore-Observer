@@ -19,7 +19,12 @@ import {
   chartNoteForBuckets,
   buildPacketTypeTotals,
   formatNodePageRange,
-  categoryColor
+  categoryColor,
+  createRequestGeneration,
+  createSectionState,
+  beginSectionRequest,
+  completeSectionRequest,
+  failSectionRequest
 } from './dashboard-logic.js';
 
 // The dashboard's "Repeaters" section is deliberately scoped to REPEATER
@@ -71,11 +76,11 @@ let customEndMs = null;
 let activeRangeRefresh = null;
 let activeRangeController = null;
 let rangeRefreshQueued = false;
-let rangeRefreshGeneration = 0;
+const rangeRefreshGeneration = createRequestGeneration();
 let lastLiveSuccessAt = null;
 let lastLiveAnnouncementState = null;
 let uptimeHasRendered = false;
-const lastRangeSuccessByView = new Map();
+const rangeSectionStateByView = new Map();
 let lastNodesSuccessAt = null;
 // Per-bot operational status (enabled/ready) - live, not range-aware, so
 // it's kept separately from the range-queried command data and folded
@@ -502,6 +507,15 @@ function setRangeLoadingStatus(view, viewLabel, lastSuccessAt) {
   }
 }
 
+function rangeSectionState(view) {
+  let state = rangeSectionStateByView.get(view);
+  if (!state) {
+    state = createSectionState();
+    rangeSectionStateByView.set(view, state);
+  }
+  return state;
+}
+
 // Truncated to a readable prefix for the table cell; the full key is still
 // available via the cell's title attribute (hover/long-press) and is what
 // the search box itself matches against in full - see queryNodes() in
@@ -772,7 +786,8 @@ function refreshRangeData({ supersede = false } = {}) {
   if (!params) return; // custom range selected but not yet applied
   const view = currentView;
   const viewLabel = VIEW_LABELS[view];
-  const lastSuccessAt = lastRangeSuccessByView.get(view) ?? null;
+  const previousState = rangeSectionState(view);
+  const lastSuccessAt = previousState.lastSuccessAt;
 
   if (activeRangeRefresh) {
     if (!supersede) {
@@ -784,9 +799,10 @@ function refreshRangeData({ supersede = false } = {}) {
     activeRangeController?.abort();
   }
 
-  const generation = ++rangeRefreshGeneration;
+  const generation = rangeRefreshGeneration.begin();
   const controller = new AbortController();
   activeRangeController = controller;
+  rangeSectionStateByView.set(view, beginSectionRequest(previousState, generation));
 
   const request = (async () => {
     try {
@@ -800,14 +816,18 @@ function refreshRangeData({ supersede = false } = {}) {
       if (result.view !== view || !result.data) {
         throw new Error('dashboard response did not match requested view');
       }
-      if (controller.signal.aborted || generation !== rangeRefreshGeneration) return;
+      if (controller.signal.aborted || !rangeRefreshGeneration.isCurrent(generation)) return;
 
       renderDashboardView(view, result.data);
       const updatedAt = Date.now();
-      lastRangeSuccessByView.set(view, updatedAt);
+      rangeSectionStateByView.set(
+        view,
+        completeSectionRequest(rangeSectionState(view), generation, result.data, updatedAt)
+      );
       renderUpdatedRangeStatus(view, viewLabel, updatedAt);
     } catch (err) {
       if (!controller.signal.aborted) {
+        rangeSectionStateByView.set(view, failSectionRequest(rangeSectionState(view), generation, err));
         console.error('failed to refresh range-aware metrics', err);
         setDataStatus(
           'range-data-status',

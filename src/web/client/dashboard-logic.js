@@ -59,6 +59,77 @@ export function buildQueryString(params) {
 }
 
 /**
+ * Creates a small latest-request gate for independent dashboard sections.
+ * Each new request invalidates older generations; callers can therefore keep
+ * their own AbortController while using the same stale-response rule for
+ * range views and future focused reporting sections.
+ */
+export function createRequestGeneration() {
+  let current = 0;
+  return {
+    begin() {
+      current += 1;
+      return current;
+    },
+    isCurrent(generation) {
+      return generation === current;
+    },
+    invalidate() {
+      current += 1;
+      return current;
+    }
+  };
+}
+
+/** @returns {{status: string, requestId: number|null, lastSuccessAt: number|null, error: string|null, data: unknown}} */
+export function createSectionState() {
+  return { status: 'idle', requestId: null, lastSuccessAt: null, error: null, data: null };
+}
+
+export function beginSectionRequest(state, requestId) {
+  return { ...state, status: 'loading', requestId, error: null };
+}
+
+export function completeSectionRequest(state, requestId, data, timestamp) {
+  if (state.requestId !== requestId) return state;
+  return { ...state, status: 'ready', lastSuccessAt: timestamp, error: null, data };
+}
+
+export function failSectionRequest(state, requestId, error) {
+  if (state.requestId !== requestId) return state;
+  return { ...state, status: 'error', error: String(error), data: state.data };
+}
+
+/**
+ * Turns retained-range metadata into a short, operator-facing scope label.
+ * The helper accepts the deliberately varied response shapes used by the
+ * focused reporting routes and never invents completeness when metadata is
+ * absent.
+ */
+export function formatReportingScope({ countScope = null, coverage = null, freshness = null } = {}) {
+  const parts = [];
+  if (typeof countScope === 'string' && countScope.length > 0) {
+    parts.push(countScope.replaceAll('-', ' '));
+  }
+  const lowerBound = coverage?.isLowerBound === true || coverage?.lowerBound === true;
+  if (lowerBound) parts.push('lower bound');
+  const stale = freshness?.stale === true || freshness?.state === 'stale';
+  if (stale) parts.push('stale');
+  return parts.length > 0 ? parts.join(' · ') : 'Scope unavailable';
+}
+
+/**
+ * Formats a nullable dashboard value without turning missing evidence into a
+ * numeric zero. Numbers retain locale-aware grouping; callers can supply a
+ * different unavailable label for a field with a more specific explanation.
+ */
+export function formatReportingValue(value, unavailable = 'Unavailable') {
+  if (value === null || value === undefined) return unavailable;
+  if (typeof value === 'number' && Number.isFinite(value)) return value.toLocaleString();
+  return String(value);
+}
+
+/**
  * Resolves the range selector's current UI state into the query object
  * GET /api/metrics/history and friends expect - null if a custom range is
  * selected but hasn't been applied yet (both bounds still unset), so the

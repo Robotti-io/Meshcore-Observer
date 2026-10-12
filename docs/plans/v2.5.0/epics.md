@@ -1,6 +1,6 @@
 # v2.5.0 epic register
 
-Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; Pillar 1 backend implementation is underway, with #35's focused reporting API slice implemented locally and #36/#37 remaining.
+Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 dashboard integration is in progress, and #37 remains.
 
 **Issue labels:** [v2.5.0 conventions and verified mapping](issue-label-guide.md) for all four epics and 62 children.
 

@@ -12,7 +12,14 @@ import {
   chartNoteForBuckets,
   buildPacketTypeTotals,
   formatNodePageRange,
-  categoryColor
+  categoryColor,
+  createRequestGeneration,
+  createSectionState,
+  beginSectionRequest,
+  completeSectionRequest,
+  failSectionRequest,
+  formatReportingScope,
+  formatReportingValue
 } from '../../../src/web/client/dashboard-logic.js';
 
 test('formatDuration renders only as many leading units as needed', () => {
@@ -58,6 +65,50 @@ test('buildQueryString serializes params as a URL query string', () => {
   assert.equal(buildQueryString({ range: '24h' }), 'range=24h');
   const qs = buildQueryString({ start: 1000, end: 2000 });
   assert.equal(qs, 'start=1000&end=2000');
+});
+
+test('createRequestGeneration invalidates older section requests', () => {
+  const gate = createRequestGeneration();
+  const first = gate.begin();
+  assert.equal(gate.isCurrent(first), true);
+  const second = gate.begin();
+  assert.equal(gate.isCurrent(first), false);
+  assert.equal(gate.isCurrent(second), true);
+  gate.invalidate();
+  assert.equal(gate.isCurrent(second), false);
+});
+
+test('section state preserves the last good response across a failed refresh', () => {
+  const initial = createSectionState();
+  const loading = beginSectionRequest(initial, 1);
+  const ready = completeSectionRequest(loading, 1, { value: 4 }, 1000);
+  const failed = failSectionRequest(beginSectionRequest(ready, 2), 2, new Error('temporary failure'));
+  assert.equal(failed.status, 'error');
+  assert.equal(failed.error, 'Error: temporary failure');
+  assert.deepEqual(failed.data, { value: 4 });
+  assert.equal(failed.lastSuccessAt, 1000);
+});
+
+test('section state ignores late completion from a superseded request', () => {
+  const loading = beginSectionRequest(beginSectionRequest(createSectionState(), 1), 2);
+  const late = completeSectionRequest(loading, 1, { value: 'old' }, 1000);
+  assert.deepEqual(late, loading);
+});
+
+test('formatReportingScope preserves retained, lower-bound, and stale meaning', () => {
+  assert.equal(formatReportingScope({ countScope: 'retained-range' }), 'retained range');
+  assert.equal(
+    formatReportingScope({ countScope: 'retained-range', coverage: { isLowerBound: true }, freshness: { stale: true } }),
+    'retained range · lower bound · stale'
+  );
+  assert.equal(formatReportingScope(), 'Scope unavailable');
+});
+
+test('formatReportingValue does not turn missing evidence into zero', () => {
+  assert.equal(formatReportingValue(null), 'Unavailable');
+  assert.equal(formatReportingValue(undefined, 'No retained sample'), 'No retained sample');
+  assert.equal(formatReportingValue(1234567), '1,234,567');
+  assert.equal(formatReportingValue('ready'), 'ready');
 });
 
 test('resolveRangeQuery returns {range} for a preset, and null for an unapplied custom range', () => {
