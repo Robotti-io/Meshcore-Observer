@@ -19,6 +19,11 @@ test('resolves "all" to [earliestSampleAt, now]', () => {
   assert.deepEqual(window, { start: 1000, end: NOW });
 });
 
+test('resolves "all" from a dataset-specific retained origin when supplied', () => {
+  const window = resolveRangeWindow({ range: 'all', now: NOW, earliestSampleAt: 1000, earliestRetainedAt: 2000 });
+  assert.deepEqual(window, { start: 2000, end: NOW });
+});
+
 test('resolves "all" to [now, now] when no samples exist yet', () => {
   const window = resolveRangeWindow({ range: 'all', now: NOW, earliestSampleAt: null });
   assert.deepEqual(window, { start: NOW, end: NOW });

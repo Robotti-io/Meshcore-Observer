@@ -337,8 +337,9 @@ Offline collection needs the local Companion, a writable owned SQLite database,
 fresh passive evidence, usable pre-existing contact routes, and explicitly
 supplied guest policy/secret files. It needs no internet, MQTT broker or enabled
 dashboard. Local packet capture, verified inventory, topology and bot replies
-remain independent consumers. Dashboard/API presentation is owned by #35/#36;
-absence of a public telemetry view does not mean collection stopped.
+remain independent consumers. The focused reporting API slice is implemented
+in #35 and dashboard presentation remains #36; absence of a public telemetry
+view does not mean collection stopped.
 
 Before deliberate activation, establish the target firmware's modern guest role
 proof, confirm the chosen guest password differs from management, and verify

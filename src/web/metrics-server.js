@@ -11,13 +11,29 @@ import {
   validateNodeTotalsQuery,
   validateDashboardQuery,
   parseNodesListQuery,
-  validateNodesListQuery
+  validateNodesListQuery,
+  validateBotUsageQuery,
+  validateBotOutcomeQuery,
+  validateAdvertReportQuery,
+  validateProcessHistoryQuery,
+  validateProcessSamplesQuery,
+  validateRuntimeEventsQuery,
+  validateTelemetryObservationsQuery,
+  validateTelemetryOutcomesQuery,
+  validateTopologyPathsQuery,
+  validateTopologyPathQuery,
+  validateTopologyDetailsQuery,
+  validateTopologyProximityQuery
 } from './schemas.js';
+import { compileSchema } from '../validation/ajv.js';
+import { telemetryLatestQuerySchema } from '../telemetry/telemetry-schemas.js';
 import { resolveRangeWindow, RangeError as RangeResolutionError } from './metrics-range.js';
 import { bucketBotCommandCounts } from './bot-command-buckets.js';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const DEFAULT_NODES_LIMIT = 50;
+const DEFAULT_REPORTING_LIMIT = 100;
+const validateTelemetryLatestQuery = compileSchema(telemetryLatestQuerySchema);
 
 const WEB_DIR = dirname(fileURLToPath(import.meta.url));
 const TEXT_JS = 'text/javascript; charset=utf-8';
@@ -32,6 +48,29 @@ function packetTypeTotalsFromHistory(buckets) {
   return [...counts.entries()]
     .map(([packetTypeBucket, total]) => ({ packetTypeBucket, total }))
     .sort((a, b) => b.total - a.total);
+}
+
+function redactSenderIdentifier(row) {
+  if (!row?.senderIdentifier) return row;
+  return {
+    ...row,
+    senderIdentifier: row.senderIdentifier.length > 12
+      ? `${row.senderIdentifier.slice(0, 12)}…`
+      : row.senderIdentifier
+  };
+}
+
+function parseJsonQueryValue(value, name) {
+  if (typeof value !== 'string') return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error(`invalid ${name}`);
+  }
+}
+
+function definedProperties(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
 }
 
 /**
@@ -293,6 +332,81 @@ export class MetricsServer {
       return;
     }
 
+    if (pathname === '/api/metrics/bots/usage') {
+      this.#handleBotUsage(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/bots/outcomes') {
+      this.#handleBotOutcomes(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/adverts') {
+      this.#handleAdverts(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/process/history') {
+      this.#handleProcessHistory(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/process/samples') {
+      this.#handleProcessSamples(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/runtime-events') {
+      this.#handleRuntimeEvents(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/telemetry/observations') {
+      this.#handleTelemetryObservations(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/telemetry/outcomes') {
+      this.#handleTelemetryOutcomes(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/telemetry/latest') {
+      this.#handleTelemetryLatest(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/paths') {
+      this.#handleTopologyPaths(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/path') {
+      this.#handleTopologyPath(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/observations') {
+      this.#handleTopologyDetails(res, searchParams, 'observations');
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/counts') {
+      this.#handleTopologyDetails(res, searchParams, 'counts');
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/coverage') {
+      this.#handleTopologyDetails(res, searchParams, 'coverage');
+      return;
+    }
+
+    if (pathname === '/api/metrics/topology/proximity') {
+      this.#handleTopologyProximity(res, searchParams);
+      return;
+    }
+
     if (pathname === '/api/metrics/brokers') {
       this.#handleBrokerDeliveries(res, searchParams);
       return;
@@ -323,7 +437,7 @@ export class MetricsServer {
    * already sent a 400 response) when the query is invalid, so callers can
    * just check for that and return.
    */
-  #resolveWindowOrRespondError(res, searchParams, validate) {
+  #resolveWindowOrRespondError(res, searchParams, validate, dataset = null) {
     const query = parseRangeQuery(searchParams);
     if (!validate(query)) {
       this.#sendJson(res, 400, { error: `invalid query: ${validate.errors.map((e) => e.message).join('; ')}` });
@@ -335,7 +449,10 @@ export class MetricsServer {
         range: query.range,
         start: query.start,
         end: query.end,
-        earliestSampleAt: query.range === 'all' ? this.#metricsStore.getEarliestSampleAt() : null
+        earliestSampleAt: query.range === 'all' && !dataset ? this.#metricsStore.getEarliestSampleAt() : null,
+        earliestRetainedAt: query.range === 'all' && dataset
+          ? this.#metricsStore.getEarliestRetainedAt(dataset)
+          : null
       });
       return { query, window };
     } catch (err) {
@@ -575,6 +692,199 @@ export class MetricsServer {
     });
 
     this.#sendJson(res, 200, { start: window.start, end: window.end, bots });
+  }
+
+  #handleBotUsage(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateBotUsageQuery, 'botsAccepted');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const page = definedProperties({
+      botName: query.botName, channel: query.channel, trigger: query.trigger, sender: query.sender,
+      start: window.start,
+      end: window.end,
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT,
+      offset: query.offset ?? 0
+    });
+    const totals = this.#metricsStore.queryBotUsageTotals(definedProperties({
+      start: window.start, end: window.end, botName: query.botName, channel: query.channel,
+      trigger: query.trigger, sender: query.sender
+    }));
+    const groups = this.#metricsStore.queryBotUsageGroups(page);
+    this.#sendJson(res, 200, {
+      start: window.start,
+      end: window.end,
+      countScope: 'retained-range',
+      acceptanceTimestamp: 'enqueuedAt',
+      totals,
+      groups: { ...groups, groups: groups.groups.map(redactSenderIdentifier) }
+    });
+  }
+
+  #handleBotOutcomes(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateBotOutcomeQuery, 'botsOutcomes');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const page = definedProperties({
+      botName: query.botName, channel: query.channel, trigger: query.trigger, sender: query.sender,
+      start: window.start,
+      end: window.end,
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT,
+      offset: query.offset ?? 0
+    });
+    const groups = this.#metricsStore.queryBotOutcomeGroups(page);
+    this.#sendJson(res, 200, {
+      start: window.start,
+      end: window.end,
+      countScope: 'retained-range',
+      completionTimestamp: 'resolvedAt',
+      totals: this.#metricsStore.queryBotOutcomeTotals(definedProperties({
+        start: window.start, end: window.end, botName: query.botName, channel: query.channel,
+        trigger: query.trigger, sender: query.sender
+      })),
+      groups: { ...groups, groups: groups.groups.map(redactSenderIdentifier) }
+    });
+  }
+
+  #handleAdverts(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateAdvertReportQuery, 'adverts');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const page = definedProperties({ type: query.type, start: window.start, end: window.end,
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0 });
+    const totalsQuery = definedProperties({ type: query.type, start: window.start, end: window.end });
+    this.#sendJson(res, 200, {
+      start: window.start,
+      end: window.end,
+      countScope: 'retained-range',
+      totals: this.#metricsStore.queryAdvertTotals(totalsQuery),
+      byType: this.#metricsStore.queryAdvertTypeTotals(totalsQuery),
+      nodes: this.#metricsStore.queryAdvertNodeCounts(page)
+    });
+  }
+
+  #handleProcessHistory(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateProcessHistoryQuery, 'process');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const history = this.#metricsStore.queryProcessHistory({
+      ...window,
+      ...definedProperties({ runId: query.runId }),
+      maxBuckets: query.maxBuckets ?? this.#maxChartBuckets,
+      sampleIntervalMs: this.#sampleIntervalMs
+    });
+    this.#sendJson(res, 200, { start: window.start, end: window.end, countScope: 'retained-range', buckets: history });
+  }
+
+  #handleProcessSamples(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateProcessSamplesQuery, 'process');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const samples = this.#metricsStore.queryProcessSamples({
+      ...window, ...definedProperties({ runId: query.runId }), limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    });
+    this.#sendJson(res, 200, { start: window.start, end: window.end, countScope: 'retained-range', ...samples });
+  }
+
+  #handleRuntimeEvents(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateRuntimeEventsQuery, 'runtimeEvents');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const events = this.#metricsStore.queryRuntimeEvents({
+      ...window, ...definedProperties({ runId: query.runId, kind: query.kind, serviceId: query.serviceId }),
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    });
+    this.#sendJson(res, 200, { start: window.start, end: window.end, countScope: 'retained-range', ...events });
+  }
+
+  #handleTelemetryObservations(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateTelemetryObservationsQuery, 'telemetryObservations');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    this.#sendJson(res, 200, this.#metricsStore.queryTelemetryObservations({
+      ...window, ...definedProperties({ observerPublicKey: query.observerPublicKey, targetPublicKey: query.targetPublicKey,
+        runId: query.runId, component: query.component }), limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    }));
+  }
+
+  #handleTelemetryOutcomes(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateTelemetryOutcomesQuery, 'telemetryOutcomes');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    this.#sendJson(res, 200, this.#metricsStore.queryTelemetryOutcomes({
+      ...window, ...definedProperties({ observerPublicKey: query.observerPublicKey, targetPublicKey: query.targetPublicKey,
+        runId: query.runId, component: query.component, status: query.status }),
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    }));
+  }
+
+  #handleTelemetryLatest(res, searchParams) {
+    const query = parseRangeQuery(searchParams);
+    if (query.variant !== undefined) {
+      try {
+        query.variant = parseJsonQueryValue(query.variant, 'variant');
+      } catch {
+        this.#sendJson(res, 400, { error: 'invalid query: variant must be valid JSON' });
+        return;
+      }
+    }
+    if (!validateTelemetryLatestQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateTelemetryLatestQuery.errors.map((e) => e.message).join('; ')}` });
+      return;
+    }
+    this.#sendJson(res, 200, this.#metricsStore.getTelemetryLatest(query));
+  }
+
+  #handleTopologyPaths(res, searchParams) {
+    const query = parseRangeQuery(searchParams);
+    if (!validateTopologyPathsQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateTopologyPathsQuery.errors.map((e) => e.message).join('; ')}` });
+      return;
+    }
+    this.#sendJson(res, 200, this.#metricsStore.queryTopologyPaths(definedProperties({
+      observerPublicKey: query.observerPublicKey, kind: query.kind,
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    })));
+  }
+
+  #handleTopologyPath(res, searchParams) {
+    const query = parseRangeQuery(searchParams);
+    if (!validateTopologyPathQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateTopologyPathQuery.errors.map((e) => e.message).join('; ')}` });
+      return;
+    }
+    const path = this.#metricsStore.getTopologyPath({ pathId: query.pathId });
+    if (!path) {
+      this.#sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    this.#sendJson(res, 200, path);
+  }
+
+  #handleTopologyDetails(res, searchParams, kind) {
+    const dataset = kind === 'coverage' ? 'topologyCoverage' : 'topologyObservations';
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateTopologyDetailsQuery, dataset);
+    if (!resolved) return;
+    const { query, window } = resolved;
+    const input = definedProperties({ ...window, pathId: query.pathId, runId: query.runId,
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0 });
+    const result = kind === 'observations'
+      ? this.#metricsStore.queryTopologyObservations(input)
+      : kind === 'counts'
+        ? this.#metricsStore.queryTopologyRouteCounts(input)
+        : this.#metricsStore.queryTopologyCoverage(input);
+    this.#sendJson(res, 200, result);
+  }
+
+  #handleTopologyProximity(res, searchParams) {
+    const query = parseRangeQuery(searchParams);
+    if (!validateTopologyProximityQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateTopologyProximityQuery.errors.map((e) => e.message).join('; ')}` });
+      return;
+    }
+    this.#sendJson(res, 200, this.#metricsStore.queryObservedProximity({
+      observerPublicKey: query.observerPublicKey, now: query.now, windowMs: query.windowMs,
+      radius: query.radius, limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    }));
   }
 
   /**

@@ -2,7 +2,7 @@
 
 Reviewed: 2026-10-07. Status: sequencing recommendation for discussion, not an approved implementation plan. OBS-02 release inclusion was explicitly approved on 2026-10-07.
 
-Tracking update: [all four epics and 62 child issues](epics.md) are captured on GitHub. The issue registers record concrete dependencies; detailed implementation planning remains pending.
+Tracking update: [all four epics and 62 child issues](epics.md) are captured on GitHub. The issue registers record concrete dependencies; implementation planning is complete for the delivered backend wave and #35's focused reporting API slice, while #36 dashboard integration and #37 integrated validation remain.
 
 ## Sources and scope
 

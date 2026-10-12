@@ -572,6 +572,50 @@ test('GET /api/metrics/bots/commands rejects an invalid range query the same way
   });
 });
 
+test('historical bot reporting separates acceptance, completion, and redacted sender identity', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.enqueueReplyItem({ botName: 'echo', channel: '#echo', trigger: '!echo', sender: 'Alice',
+    senderIdentifier: 'A'.repeat(64), senderIdentifierKind: 'public-key', senderIdentifierSource: 'verified-event',
+    hopCount: 1, path: 'AA', hash: 'usage-1', enqueuedAt: 1000, expiresAt: 10000 });
+  const item = metricsStore.peekOldestPendingReplyItem();
+  metricsStore.resolveReplyItem(item.id, { status: 'sent', resolvedAt: 5000, queuedMs: 4000 });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const usage = await (await fetch(`${baseUrl}/api/metrics/bots/usage?start=0&end=2000`)).json();
+    assert.equal(usage.totals.accepted, 1);
+    assert.equal(usage.groups.groups[0].sender, 'Alice');
+    assert.equal(usage.groups.groups[0].senderIdentifier, `${'A'.repeat(12)}…`);
+    assert.equal(usage.acceptanceTimestamp, 'enqueuedAt');
+
+    const outcomes = await (await fetch(`${baseUrl}/api/metrics/bots/outcomes?start=4000&end=6000`)).json();
+    assert.deepEqual(outcomes.totals, { sent: 1, failed: 0, expired: 0, cancelled: 0 });
+    assert.equal(outcomes.groups.groups[0].outcome, 'sent');
+    assert.equal(outcomes.completionTimestamp, 'resolvedAt');
+  });
+});
+
+test('historical advert reporting keeps event counts separate from current inventory', async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  metricsStore.recordVerifiedAdvert({ publicKeyHex: 'AA'.repeat(32), name: 'Repeater', type: 'REPEATER',
+    receivedAt: 1000, hopCount: 0, eventDigest: 'ab'.repeat(32) });
+
+  await withServer({ metricsStore }, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/adverts?start=0&end=2000&limit=10`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.totals.events, 1);
+    assert.equal(body.totals.distinctNodes, 1);
+    assert.equal(body.nodes.nodes[0].publicKeyHex, 'AA'.repeat(32));
+  });
+});
+
+test('historical reporting routes reject over-limit queries before store logic', async () => {
+  await withServer({}, async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/metrics/process/samples?range=24h&limit=201`);
+    assert.equal(res.status, 400);
+  });
+});
+
 test('GET /api/metrics/brokers returns every currently-configured broker, zero-filled, with sent/skipped/failed totals', async () => {
   const metricsStore = new MetricsStore({ dbPath: ':memory:' });
   metricsStore.recordPacketSample({

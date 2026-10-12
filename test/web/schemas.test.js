@@ -5,6 +5,9 @@ import {
   validateRangeOnlyQuery,
   validateMetricsHistoryQuery,
   validateNodeTotalsQuery,
+  validateBotUsageQuery,
+  validateProcessHistoryQuery,
+  validateTopologyPathsQuery,
   parseNodesListQuery,
   validateNodesListQuery
 } from '../../src/web/schemas.js';
@@ -59,6 +62,19 @@ test('validateNodeTotalsQuery rejects a type outside the known advert-type enum'
 
 test('validateNodeTotalsQuery still requires exactly one of range or start/end', () => {
   assert.equal(validateNodeTotalsQuery({ type: 'REPEATER' }), false);
+});
+
+test('reporting schemas enforce bounded pages and reject unknown filters', () => {
+  assert.equal(validateBotUsageQuery({ range: '24h', limit: 100, offset: 0 }), true);
+  assert.equal(validateBotUsageQuery({ range: '24h', limit: 201, offset: 0 }), false);
+  assert.equal(validateBotUsageQuery({ range: '24h', limit: 100, offset: 0, typo: 'x' }), false);
+  assert.equal(validateProcessHistoryQuery({ range: 'all', maxBuckets: 180 }), true);
+});
+
+test('topology path schema requires a bounded page and rejects range fields', () => {
+  assert.equal(validateTopologyPathsQuery({ limit: 100, offset: 0 }), true);
+  assert.equal(validateTopologyPathsQuery({ limit: 100, offset: 0, range: '24h' }), false);
+  assert.equal(validateTopologyPathsQuery({ limit: 0, offset: 0 }), false);
 });
 
 test('parseNodesListQuery converts limit/offset to numbers, leaves q/type as strings', () => {

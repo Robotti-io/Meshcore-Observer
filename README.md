@@ -493,8 +493,9 @@ Legacy rows without acceptance timestamps are reported as retained unknown
 acceptance, outside range counts, rather than inferred from reply completion.
 `getEarliestBotAcceptanceAt` reports retained bot coverage independently of
 packet samples. Group pages are capped at 200 rows. New sender aggregates and
-individual history are not exposed by the existing HTTP dashboard; their
-presentation is tracked separately in release issues #35/#36.
+individual history are not exposed by the existing HTTP dashboard. The focused
+historical reporting APIs are implemented in #35; dashboard presentation
+remains tracked in #36, and browsable individual history is still deferred.
 
 Interaction history uses `PACKETCAPTURE_METRICS_UI_RETENTION_DAYS` (default
 `0`, unlimited), even with the dashboard disabled. Completed interaction
@@ -520,8 +521,8 @@ provide internal `[start, end)` reporting reads. `earliestEventAt` reports the
 earliest retained event for the selected type independently of the requested
 range. Migration 10 preserves current inventory and existing metrics/bot state;
 it does not invent events or direct evidence for legacy nodes. The existing
-HTTP dashboard continues to show its current inventory views; new event views
-are tracked in #35/#36.
+HTTP dashboard continues to show its current inventory views; historical event
+APIs are implemented in #35 and new dashboard event views are tracked in #36.
 
 Detailed advert events use shared metrics retention, by first reception time.
 History cleanup preserves inventory, first discovery and direct-heard evidence,
@@ -559,7 +560,8 @@ local advert collection. The existing dashboard still loads Chart.js from a
 CDN, so full browser operation without internet is a remaining dashboard
 delivery requirement. The default favors preserving learned information for
 offline operation; this feature does not provide a raw-packet archive or the
-additional reporting views planned in #35/#36.
+additional reporting APIs implemented in #35 and dashboard views planned in
+#36.
 
 `PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS` defaults to `72` when omitted and
 accepts whole hours from `1` through `8760`. Only a verified zero-hop Repeater
@@ -615,7 +617,8 @@ unlimited: clean runs expire by end time, recovered unclean runs by last-known
 alive time, strictly before the cutoff. Running runs, instance identity and
 parents referenced by retained SQLite foreign-key children survive cleanup.
 Process samples/events expire child-first before parent cleanup. Public
-run/resource reporting and dashboard integration remain #35/#36.
+run/resource reporting is implemented through the focused #35 API slice;
+dashboard integration remains #36.
 
 Process resource history is always on, using the same configurable sample
 interval (default 10 seconds, minimum 1 second), even with the dashboard off

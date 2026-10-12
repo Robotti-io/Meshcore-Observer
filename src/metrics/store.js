@@ -1016,6 +1016,30 @@ export class MetricsStore {
   }
 
   /**
+   * Returns the earliest retained timestamp for a fixed reporting dataset.
+   * Dataset names are deliberately closed here; callers cannot provide SQL
+   * identifiers or predicates through the reporting API.
+   */
+  getEarliestRetainedAt(dataset) {
+    const timestamps = {
+      packets: 'SELECT MIN(sample_at) AS earliest FROM metrics_samples',
+      botsAccepted: 'SELECT MIN(enqueued_at) AS earliest FROM bot_replies WHERE enqueued_at IS NOT NULL',
+      botsOutcomes: "SELECT MIN(resolved_at) AS earliest FROM bot_replies WHERE status != 'pending' AND resolved_at IS NOT NULL",
+      adverts: 'SELECT MIN(received_at) AS earliest FROM advert_events',
+      process: 'SELECT MIN(sample_at) AS earliest FROM process_samples',
+      runtimeEvents: 'SELECT MIN(observed_at) AS earliest FROM runtime_events',
+      telemetryObservations: 'SELECT MIN(observed_at) AS earliest FROM telemetry_observations',
+      telemetryOutcomes: 'SELECT MIN(completed_at) AS earliest FROM telemetry_query_outcomes',
+      topologyObservations: 'SELECT MIN(received_at) AS earliest FROM topology_observations',
+      topologyCoverage: 'SELECT MIN(sample_at) AS earliest FROM topology_capture_samples'
+    };
+    const sql = timestamps[dataset];
+    if (!sql) throw new Error('Unknown retained reporting dataset');
+    const row = this.#db.prepare(sql).get();
+    return row?.earliest ?? null;
+  }
+
+  /**
    * Backend-computed, bucketed packet-type history over [start, end) -
    * see resolveBucketWidthMs() for how the bucket width is chosen.
    *
@@ -1285,21 +1309,45 @@ export class MetricsStore {
     };
   }
 
+  /** Completion-time outcome totals with the same exact filters as usage. */
+  queryBotOutcomeTotals(query) {
+    assertBotQuery(validateBotUsageRange, query);
+    const values = [query.start, query.end, ...botFilterValues(query)];
+    const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0 };
+    const rows = this.#db.prepare(`
+      SELECT status AS outcome, COUNT(*) AS total FROM bot_replies
+      WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}
+      GROUP BY status
+    `).all(...values);
+    for (const row of rows) totals[row.outcome] = Number(row.total);
+    return totals;
+  }
+
   /** Bounded exact-name/command/bot/channel groups for accepted usage. */
   queryBotUsageGroups(query) {
     const page = { limit: 100, offset: 0, ...query };
     assertBotQuery(validateBotUsagePage, page);
     const where = `WHERE enqueued_at >= ? AND enqueued_at < ? AND ${BOT_FILTER_SQL}`;
     const values = [page.start, page.end, ...botFilterValues(page)];
-    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY';
+    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, sender_identifier COLLATE BINARY';
     const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
     const rows = this.#db.prepare(`
-      SELECT bot_name AS botName, channel, trigger, sender, COUNT(*) AS count
+      SELECT bot_name AS botName, channel, trigger, sender,
+        sender_identifier AS senderIdentifier, sender_identifier_kind AS senderIdentifierKind,
+        sender_identifier_source AS senderIdentifierSource, COUNT(*) AS count
       FROM bot_replies ${where} ${group}
       ORDER BY count DESC, bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY
       LIMIT ? OFFSET ?
     `).all(...values, page.limit, page.offset);
-    return { total: Number(total), groups: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+    return { total: Number(total), groups: rows.map((row) => {
+      const result = { botName: row.botName, channel: row.channel, trigger: row.trigger, sender: row.sender, count: Number(row.count) };
+      if (row.senderIdentifier !== null) {
+        result.senderIdentifier = row.senderIdentifier;
+        result.senderIdentifierKind = row.senderIdentifierKind;
+        result.senderIdentifierSource = row.senderIdentifierSource;
+      }
+      return result;
+    }) };
   }
 
   /** Bounded sender-name totals, with null representing unavailable evidence. */
@@ -1309,12 +1357,23 @@ export class MetricsStore {
     const where = `WHERE enqueued_at >= ? AND enqueued_at < ? AND ${BOT_FILTER_SQL}`;
     const values = [page.start, page.end, ...botFilterValues(page)];
     const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (
-      SELECT 1 FROM bot_replies ${where} GROUP BY sender COLLATE BINARY
+      SELECT 1 FROM bot_replies ${where} GROUP BY sender COLLATE BINARY, sender_identifier COLLATE BINARY
     )`).get(...values);
-    const rows = this.#db.prepare(`SELECT sender, COUNT(*) AS count FROM bot_replies ${where}
-      GROUP BY sender COLLATE BINARY ORDER BY count DESC, sender COLLATE BINARY LIMIT ? OFFSET ?
+    const rows = this.#db.prepare(`SELECT sender, sender_identifier AS senderIdentifier,
+      sender_identifier_kind AS senderIdentifierKind, sender_identifier_source AS senderIdentifierSource,
+      COUNT(*) AS count FROM bot_replies ${where}
+      GROUP BY sender COLLATE BINARY, sender_identifier COLLATE BINARY
+      ORDER BY count DESC, sender COLLATE BINARY, sender_identifier COLLATE BINARY LIMIT ? OFFSET ?
     `).all(...values, page.limit, page.offset);
-    return { total: Number(total), senders: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+    return { total: Number(total), senders: rows.map((row) => {
+      const result = { sender: row.sender, count: Number(row.count) };
+      if (row.senderIdentifier !== null) {
+        result.senderIdentifier = row.senderIdentifier;
+        result.senderIdentifierKind = row.senderIdentifierKind;
+        result.senderIdentifierSource = row.senderIdentifierSource;
+      }
+      return result;
+    }) };
   }
 
   /** Bounded outcomes by completion time, including sent/failed/expired/cancelled. */
@@ -1323,15 +1382,26 @@ export class MetricsStore {
     assertBotQuery(validateBotUsagePage, page);
     const where = `WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
     const values = [page.start, page.end, ...botFilterValues(page)];
-    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, status';
+    const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, sender_identifier COLLATE BINARY, status';
     const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
     const rows = this.#db.prepare(`
-      SELECT bot_name AS botName, channel, trigger, sender, status AS outcome, COUNT(*) AS count
+      SELECT bot_name AS botName, channel, trigger, sender,
+        sender_identifier AS senderIdentifier, sender_identifier_kind AS senderIdentifierKind,
+        sender_identifier_source AS senderIdentifierSource, status AS outcome, COUNT(*) AS count
       FROM bot_replies ${where} ${group}
       ORDER BY count DESC, bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, status
       LIMIT ? OFFSET ?
     `).all(...values, page.limit, page.offset);
-    return { total: Number(total), groups: rows.map((row) => ({ ...row, count: Number(row.count) })) };
+    return { total: Number(total), groups: rows.map((row) => {
+      const result = { botName: row.botName, channel: row.channel, trigger: row.trigger, sender: row.sender,
+        outcome: row.outcome, count: Number(row.count) };
+      if (row.senderIdentifier !== null) {
+        result.senderIdentifier = row.senderIdentifier;
+        result.senderIdentifierKind = row.senderIdentifierKind;
+        result.senderIdentifierSource = row.senderIdentifierSource;
+      }
+      return result;
+    }) };
   }
 
   /**

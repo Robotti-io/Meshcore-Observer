@@ -27,6 +27,77 @@ const RANGE_ONE_OF = [
   { properties: { start: {}, end: {} }, required: ['start', 'end'] }
 ];
 
+const REPORTING_PAGE = {
+  limit: { type: 'integer', minimum: 1, maximum: 200 },
+  offset: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }
+};
+const RUN_ID = { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' };
+const PUBLIC_KEY = { type: 'string', pattern: '^[0-9A-F]{64}$' };
+const REPORTING_TEXT = { type: 'string', minLength: 1, maxLength: 256 };
+
+function reportingQuerySchema(id, properties) {
+  return {
+    $id: `meshcore-observer/web/${id}`,
+    type: 'object',
+    additionalProperties: false,
+    properties: { ...rangeProperties(), ...properties },
+    oneOf: RANGE_ONE_OF
+  };
+}
+
+export const botUsageQuerySchema = reportingQuerySchema('bot-usage-query', {
+  ...REPORTING_PAGE, botName: REPORTING_TEXT, channel: REPORTING_TEXT,
+  trigger: REPORTING_TEXT, sender: REPORTING_TEXT
+});
+export const botOutcomeQuerySchema = reportingQuerySchema('bot-outcome-query', {
+  ...REPORTING_PAGE, botName: REPORTING_TEXT, channel: REPORTING_TEXT,
+  trigger: REPORTING_TEXT, sender: REPORTING_TEXT
+});
+export const advertReportQuerySchema = reportingQuerySchema('advert-report-query', {
+  ...REPORTING_PAGE, type: { enum: ['CHAT', 'REPEATER'] }
+});
+export const processHistoryQuerySchema = reportingQuerySchema('process-history-query', {
+  runId: RUN_ID, maxBuckets: { type: 'integer', minimum: 10, maximum: 1000 }
+});
+export const processSamplesQuerySchema = reportingQuerySchema('process-samples-query', {
+  ...REPORTING_PAGE, runId: RUN_ID
+});
+export const runtimeEventsQuerySchema = reportingQuerySchema('runtime-events-query', {
+  ...REPORTING_PAGE, runId: RUN_ID,
+  kind: { enum: ['radio.connected', 'radio.disconnected', 'radio.connect-error', 'broker.state', 'bot.readiness'] },
+  serviceId: REPORTING_TEXT
+});
+export const telemetryObservationsQuerySchema = reportingQuerySchema('telemetry-observations-query', {
+  ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY,
+  runId: RUN_ID, component: { enum: ['status', 'sensors', 'neighbours'] }
+});
+export const telemetryOutcomesQuerySchema = reportingQuerySchema('telemetry-outcomes-query', {
+  ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY,
+  runId: RUN_ID, component: { enum: ['status', 'sensors', 'neighbours'] },
+  status: { enum: ['answered', 'partial', 'failed', 'unsupported'] }
+});
+export const topologyPathsQuerySchema = {
+  $id: 'meshcore-observer/web/topology-paths-query', type: 'object', additionalProperties: false,
+  properties: { ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY,
+    kind: { enum: ['flood-traversed', 'direct-remaining'] } }
+};
+export const topologyPathQuerySchema = {
+  $id: 'meshcore-observer/web/topology-path-query', type: 'object', additionalProperties: false,
+  properties: { pathId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } },
+  required: ['pathId']
+};
+export const topologyDetailsQuerySchema = reportingQuerySchema('topology-details-query', {
+  ...REPORTING_PAGE, pathId: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, runId: RUN_ID
+});
+export const topologyProximityQuerySchema = {
+  $id: 'meshcore-observer/web/topology-proximity-query', type: 'object', additionalProperties: false,
+  properties: { ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY,
+    now: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    windowMs: { type: 'integer', minimum: 3600000, maximum: 8760 * 3600000, multipleOf: 3600000 },
+    radius: { type: 'integer', minimum: 0, maximum: 63 } },
+  required: ['observerPublicKey', 'now', 'windowMs', 'radius']
+};
+
 export const metricsHistoryQuerySchema = {
   $id: 'meshcore-observer/web/metrics-history-query',
   type: 'object',
@@ -85,6 +156,18 @@ export const validateMetricsHistoryQuery = compileSchema(metricsHistoryQuerySche
 export const validateRangeOnlyQuery = compileSchema(rangeOnlyQuerySchema);
 export const validateNodeTotalsQuery = compileSchema(nodeTotalsQuerySchema);
 export const validateDashboardQuery = compileSchema(dashboardQuerySchema);
+export const validateBotUsageQuery = compileSchema(botUsageQuerySchema);
+export const validateBotOutcomeQuery = compileSchema(botOutcomeQuerySchema);
+export const validateAdvertReportQuery = compileSchema(advertReportQuerySchema);
+export const validateProcessHistoryQuery = compileSchema(processHistoryQuerySchema);
+export const validateProcessSamplesQuery = compileSchema(processSamplesQuerySchema);
+export const validateRuntimeEventsQuery = compileSchema(runtimeEventsQuerySchema);
+export const validateTelemetryObservationsQuery = compileSchema(telemetryObservationsQuerySchema);
+export const validateTelemetryOutcomesQuery = compileSchema(telemetryOutcomesQuerySchema);
+export const validateTopologyPathsQuery = compileSchema(topologyPathsQuerySchema);
+export const validateTopologyPathQuery = compileSchema(topologyPathQuerySchema);
+export const validateTopologyDetailsQuery = compileSchema(topologyDetailsQuerySchema);
+export const validateTopologyProximityQuery = compileSchema(topologyProximityQuerySchema);
 
 // GET /api/nodes: the node ("!lookup" repeater registry) search/browse
 // table - not range-aware (it's current state, not history - see
@@ -129,7 +212,9 @@ export function parseNodesListQuery(searchParams) {
 // The only fields either schema above ever expects as a number - every
 // other key (including one AJV's additionalProperties: false is about to
 // reject) is carried through as a plain string.
-const NUMERIC_FIELDS = new Set(['start', 'end', 'maxBuckets']);
+const NUMERIC_FIELDS = new Set([
+  'start', 'end', 'maxBuckets', 'limit', 'offset', 'pathId', 'now', 'windowMs', 'radius'
+]);
 
 /**
  * Parses a URLSearchParams into the plain candidate object the schemas

@@ -25,14 +25,14 @@ export class RangeError extends Error {
  * checks that don't fit a JSON Schema cleanly - same split used in
  * src/config/index.js between schema validation and its manual checks.
  *
- * @param {{range?: string, start?: number, end?: number, now?: number, earliestSampleAt?: number|null}} options
+ * @param {{range?: string, start?: number, end?: number, now?: number, earliestSampleAt?: number|null, earliestRetainedAt?: number|null}} options
  * @returns {{start: number, end: number}}
  * @throws {RangeError} if an explicit start/end pair is invalid.
  */
-export function resolveRangeWindow({ range, start, end, now = Date.now(), earliestSampleAt = null }) {
+export function resolveRangeWindow({ range, start, end, now = Date.now(), earliestSampleAt = null, earliestRetainedAt = null }) {
   if (range !== undefined) {
     if (range === 'all') {
-      return { start: earliestSampleAt ?? now, end: now };
+      return { start: earliestRetainedAt ?? earliestSampleAt ?? now, end: now };
     }
     const durationMs = RANGE_DURATIONS_MS[range];
     return { start: now - durationMs, end: now };
