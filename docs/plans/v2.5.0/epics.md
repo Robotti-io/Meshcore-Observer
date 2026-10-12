@@ -1,6 +1,6 @@
 # v2.5.0 epic register
 
-Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 T1–T5 dashboard integration is complete locally and handoff-ready, and #37 retains the remaining browser/device/load/RF validation.
+Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 T1–T5 dashboard integration is complete and issue #36 is closed, and #37 retains the remaining browser/device/load/RF validation.
 
 **Issue labels:** [v2.5.0 conventions and verified mapping](issue-label-guide.md) for all four epics and 62 children.
 
