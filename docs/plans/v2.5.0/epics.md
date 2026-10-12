@@ -1,6 +1,6 @@
 # v2.5.0 epic register
 
-Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 dashboard integration is in progress, and #37 remains.
+Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 T1–T5 dashboard integration is complete locally and handoff-ready, and #37 retains the remaining browser/device/load/RF validation.
 
 **Issue labels:** [v2.5.0 conventions and verified mapping](issue-label-guide.md) for all four epics and 62 children.
 
@@ -27,4 +27,4 @@ Pillar 1's OBS-02 work can establish conservative zero-hop active discovery befo
 
 All four breakdowns are captured: [Pillar 1 — 16 issues](pillar-1-child-issues.md), [Pillar 2 — 17 issues](pillar-2-child-issues.md), [Pillar 3 — 14 issues](pillar-3-child-issues.md), and [Pillar 4 — 15 issues](pillar-4-child-issues.md). Begin scoped research/decision planning and the early shared UI foundation, then approve one implementation plan at a time. OBS-02 retains dedicated persistence, direct-heard querying, and publication issues. Consumers link to shared owning issues rather than duplicating them.
 
-The source requests and local records are maintained in the local `release-v_2_5_0` branch. At epic creation time, that branch and the feature documents were not published on GitHub, so the issues reference repository paths and include self-contained scope/acceptance details. Add permanent source links when those documents are published.
+The source requests and local records are maintained in the local `release-v_2_5_0` branch. At epic creation time, that branch and the feature documents were not published on GitHub, so the issues reference repository paths and include self-contained scope/acceptance details. Add permanent source links when those documents are published. #36's implementation and handoff evidence are recorded in `pillar-1-issues/p1-15.md`; #37 remains the owner of manual browser, representative-load, and live RF validation.

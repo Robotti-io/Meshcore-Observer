@@ -330,9 +330,10 @@ whichever duration is currently selected (same selector that drives the
 packet-activity chart), so - unlike queue depth ("Queued now"), which is
 genuinely live, in-process state and always shows right now regardless of
 the selected duration - these survive a restart and reflect real history,
-not just what happened since the process last started. The per-bot/
-per-trigger breakdown isn't surfaced on the dashboard yet; it's captured
-now so a future "queue health" view doesn't need a schema change to add it.
+not just what happened since the process last started. The selected-range
+dashboard exposes aggregate bot totals; browsable per-bot/per-trigger
+interaction history remains deferred. The records are captured now so a
+future queue-health view does not need a schema change.
 
 **Why quiet-window detection, and why not just retry if a reply doesn't
 land:** MeshCore's `GRP_TXT` (channel/group) messages carry **no
@@ -449,6 +450,17 @@ shaping, formatting) and is unit-tested directly under Node - see
 actual browser, browser layout and interaction behavior is not covered by
 automated tests.
 
+The dashboard refreshes only the active view. Overview uses one aggregate
+dashboard read plus five bounded process/runtime/telemetry reads; Channel bots
+uses one aggregate read plus accepted-usage and outcome reads; Repeaters uses
+one aggregate read plus advert, topology, and telemetry reads. Packet activity
+and MQTT brokers use the aggregate read only. The persistent EventSource is
+separate, and overlapping range refreshes are aborted or coalesced so an SSE
+tick cannot create an unbounded request queue. Focused sections retain their
+last successful values when an individual read fails. Browser layout and
+keyboard behavior still require the manual checklist because this repository
+does not include a browser automation dependency.
+
 Packet activity (the line chart), the packet-types table, the packet-types
 pie chart, and a "Bot commands" section (one pie chart + table + total
 replies per configured channel bot, counting successful deliveries by
@@ -473,10 +485,10 @@ live, all-time-since-start counters, unaffected by the duration selector.
 actually received it - the store separately persists a per-broker
 sent/skipped/failed delivery breakdown, and a full reply-lifecycle history
 (sent/failed/expired/cancelled, per bot and per trigger, not just
-successful sends) for the shared reply queue. Neither is on the dashboard
-yet, but both are captured now specifically so a future view can query
-them without a schema change (see `MetricsStore#queryBrokerDeliveryTotals`
-and `#queryBotReplyOutcomeTotals`).
+successful sends) for the shared reply queue. Broker delivery and bot outcome
+summaries are available in their selected-range dashboard views, while the
+underlying bounded reads remain available through
+`MetricsStore#queryBrokerDeliveryTotals` and `#queryBotReplyOutcomeTotals`.
 
 Bot interaction history also records accepted usage: an eligible command
 counts when the shared reply queue successfully persists it after duplicate
@@ -562,8 +574,8 @@ local advert collection. The existing dashboard still loads Chart.js from a
 CDN, so full browser operation without internet is a remaining dashboard
 delivery requirement. The default favors preserving learned information for
 offline operation; this feature does not provide a raw-packet archive or the
-additional reporting APIs implemented in #35 and dashboard views planned in
-#36.
+additional reporting APIs implemented in #35 and dashboard views connected
+through #36.
 
 `PACKETCAPTURE_DIRECT_HEARD_WINDOW_HOURS` defaults to `72` when omitted and
 accepts whole hours from `1` through `8760`. Only a verified zero-hop Repeater
