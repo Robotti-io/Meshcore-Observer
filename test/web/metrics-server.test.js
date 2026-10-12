@@ -684,6 +684,9 @@ test('GET / returns the dashboard HTML page, referencing its stylesheet and brow
       'repeater-telemetry-latest', 'repeater-adverts-table', 'repeater-topology-table']) {
       assert.match(body, new RegExp(`id="${id}"`), `expected an element with id="${id}"`);
     }
+    assert.match(body, /class="skip-link" href="#dashboard-views"/);
+    assert.match(body, /id="range-data-status"[^>]*role="status"[^>]*aria-live="polite"/);
+    assert.match(body, /<caption class="sr-only">Current repeater inventory<\/caption>/);
   });
 });
 
@@ -694,6 +697,8 @@ test('GET /dashboard.css serves the dashboard stylesheet as a real CSS file', as
     assert.match(res.headers.get('content-type'), /text\/css/);
     const body = await res.text();
     assert.match(body, /\.tile\s*{/);
+    assert.match(body, /\.skip-link\s*{/);
+    assert.match(body, /\.dashboard-nav\s*\{\s*display:\s*grid/);
   });
 });
 

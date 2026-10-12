@@ -47,6 +47,9 @@ body {
   background: canvas;
   color: canvastext;
 }
+:where(a, button, input, [tabindex]):focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+.skip-link { position: absolute; left: 1rem; top: 0.5rem; transform: translateY(-160%); background: canvas; color: canvastext; border: 1px solid var(--control-border); border-radius: 6px; padding: 0.45rem 0.7rem; z-index: 10; }
+.skip-link:focus { transform: translateY(0); }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin-bottom: 1.25rem; }
 header h1 { font-size: 1.25rem; margin: 0; }
 #connection-indicator { font-size: 0.9rem; opacity: 0.7; }
@@ -65,6 +68,7 @@ section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04
 .dashboard-nav { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 1.25rem; }
 .dashboard-nav a { color: canvastext; text-decoration: none; font-size: 0.9rem; padding: 0.35rem 0.7rem; border: 1px solid var(--control-border); border-radius: 999px; }
 .dashboard-nav a[aria-current="page"] { background: var(--control-active-bg); font-weight: 600; }
+.dashboard-nav a { min-height: 2.25rem; box-sizing: border-box; display: inline-flex; align-items: center; }
 .dashboard-view[hidden] { display: none; }
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
 .tile-grid { margin-bottom: 1.25rem; }
@@ -91,6 +95,7 @@ section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04
 }
 table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid color-mix(in srgb, canvastext 15%, transparent); }
+.table-scroll th, .table-scroll td { overflow-wrap: anywhere; }
 .table-scroll { max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
 .table-scroll:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
 td.count { text-align: right; font-variant-numeric: tabular-nums; }
@@ -130,3 +135,18 @@ td.count { text-align: right; font-variant-numeric: tabular-nums; }
 .pagination button { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.7rem; border-radius: 6px; border: 1px solid var(--control-border); background: transparent; color: canvastext; cursor: pointer; }
 .pagination button:disabled { opacity: 0.4; cursor: default; }
 .pagination span { opacity: 0.75; }
+.reporting-panel { border-top: 1px solid color-mix(in srgb, canvastext 15%, transparent); padding-top: 1rem; }
+.reporting-panel h3 { font-size: 0.9rem; margin: 0 0 0.55rem; }
+.reporting-panel h4 { font-size: 0.8rem; margin: 0 0 0.35rem; opacity: 0.8; }
+.reporting-panel .table-scroll + .table-scroll { margin-top: 0.9rem; }
+button, input { min-height: 2.25rem; }
+button { cursor: pointer; }
+@media (max-width: 560px) {
+  body { padding: 1rem; }
+  header { align-items: flex-start; }
+  .dashboard-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-nav a { justify-content: center; text-align: center; }
+  .split-layout { display: block; }
+  .split-layout > .table-scroll + .table-scroll { margin-top: 1rem; }
+  th, td { padding: 0.4rem 0.45rem; }
+}

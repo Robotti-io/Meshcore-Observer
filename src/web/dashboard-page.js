@@ -44,6 +44,8 @@ export function renderDashboardHtml() {
   <span id="live-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
 </header>
 
+<a class="skip-link" href="#dashboard-views">Skip to metrics views</a>
+
 <section id="live-tiles" class="tile-grid" aria-label="Live observer status">
   <div class="tile"><h2>Uptime <span class="scope-label">Live</span></h2><p id="uptime" class="uptime" role="timer" aria-label="Observer uptime" aria-live="off"><span id="uptime-days" class="uptime-segment heartbeat-segment" hidden></span><span id="uptime-hours" class="uptime-segment heartbeat-segment" hidden></span><span id="uptime-minutes" class="uptime-segment heartbeat-segment" hidden></span><span id="uptime-seconds" class="uptime-segment heartbeat-segment">0s</span></p></div>
   <div class="tile"><h2>Radio <span class="scope-label">Live</span></h2><p id="radio-status">-</p><p class="sub" id="radio-detail"></p></div>
@@ -55,14 +57,16 @@ export function renderDashboardHtml() {
     <span id="range-presets" role="group" aria-label="Reporting range presets"></span>
     <button type="button" class="range-btn" id="range-custom-toggle" data-range="custom" aria-pressed="false">Custom</button>
     <span class="range-custom" id="range-custom">
+      <label class="sr-only" for="range-start">Reporting range start date</label>
       <input type="date" id="range-start">
       <span>to</span>
+      <label class="sr-only" for="range-end">Reporting range end date</label>
       <input type="date" id="range-end">
       <button type="button" id="range-apply">Apply</button>
       <span class="range-error" id="range-error"></span>
     </span>
   </div>
-  <p class="data-status" id="range-data-status">Loading selected-range metrics…</p>
+  <p class="data-status" id="range-data-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading selected-range metrics…</p>
 </section>
 
 <nav class="dashboard-nav" aria-label="Metrics views">
@@ -91,16 +95,16 @@ export function renderDashboardHtml() {
   </div>
   <section class="reporting-panel" aria-labelledby="overview-operational-heading">
     <h3 id="overview-operational-heading">Operational history</h3>
-    <p class="section-note">Process samples, runtime events, and telemetry history are retained-range evidence. Values remain unavailable until that report loads.</p>
+    <p class="section-note">Process samples, runtime events, and telemetry history are <span class="scope-label">Selected range</span> retained-range evidence. Values remain unavailable until that report loads.</p>
     <div id="overview-reporting-tiles" class="tile-grid">
       <div class="tile"><h4>Process samples</h4><p id="reporting-process-samples">Unavailable</p></div>
       <div class="tile"><h4>Runtime events</h4><p id="reporting-runtime-events">Unavailable</p></div>
       <div class="tile"><h4>Telemetry observations</h4><p id="reporting-telemetry-observations">Unavailable</p></div>
       <div class="tile"><h4>Telemetry outcomes</h4><p id="reporting-telemetry-outcomes">Unavailable</p></div>
     </div>
-    <p class="data-status" id="overview-reporting-status">Loading operational history…</p>
+    <p class="data-status" id="overview-reporting-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading operational history…</p>
     <div class="table-scroll" role="region" aria-label="Recent runtime events" tabindex="0">
-      <table id="runtime-events-table"><thead><tr><th>Time</th><th>Event</th><th>Service</th><th>State</th></tr></thead><tbody></tbody></table>
+      <table id="runtime-events-table"><caption class="sr-only">Recent runtime events in the selected reporting range</caption><thead><tr><th>Time</th><th>Event</th><th>Service</th><th>State</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
 </section>
@@ -116,6 +120,7 @@ export function renderDashboardHtml() {
   <div class="split-layout">
     <div class="table-scroll" role="region" aria-label="Packet totals by type" tabindex="0">
       <table id="packet-types-table">
+      <caption class="sr-only">Packet totals by type in the selected reporting range</caption>
       <thead><tr><th></th><th>Type</th><th>Total</th></tr></thead>
       <tbody></tbody>
       </table>
@@ -133,6 +138,7 @@ export function renderDashboardHtml() {
   <h2 tabindex="-1">MQTT brokers <span class="scope-label">Live status</span></h2>
   <div class="table-scroll" role="region" aria-label="Live MQTT broker connection status" tabindex="0">
     <table id="brokers-table">
+    <caption class="sr-only">Live MQTT broker connection status</caption>
     <thead><tr><th>Broker</th><th>Connected</th><th>Last connected</th></tr></thead>
     <tbody></tbody>
     </table>
@@ -140,6 +146,7 @@ export function renderDashboardHtml() {
   <p class="section-note">Connected/last connected are live; deliveries below reflect the range selected above.</p>
   <div class="table-scroll" role="region" aria-label="MQTT broker delivery totals for selected range" tabindex="0">
     <table id="broker-deliveries-table">
+    <caption class="sr-only">MQTT broker delivery totals in the selected reporting range</caption>
     <thead><tr><th>Broker</th><th>Sent</th><th>Skipped</th><th>Failed</th></tr></thead>
     <tbody></tbody>
     </table>
@@ -157,7 +164,7 @@ export function renderDashboardHtml() {
   </div>
   <section class="reporting-panel" aria-labelledby="bot-reporting-heading">
     <h3 id="bot-reporting-heading">Accepted usage and outcomes</h3>
-    <p class="section-note">Accepted commands are counted at queue acceptance; outcomes are counted when delivery completes.</p>
+    <p class="section-note">Accepted commands are counted at queue acceptance; outcomes are counted when delivery completes. Both are <span class="scope-label">Selected range</span> history.</p>
     <div id="bot-reporting-tiles" class="tile-grid">
       <div class="tile"><h4>Accepted</h4><p id="bot-accepted">Unavailable</p></div>
       <div class="tile"><h4>Distinct sender names</h4><p id="bot-distinct-senders">Unavailable</p></div>
@@ -166,13 +173,13 @@ export function renderDashboardHtml() {
       <div class="tile"><h4>Expired</h4><p id="bot-outcome-expired">Unavailable</p></div>
       <div class="tile"><h4>Cancelled</h4><p id="bot-outcome-cancelled">Unavailable</p></div>
     </div>
-    <p class="data-status" id="bot-reporting-status">Loading bot reporting…</p>
+    <p class="data-status" id="bot-reporting-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading bot reporting…</p>
     <div class="split-layout">
       <div class="table-scroll" role="region" aria-label="Accepted bot usage groups" tabindex="0">
-        <table id="bot-usage-table"><thead><tr><th>Bot</th><th>Command</th><th>Sender</th><th>Accepted</th></tr></thead><tbody></tbody></table>
+        <table id="bot-usage-table"><caption class="sr-only">Accepted bot usage groups in the selected reporting range</caption><thead><tr><th>Bot</th><th>Command</th><th>Sender</th><th>Accepted</th></tr></thead><tbody></tbody></table>
       </div>
       <div class="table-scroll" role="region" aria-label="Bot outcome groups" tabindex="0">
-        <table id="bot-outcomes-table"><thead><tr><th>Bot</th><th>Command</th><th>Outcome</th><th>Count</th></tr></thead><tbody></tbody></table>
+        <table id="bot-outcomes-table"><caption class="sr-only">Bot delivery outcome groups in the selected reporting range</caption><thead><tr><th>Bot</th><th>Command</th><th>Outcome</th><th>Count</th></tr></thead><tbody></tbody></table>
       </div>
     </div>
   </section>
@@ -202,18 +209,19 @@ export function renderDashboardHtml() {
     </div>
     <p class="data-status" id="repeater-reporting-status">Loading repeater evidence…</p>
     <div class="table-scroll" role="region" aria-label="Advert totals by type" tabindex="0">
-      <table id="repeater-adverts-table"><thead><tr><th>Type</th><th>Events</th><th>New</th><th>Rehearsals</th></tr></thead><tbody></tbody></table>
+      <table id="repeater-adverts-table"><caption class="sr-only">Advert totals by type in the selected reporting range</caption><thead><tr><th>Type</th><th>Events</th><th>New</th><th>Rehearsals</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="table-scroll" role="region" aria-label="Bounded topology paths" tabindex="0">
-      <table id="repeater-topology-table"><thead><tr><th>Path</th><th>Kind</th><th>Receptions</th><th>Last received</th></tr></thead><tbody></tbody></table>
+      <table id="repeater-topology-table"><caption class="sr-only">Bounded topology paths retained in the database</caption><thead><tr><th>Path</th><th>Kind</th><th>Receptions</th><th>Last received</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
   <div class="search-bar">
     <input type="search" id="nodes-search" placeholder="Search by name or public key prefix…" aria-label="Search repeaters">
   </div>
-  <p class="data-status" id="nodes-data-status">Loading current repeater list…</p>
+    <p class="data-status" id="nodes-data-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading current repeater list…</p>
   <div class="table-scroll" role="region" aria-label="Current repeater inventory" tabindex="0">
     <table id="nodes-table">
+      <caption class="sr-only">Current repeater inventory</caption>
       <thead><tr><th>Name</th><th>Public key</th><th>First heard</th><th>Last heard</th></tr></thead>
       <tbody></tbody>
     </table>

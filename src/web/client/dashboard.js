@@ -386,6 +386,7 @@ function setReportingStatus(elementId, state, message) {
   if (!element) return;
   element.className = 'data-status ' + state;
   element.textContent = message;
+  element.setAttribute('aria-busy', String(state === 'loading'));
 }
 
 function renderBoundedRows(tableId, rows, columns, emptyText) {
@@ -621,6 +622,7 @@ function renderUpdatedRangeStatus(view, viewLabel, timestamp) {
     status.appendChild(timeElement);
   }
   status.className = 'data-status ready';
+  status.setAttribute('aria-busy', 'false');
 
   const date = new Date(timestamp);
   const parts = UPDATED_AT_FORMATTER.formatToParts(date);
@@ -664,6 +666,7 @@ function setRangeLoadingStatus(view, viewLabel, lastSuccessAt) {
   } else {
     status.className = 'data-status loading';
   }
+  status.setAttribute('aria-busy', 'true');
 }
 
 function rangeSectionState(view) {
@@ -782,13 +785,14 @@ function buildBotCommandBlock(botName) {
     '<p class="empty-note" hidden></p>' +
     '<div class="split-layout">' +
     '<div class="table-scroll" role="region" aria-label="Bot command reply counts" tabindex="0">' +
-    '<table><thead><tr><th></th><th>Command</th><th>Count</th></tr></thead><tbody></tbody></table></div>' +
+    '<table><caption class="sr-only"></caption><thead><tr><th></th><th>Command</th><th>Count</th></tr></thead><tbody></tbody></table></div>' +
     '<div><div class="pie-wrap"><canvas aria-hidden="true"></canvas></div>' +
     '<p class="chart-summary">Command reply distribution; exact counts are in the adjacent table.</p></div>' +
     '</div>' +
     '<p class="total-replies"></p>';
   block.querySelector('.bot-name').textContent = botName;
   block.querySelector('.table-scroll').setAttribute('aria-label', botName + ' command reply counts');
+  block.querySelector('caption').textContent = botName + ' command reply counts in the selected reporting range';
   container.appendChild(block);
 
   const entry = {
@@ -915,6 +919,7 @@ function setDataStatus(elementId, state, message) {
   const status = document.getElementById(elementId);
   status.className = 'data-status ' + state;
   status.textContent = message;
+  status.setAttribute('aria-busy', String(state === 'loading'));
 }
 
 function formatLastSuccess(timestamp) {
@@ -972,6 +977,10 @@ function refreshRangeData({ supersede = false } = {}) {
         const key = definition.key;
         reportingSectionStateByKey.set(key, beginSectionRequest(reportingState(key), generation));
       }
+      if (definitions.length > 0) {
+        const statusId = view === 'overview' ? 'overview-reporting-status' : view === 'bots' ? 'bot-reporting-status' : 'repeater-reporting-status';
+        setReportingStatus(statusId, 'loading', 'Refreshing selected-range reporting…');
+      }
       const dashboardResult = fetchJson('/api/metrics/dashboard?' + qs, controller.signal);
       const focusedResults = await Promise.allSettled(definitions.map(async (definition) => ({
         definition,
@@ -1017,6 +1026,8 @@ function refreshRangeData({ supersede = false } = {}) {
       if (!controller.signal.aborted) {
         rangeSectionStateByView.set(view, failSectionRequest(rangeSectionState(view), generation, err));
         console.error('failed to refresh range-aware metrics', err);
+        const reportingStatusId = view === 'overview' ? 'overview-reporting-status' : view === 'bots' ? 'bot-reporting-status' : view === 'repeaters' ? 'repeater-reporting-status' : null;
+        if (reportingStatusId) setReportingStatus(reportingStatusId, 'error', 'Unable to load selected-range reporting. ' + formatLastSuccess(lastSuccessAt));
         setDataStatus(
           'range-data-status',
           'error',
@@ -1080,6 +1091,7 @@ function viewFromLocation() {
 
 function showDashboardView(view, { focus = false } = {}) {
   currentView = view;
+  document.title = 'MeshCore Observer Metrics · ' + (VIEW_LABELS[view] ?? 'metrics');
   document.querySelectorAll('.dashboard-view').forEach((section) => {
     section.hidden = section.dataset.view !== view;
   });
