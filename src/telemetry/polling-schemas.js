@@ -80,12 +80,12 @@ export const telemetryPollPolicySchema = object({ version: { const: 1 }, default
   }) }
 }, ['version', 'defaultCredentialRef']);
 export const telemetryPollSecretsSchema = object({ version: { const: 1 }, secrets: {
-  type: 'object', minProperties: 1, maxProperties: TELEMETRY_POLL_MAX_SECRETS,
+  type: 'object', minProperties: 0, maxProperties: TELEMETRY_POLL_MAX_SECRETS,
   propertyNames: reference, patternProperties: { '^[A-Za-z][A-Za-z0-9_-]{0,31}$': {
-    type: 'string', minLength: 1, maxLength: 15,
+    type: 'string', minLength: 0, maxLength: 15,
     // With AJV's Unicode regex mode this rejects lone surrogates while allowing
     // valid astral characters. UTF-8 wire byte limits are checked after AJV.
-    pattern: '^[^\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]+$', not: { pattern: '^\\s+$' }
+    pattern: '^[^\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]*$', not: { pattern: '^\\s+$' }
   } }, additionalProperties: false
 } });
 

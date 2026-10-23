@@ -70,7 +70,7 @@ Recommended second main delivery pillar. Targeting can start without all telemet
 
 ## Planning status and approval boundaries
 
-This is a v2.5.0 parent tracking epic. Its 14 child issues are captured and linked; implementation planning remains pending. Issue capture does not indicate implementation progress.
+This is a v2.5.0 parent tracking epic. Its 14 child issues are captured and linked. The current branch includes channel-bot region configuration (fixed string or scoped-command allowlist array) and serialized scoped channel sends with connection reset if scope restoration fails. P3-07's per-command policy/fallback and P3-08's full failure/recovery and authorized hardware validation remain incomplete; this baseline does not close either issue.
 
 Implement one approved child task at a time. Follow AGENTS.md: JavaScript ES modules, centralized strict AJV schemas, centralized configuration and structured logging, existing seams, and always-on MetricsStore ownership. Concrete authentication, storage, public API/MQTT, dependency, logging-contract, CSP, and deployment changes need explicit approval in the applicable implementation plan.
 

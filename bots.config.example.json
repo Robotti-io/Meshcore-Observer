@@ -2,6 +2,7 @@
   {
     "name": "echo-bot",
     "channel": "#echo",
+    "regionScope": ["cvg", "oki"],
     "enabled": true,
     "minHops": 1,
     "maxMessageBytes": 120,

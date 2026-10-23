@@ -104,12 +104,18 @@ test('all invalid explicit polling numbers/paths/booleans fail safely, including
   assert.equal(loadConfig(base({ PACKETCAPTURE_TELEMETRY_POLL_ENABLED: ' FALSE ' })).telemetryPolling.enabled, false);
 });
 
-test('enabled or explicit disabled configuration requires both protected files', () => {
+test('enabled configuration requires policy; secrets are optional but cannot be used alone', async () => {
   safeError(() => loadConfig(base({ [TELEMETRY_POLL_ENABLED_ENV_KEY]: 'true' })));
   const paths = files();
-  for (const key of Object.keys(paths)) for (const flag of ['true', 'false']) {
-    safeError(() => loadConfig(base({ [TELEMETRY_POLL_ENABLED_ENV_KEY]: flag, [key]: paths[key] })));
-  }
+  const configPath = join(root, `blank-default-policy-${sequence++}.json`);
+  writeFileSync(configPath, JSON.stringify({ version: 1, defaultCredentialRef: 'default' }));
+  const secretsPath = paths[TELEMETRY_POLL_SECRETS_ENV_KEY];
+  const config = loadConfig(base({ [TELEMETRY_POLL_ENABLED_ENV_KEY]: 'true',
+    [TELEMETRY_POLL_CONFIG_ENV_KEY]: configPath })).telemetryPolling;
+  assert.equal(config.enabled, true);
+  assert.equal(await samplePassword(config, D), '');
+  for (const flag of ['true', 'false']) safeError(() => loadConfig(base({
+    [TELEMETRY_POLL_ENABLED_ENV_KEY]: flag, [TELEMETRY_POLL_SECRETS_ENV_KEY]: secretsPath })));
 });
 
 test('default/group/full-key precedence and profile-only inheritance do not guess another credential', async () => {
@@ -194,7 +200,7 @@ test('unknown/private fields and malformed shapes are rejected before resolution
     { ...policy(), targets: [{ targetPublicKey: A.toLowerCase() }] }];
   for (const p of variants) safeError(() => enabled(files(p)));
   for (const s of [null, [], {}, { ...secretFile(), version: 2 }, { ...secretFile(), password: 'SECRET-SENTINEL' },
-    { version: 1, secrets: {} }, { version: 1, secrets: { 'bad.reference': 'DEFAULT-7' } },
+    { version: 1, secrets: { 'bad.reference': 'DEFAULT-7' } },
     { version: 1, secrets: { defaultPrivateRef: { password: 'SECRET-SENTINEL' } } }]) safeError(() => enabled(files(policy(), s)));
 });
 
@@ -204,9 +210,8 @@ test('duplicates, overlapping groups and missing references including shadowed/u
   p = policy(); p.groups.push({ id: 'other', credentialRef: 'groupPrivateRef', targetPublicKeys: [A] }); variants.push(p);
   p = policy(); p.groups.push({ id: 'privateGroup', credentialRef: 'groupPrivateRef', targetPublicKeys: [D] }); variants.push(p);
   p = policy(); p.groups[0].targetPublicKeys.push(A); variants.push(p);
-  for (const source of ['default', 'group', 'target']) {
+  for (const source of ['group', 'target']) {
     p = policy();
-    if (source === 'default') p.defaultCredentialRef = 'SECRET-SENTINEL';
     if (source === 'group') p.groups[0].credentialRef = 'SECRET-SENTINEL';
     if (source === 'target') p.targets[0].credentialRef = 'SECRET-SENTINEL';
     variants.push(p);
@@ -228,13 +233,13 @@ test('bounded references/groups/total assignments reject excess while accepting 
   safeError(() => enabled(files({ ...policy(), defaultCredentialRef: 'x'.repeat(33) })));
 });
 
-test('guest password byte limits reject controls, invalid Unicode, blank, oversize and unused invalid values without truncation', async () => {
-  for (const password of ['', ' ', ' '.repeat(15), 'a'.repeat(16), '😀'.repeat(4), 'é'.repeat(8), '\u0000', 'ok\n',
+test('guest password byte limits allow empty values and reject controls, invalid Unicode, oversize and unused invalid values without truncation', async () => {
+  for (const password of [' ', ' '.repeat(15), 'a'.repeat(16), '😀'.repeat(4), 'é'.repeat(8), '\u0000', 'ok\n',
     'ok\t', 'ok\u007F', 'ok\u0080', '\uD800', '\uDC00', 'x\uD800y', null, 7]) {
     const s = secretFile(); s.secrets.unused = password;
     safeError(() => enabled(files(policy(), s)));
   }
-  for (const password of ['x', 'x'.repeat(15), 'é'.repeat(7) + 'x', '😀😀😀abc', ' guest value ']) {
+  for (const password of ['', 'x', 'x'.repeat(15), 'é'.repeat(7) + 'x', '😀😀😀abc', ' guest value ']) {
     const s = secretFile(); s.secrets.defaultPrivateRef = password;
     const config = enabled(files(policy(), s));
     assert.equal(await samplePassword(config, D), password);

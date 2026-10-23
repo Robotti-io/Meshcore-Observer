@@ -13,12 +13,12 @@ const targetValid = compileSchema(telemetryPollTargetSchema);
 const credentials = new WeakMap();
 const MESSAGES = Object.freeze({
   settings: 'Invalid telemetry polling settings: check configured whole-number bounds and retry maximum >= retry base',
-  files: 'Telemetry polling requires policy and secret files together; set PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE and PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE',
+  files: 'Telemetry polling requires PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE; a secrets file can only be supplied with a policy',
   policy: 'Invalid telemetry polling policy file: use version 1, allowed fields and bounded full public-key target/group assignments',
-  secrets: 'Invalid telemetry polling secret file: use version 1, bounded references and guest passwords of 1 to 15 UTF-8 bytes without controls or invalid encoding',
+  secrets: 'Invalid telemetry polling secret file: use version 1, bounded references and guest passwords of 0 to 15 UTF-8 bytes without controls or invalid encoding',
   read: 'Cannot read telemetry polling files: supply readable regular UTF-8 JSON files of at most 65536 bytes',
   assignments: 'Invalid telemetry polling assignments: target and group IDs must be unique, group membership unambiguous, excluded targets not also assigned and total distinct targets <= 256',
-  references: 'Invalid telemetry polling credential references: every default, group and target reference must exist in the secret file',
+  references: 'Invalid telemetry polling credential references: every non-default group and target reference must exist in the secret file',
   components: 'Invalid telemetry polling components: enable at least one of status, sensors or neighbours'
 });
 
@@ -68,17 +68,20 @@ export function loadTelemetryPolling(input) {
   if (!loadValid(input) || input.settings.retryBaseMs > input.settings.retryMaxMs) fail('settings');
   const { settings, policyPath, secretsPath } = input;
   const supplied = policyPath !== null || secretsPath !== null;
-  if ((supplied || settings.enabled) && (policyPath === null || secretsPath === null)) fail('files');
+  if ((supplied || settings.enabled) && policyPath === null) fail('files');
+  if (secretsPath !== null && policyPath === null) fail('files');
 
   let policy = {};
   let secrets = new Map();
   if (supplied) {
     policy = readJson(policyPath);
     if (!policyValid(policy)) fail('policy');
-    const rawSecrets = readJson(secretsPath);
-    if (!secretsValid(rawSecrets)) fail('secrets');
-    if (Object.values(rawSecrets.secrets).some(password => Buffer.byteLength(password, 'utf8') > 15)) fail('secrets');
-    secrets = new Map(Object.entries(rawSecrets.secrets));
+    if (secretsPath !== null) {
+      const rawSecrets = readJson(secretsPath);
+      if (!secretsValid(rawSecrets)) fail('secrets');
+      if (Object.values(rawSecrets.secrets).some(password => Buffer.byteLength(password, 'utf8') > 15)) fail('secrets');
+      secrets = new Map(Object.entries(rawSecrets.secrets));
+    }
   }
 
   const assigned = new Map();
@@ -104,7 +107,7 @@ export function loadTelemetryPolling(input) {
   if (assigned.size > TELEMETRY_POLL_MAX_TARGETS) fail('assignments');
   // Exclusion is an operator veto; listing the same key as assigned is contradictory.
   if ((policy.excludedTargets ?? []).some(key => assigned.has(key))) fail('assignments');
-  if ([...references].some(ref => !secrets.has(ref))) fail('references');
+  if ([...references].some(ref => ref !== policy.defaultCredentialRef && !secrets.has(ref))) fail('references');
 
   const config = { ...settings,
     components: { ...TELEMETRY_POLL_COMPONENT_DEFAULTS, ...policy.components },
@@ -120,7 +123,7 @@ export function loadTelemetryPolling(input) {
   if (!configValid(config)) fail('settings');
   freeze(config);
   if (settings.enabled) credentials.set(config, {
-    defaultPassword: secrets.get(policy.defaultCredentialRef),
+    defaultPassword: secrets.get(policy.defaultCredentialRef) ?? '',
     byTarget: new Map([...assigned].map(([key, ref]) => [key, secrets.get(ref)]))
   });
   return config;

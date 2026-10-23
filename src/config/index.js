@@ -4,7 +4,8 @@ import { configSchema } from './schema.js';
 import { loadBotsConfig } from '../bots/bots-config-loader.js';
 import { loadBrokersConfig } from '../mqtt/brokers-config-loader.js';
 import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS, remoteRequestEnvSchema } from '../radio/remote-coordinator-schemas.js';
-import { REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, REGION_ANSWER_FRESHNESS_ENV_KEY, regionEnvSchema } from '../regions/region-schemas.js';
+import { REGION_ANSWER_FRESHNESS_DEFAULT_HOURS, REGION_ANSWER_FRESHNESS_ENV_KEY, REGION_SCOPES_ENV_KEY,
+  configuredRegionScopesSchema, regionEnvSchema, regionScopesEnvSchema } from '../regions/region-schemas.js';
 import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS,
   regionQueryEnvSchema, regionQueryConfigSchema } from '../regions/region-query-schemas.js';
 import { assertRegionQueryInput } from '../regions/region-query-validation.js';
@@ -27,6 +28,8 @@ const validate = compileSchema(configSchema);
 const remoteEnvValid = compileSchema(remoteRequestEnvSchema);
 const regionEnvValid = compileSchema(regionEnvSchema);
 const regionQueryEnvValid = compileSchema(regionQueryEnvSchema);
+const configuredRegionScopesValid = compileSchema(configuredRegionScopesSchema);
+const validateRegionScopesEnv = compileSchema(regionScopesEnvSchema);
 const telemetryEnvValid = compileSchema(telemetryEnvSchema);
 const telemetryPollEnvValid = compileSchema(telemetryPollEnvSchema);
 
@@ -229,6 +232,16 @@ function readRegions(env) {
   return regions;
 }
 
+function readKnownRegionScopes(env) {
+  const key = REGION_SCOPES_ENV_KEY;
+  if (env[key] === undefined || env[key] === '') return [];
+  const input = { [key]: env[key] };
+  if (!validateRegionScopesEnv(input)) throw new ConfigError(`Invalid ${key}: ${formatErrors(validateRegionScopesEnv.errors)}`);
+  const scopes = env[key].split(',').map(scope => scope.trim());
+  if (!configuredRegionScopesValid(scopes)) throw new ConfigError(`Invalid ${key}: ${formatErrors(configuredRegionScopesValid.errors)}`);
+  return scopes;
+}
+
 /**
  * Brokers are configured via a JSON file (an array of independent broker
  * definitions), the same pattern as readBots() below, rather than flat env
@@ -330,6 +343,7 @@ export function loadConfig(env = process.env) {
     telemetry: readTelemetry(env),
     telemetryPolling: readTelemetryPolling(env),
     regions: readRegions(env),
+    knownRegionScopes: readKnownRegionScopes(env),
     remoteRequests: readRemoteRequests(env)
   };
 

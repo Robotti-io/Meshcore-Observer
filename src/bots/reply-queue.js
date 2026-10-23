@@ -104,7 +104,7 @@ export class ReplyQueue {
    * into an actual transmission; nothing here executes caller-supplied
    * code per item.
    *
-   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string}} item
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, regionScope?: string|null}} item
    * @returns {number|null} Durable interaction ID after acceptance, or null when stopped.
    */
   enqueue(item) {

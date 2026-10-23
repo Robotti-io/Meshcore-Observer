@@ -1,3 +1,5 @@
+import { configuredRegionScopesSchema } from '../regions/region-schemas.js';
+
 // The shape of one channel bot definition - shared, by direct reference,
 // with src/config/schema.js's `bots` property, so the two can never drift
 // out of sync the way two hand-maintained copies could (see git history
@@ -45,6 +47,26 @@ export const botConfigSchema = {
   properties: {
     name: { type: 'string', minLength: 1 },
     channel: { type: 'string', minLength: 1 },
+    // A string fixes every reply to one region. An array allows replies only
+    // to commands scoped to one of those case-sensitive regions.
+    regionScope: {
+      oneOf: [
+        {
+          type: 'string',
+          minLength: 1,
+          maxLength: 30,
+          pattern: '^[^\\u0000-\\u001F\\u007F]+$',
+          not: { pattern: '^\\s+$' }
+        },
+        {
+          type: 'array',
+          minItems: 1,
+          maxItems: 256,
+          uniqueItems: true,
+          items: configuredRegionScopesSchema.items
+        }
+      ]
+    },
     enabled: { type: 'boolean' },
     minHops: { type: 'integer', minimum: 0 },
     maxMessageBytes: { type: 'integer', minimum: 1 },

@@ -272,6 +272,7 @@ async function main() {
       botConfig,
       logger,
       replyQueue,
+      getKnownRegionScopes: () => [...config.knownRegionScopes, ...metricsStore.getKnownRegionScopes()],
       nodeRegistry,
       statsReporter,
       commandHandlers: createDefaultCommandHandlers({ nodeRegistry, statsReporter }),

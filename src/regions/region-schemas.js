@@ -46,6 +46,19 @@ const answerProperties = {
 };
 export const regionAnswerSchema = object(answerProperties);
 export const regionObservedAnswerSchema = object({ ...answerProperties, observedAt: epoch });
+export const knownRegionScopesSchema = { type: 'array', maxItems: 4096, uniqueItems: true, items: {
+  type: 'string', minLength: 1, maxLength: 31,
+  not: { pattern: '[,\\u0000-\\u001F\\u007F-\\u009F]' }
+} };
+export const configuredRegionScopesSchema = { ...knownRegionScopesSchema, maxItems: 256,
+  items: { ...knownRegionScopesSchema.items,
+    not: { anyOf: [knownRegionScopesSchema.items.not, { pattern: '^\\*?$|^\\$' }] }
+  }
+};
+export const REGION_SCOPES_ENV_KEY = 'PACKETCAPTURE_REGION_SCOPES';
+export const regionScopesEnvSchema = object({
+  [REGION_SCOPES_ENV_KEY]: { type: 'string', maxLength: 8192 }
+}, []);
 
 const outcomeProperties = {
   requestId: uuid, runId: uuid, observerPublicKey: key, targetPublicKey: key,

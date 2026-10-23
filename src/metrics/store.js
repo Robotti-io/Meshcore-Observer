@@ -15,7 +15,7 @@ import { createRegionPollState } from './region-poll-state.js';
 import { createRegionHistory } from './region-history.js';
 import { createRegionReads } from './region-reads.js';
 import { assertRegionInput } from '../regions/region-validation.js';
-import { regionPruneSchema } from '../regions/region-schemas.js';
+import { knownRegionScopesSchema, regionPruneSchema } from '../regions/region-schemas.js';
 import { telemetryMigration } from './telemetry-migration.js';
 import { createTelemetryHistory } from './telemetry-history.js';
 import { createTelemetryReads } from './telemetry-reads.js';
@@ -69,6 +69,7 @@ function explainDatabaseLock(error) {
 }
 
 const validateBotInteraction = compileSchema(botInteractionSchema);
+const validateKnownRegionScopes = compileSchema(knownRegionScopesSchema);
 const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
 const validateBotUsageRange = compileSchema(botUsageRangeSchema);
 const validateBotUsagePage = compileSchema(botUsagePageSchema);
@@ -537,7 +538,10 @@ const MIGRATIONS = [
   regionMigration,
   regionPollMigration,
   telemetryMigration,
-  telemetryPollMigration
+  telemetryPollMigration,
+  { version: 18, statements: [
+    "ALTER TABLE bot_replies ADD COLUMN region_scope TEXT CHECK(region_scope IS NULL OR length(region_scope) BETWEEN 1 AND 31)"
+  ] }
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -549,6 +553,7 @@ const MIGRATIONS = [
 // channel/hop_count/path/enqueued_at/expires_at to begin with.
 const BOT_REPLY_COLUMNS = `
   id, bot_name AS botName, channel, trigger, sender, hop_count AS hopCount, path, hash,
+  region_scope AS regionScope,
   handler_state_json AS handlerStateJson,
   sender_identifier AS senderIdentifier, sender_identifier_kind AS senderIdentifierKind,
   sender_identifier_source AS senderIdentifierSource,
@@ -626,6 +631,7 @@ export class MetricsStore {
   #insertBrokerDeliveryStmt;
   #upsertNodeStmt;
   #insertBotReplyStmt;
+  #knownRegionScopesStmt;
   #countPendingBotRepliesStmt;
   #selectExpiredBotRepliesStmt;
   #expireBotRepliesStmt;
@@ -701,10 +707,22 @@ export class MetricsStore {
     this.#insertBotReplyStmt = this.#db.prepare(`
       INSERT INTO bot_replies (
         bot_name, channel, trigger, sender, hop_count, path, hash,
+        region_scope,
         handler_state_json,
         enqueued_at, expires_at, status,
         sender_identifier, sender_identifier_kind, sender_identifier_source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+    `);
+    this.#knownRegionScopesStmt = this.#db.prepare(`
+      SELECT DISTINCT json_each.value AS regionScope
+      FROM region_latest
+      JOIN region_answers ON region_answers.id = region_latest.answer_id
+      JOIN json_each(region_answers.regions_json)
+      WHERE length(json_each.value) BETWEEN 1 AND 31
+        AND json_each.value <> '*'
+        AND substr(json_each.value, 1, 1) <> '$'
+      ORDER BY regionScope COLLATE BINARY
+      LIMIT 4096
     `);
     this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
@@ -1728,12 +1746,13 @@ export class MetricsStore {
    * it later with no extra lookups - see the v5 migration's doc comment for
    * why this and every resolved reply live in the same table now.
    *
-   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
+   * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, regionScope?: string|null, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
     const interaction = {
       ...item,
       handlerStateJson: item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
+      regionScope: item.regionScope ?? null,
       senderIdentifier: item.senderIdentifier ?? null,
       senderIdentifierKind: item.senderIdentifierKind ?? null,
       senderIdentifierSource: item.senderIdentifierSource ?? null
@@ -1749,6 +1768,7 @@ export class MetricsStore {
       interaction.hopCount,
       interaction.path,
       interaction.hash,
+      interaction.regionScope,
       interaction.handlerStateJson,
       interaction.enqueuedAt,
       interaction.expiresAt,
@@ -1886,6 +1906,13 @@ export class MetricsStore {
   queryRegionAnswers(query) { return this.#regionReads.answers(query); }
   queryRegionOutcomes(query) { return this.#regionReads.outcomes(query); }
   queryRegionPublications(query) { return this.#regionReads.publications(query); }
+  getKnownRegionScopes() {
+    const regionScopes = this.#knownRegionScopesStmt.all().map((row) => row.regionScope);
+    if (!validateKnownRegionScopes(regionScopes)) {
+      throw new Error(`Invalid known region scopes: ${formatErrors(validateKnownRegionScopes.errors)}`);
+    }
+    return regionScopes;
+  }
   recordTopologyCoverage(sample) { return this.#topology.recordCoverage(sample); }
   queryTopologyPaths(query) { return this.#topology.paths(query); }
   getTopologyPath(query) { return this.#topology.path(query); }

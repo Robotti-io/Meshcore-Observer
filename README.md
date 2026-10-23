@@ -201,6 +201,31 @@ and `{hash}` (the same packet hash published to MQTT, lowercased - handy
 for linking back to the packet on a platform like OKI Mesh's CoreScope
 dashboard: `https://map.okimesh.org/#/packets/{hash}`).
 
+Channel bot messages always use flood routing; a region scope is optional
+metadata on that flood-routed message. Region names are case-sensitive. A
+bot's optional `regionScope` setting can be a string or an array. A string is
+a fixed region for every reply from that bot and takes precedence over the
+command's incoming scope. An array, such as `"regionScope": ["oki", "cvg"]`,
+is a per-bot allowlist: the bot replies only to commands scoped to one of those
+regions, and mirrors the matched command scope; unscoped commands and other
+regions are skipped. The listed names are known to that bot even if discovery
+has not found them and they are absent from the observer-wide list. Without
+that setting, the bot mirrors the incoming scope, resolving scoped commands
+against the latest region-discovery answers and the observer-wide
+`PACKETCAPTURE_REGION_SCOPES` setting. That setting is a comma-separated list
+such as `cvg,oki,OH.BUT.Fairfield.Celado`; put
+`PACKETCAPTURE_REGION_SCOPES=cvg,oki` in `.env.local` to make both names known
+to every bot even when discovery has not found them. Since an incoming packet
+contains only a short transport code, a bot without a fixed region skips a
+scoped command if its region is unknown or ambiguous among the known names.
+For bots without an array allowlist, an unscoped command reply has no temporary
+region override and uses the Companion's configured default, if any. The
+currently exposed Companion command cannot force an unscoped send when a device
+default region is configured. Scoped replies temporarily apply the matched
+region and then restore the Companion's default. These region-scope changes
+are serialized with radio commands; if the override cannot be restored, the
+radio connection is reset to prevent later traffic from inheriting it.
+
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
 times the mesh relays it to you. Decrypted command messages must include a
@@ -782,10 +807,11 @@ Region discovery is disabled by default and uses the separately configured
 opt-in scheduler described below. Telemetry and region MQTT publication remain
 separate release features.
 
-Operator overrides and code defaults match `.env.example`. All settings are
-whole numbers; an omitted value uses the default, while an explicit blank,
+Operator overrides and code defaults match `.env.example`. Numeric settings
+are whole numbers; an omitted value uses the default, while an explicit blank,
 fractional or out-of-range value fails startup before storage, radio or network
-effects.
+effects. `PACKETCAPTURE_REGION_SCOPES` is a separate optional comma-separated
+list and may be left empty.
 
 | Setting | Default | Valid range |
 | --- | --- | --- |
@@ -947,13 +973,14 @@ volume and preserve a verified closed backup before the first upgraded start.
 
 The producer is constructed only with `PACKETCAPTURE_REGION_DISCOVERY_ENABLED=true`;
 the omitted default is false. Code defaults and `.env.example` agree. An omitted
-setting uses its default; explicit blank, fractional or out-of-range values
-fail startup before opening storage, radio or network services, even when
-discovery is disabled. Retry base must not exceed its maximum.
+discovery setting uses its default; explicit blank, fractional or out-of-range
+discovery values fail startup before opening storage, radio or network services,
+even when discovery is disabled. Retry base must not exceed its maximum.
 
 | Setting | Default | Valid range / role |
 | --- | --- | --- |
 | `PACKETCAPTURE_REGION_DISCOVERY_ENABLED` | false | true/false; explicit opt-in |
+| `PACKETCAPTURE_REGION_SCOPES` | empty | Optional comma-separated, case-sensitive public region names known to all bots; up to 256 |
 | `PACKETCAPTURE_REGION_QUERY_REFRESH_HOURS` | 24 | Whole hours 1–8760; minimum target refresh and exhausted/unsupported cycle cooldown |
 | `PACKETCAPTURE_REGION_QUERY_RETRY_BASE_MINUTES` | 15 | Whole minutes 3–1440; initial retry and known contact deferral |
 | `PACKETCAPTURE_REGION_QUERY_RETRY_MAX_HOURS` | 6 | Whole hours 1–168; exponential retry ceiling including positive jitter |
@@ -1282,12 +1309,15 @@ a 24-hour per-component refresh objective. `.env.example` lists the matching
 code defaults and override bounds. Explicit invalid values fail before store,
 radio or network startup, including when disabled.
 
-Protected policy and secret files must be supplied together through
-`PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE` and
-`PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE`; disabled omission reads neither.
+Enabled polling requires a policy file through
+`PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE`; a secret file through
+`PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE` is optional. If the default
+credential is absent from that file, the Observer uses a blank guest password.
+Any non-default group or target credential reference must resolve in the secret
+file. With polling disabled and both paths omitted, neither file is read.
 The [configuration guide](docs/telemetry-polling.md) describes strict version-1
 files, default/group/full-key precedence, verified target profile overrides,
-1–15 UTF-8-byte guest credentials and safe errors. The two JSON example files
+0–15 UTF-8-byte guest credentials and safe errors. The two JSON example files
 contain synthetic values only. Credentials/reference mappings stay outside the
 ordinary configuration object in private process memory. Enabled polling uses
 these validated startup contracts before any login or data request.

@@ -45,7 +45,7 @@ export const botInteractionSchema = {
   additionalProperties: false,
   required: [
     'botName', 'channel', 'trigger', 'sender', 'hopCount', 'path', 'hash',
-    'handlerStateJson', 'enqueuedAt', 'expiresAt',
+    'regionScope', 'handlerStateJson', 'enqueuedAt', 'expiresAt',
     'senderIdentifier', 'senderIdentifierKind', 'senderIdentifierSource'
   ],
   properties: {
@@ -56,6 +56,7 @@ export const botInteractionSchema = {
     hopCount: { type: 'integer', minimum: 0, maximum: 63 },
     path: { type: 'string' },
     hash: { type: 'string', minLength: 1 },
+    regionScope: { type: ['string', 'null'], minLength: 1, maxLength: 31 },
     handlerStateJson: { type: 'string', minLength: 1 },
     enqueuedAt: epochMs,
     expiresAt: epochMs,

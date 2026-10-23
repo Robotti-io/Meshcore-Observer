@@ -2,7 +2,7 @@
 
 **GitHub epic:** [#20](https://github.com/Robotti-io/Meshcore-Observer/issues/20)
 
-**Child issue register:** [Pillar 3 breakdown — 14 issues](pillar-3-child-issues.md), captured on 2026-10-07; implementation planning pending.
+**Child issue register:** [Pillar 3 breakdown — 14 issues](pillar-3-child-issues.md), captured on 2026-10-07. The current branch adds the initial channel-bot region-scoping baseline described under Scope 4; broader per-command policy and delivery work remain in planning.
 
 ## Summary
 
@@ -578,6 +578,26 @@ The community direction includes applying appropriate scopes to repeaters and ha
 
 MeshCore Observer should support this behavior so bot responses can respect the routing scope appropriate to the command/channel rather than defaulting to an unrestricted flood.
 
+#### Current channel-bot baseline
+
+The current branch provides bot-level `regionScope` configuration in
+`bots.config.json`. A string fixes every reply from that bot to one public
+region. An array is an allowlist: the bot answers only scoped commands matching
+one of those names and mirrors the incoming region; unscoped commands and
+unlisted regions are skipped. Names in the array are sufficient for that bot to
+resolve the packet scope without region discovery or the observer-wide
+`PACKETCAPTURE_REGION_SCOPES` list. With no bot setting, the bot mirrors a
+resolvable incoming scope using recent discovery and the observer-wide list;
+unknown or ambiguous scoped commands are skipped.
+
+All channel-bot replies continue to use flood routing. Scoped sends temporarily
+apply the region transport key and clear the override to restore the Companion's
+configured default within the serialized radio command. Failure to restore scope resets the radio
+connection. This bot-level behavior is the current baseline; it does not yet
+provide per-command scope selection, explicit fallback policy, or the broader
+failure/recovery validation described in this feature plan. See the operator
+contract in the [README](../../../README.md#2-channel-bots).
+
 ---
 
 ### 4.2 User Stories
@@ -635,13 +655,16 @@ Operator-facing configuration should use meaningful scope identifiers wherever p
 
 The bot configuration should not normally require an operator to manually derive or enter raw protocol transport keys when a documented region name or equivalent semantic identifier can be safely resolved.
 
-The implementation must determine:
+The current implementation derives the transport key from the case-sensitive
+public region name and uses recent region discovery, the observer-wide
+`PACKETCAPTURE_REGION_SCOPES` list, and (for array mode) the bot's own names as
+resolution candidates. Unknown or ambiguous incoming scopes are skipped. The
+remaining per-command design decisions include:
 
-- How OKI Mesh region names are defined.
-- How region names map to MeshCore transport/scope keys.
-- Whether that mapping is static or derived.
 - Whether channel configuration supplies a default region.
-- How invalid/unknown regions are handled.
+- How per-command region selection and fallback policy interact with the
+  existing bot-level fixed/allowlist behavior.
+- How invalid/unknown required scopes are handled across restart and queue recovery.
 
 ---
 

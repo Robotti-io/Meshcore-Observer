@@ -3,6 +3,7 @@ import { runtimeEventBudgetSchema } from '../metrics/process-schemas.js';
 import { topologyConfigSchema } from '../nodes/topology-schemas.js';
 import { remoteCoordinatorLimitsSchema } from '../radio/remote-coordinator-schemas.js';
 import { regionQueryConfigSchema } from '../regions/region-query-schemas.js';
+import { configuredRegionScopesSchema } from '../regions/region-schemas.js';
 import { regionPublicationConfigSchema } from '../mqtt/region-publication-schemas.js';
 import { telemetryConfigSchema } from '../telemetry/telemetry-schemas.js';
 import { telemetryPollConfigSchema } from '../telemetry/polling-schemas.js';
@@ -11,13 +12,14 @@ export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions', 'telemetry', 'telemetryPolling'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions', 'knownRegionScopes', 'telemetry', 'telemetryPolling'],
   properties: {
     telemetryPolling: telemetryPollConfigSchema,
     telemetry: telemetryConfigSchema,
     remoteRequests: remoteCoordinatorLimitsSchema,
     topology: topologyConfigSchema,
     regions: regionQueryConfigSchema,
+    knownRegionScopes: configuredRegionScopesSchema,
     radio: {
       type: 'object',
       additionalProperties: false,

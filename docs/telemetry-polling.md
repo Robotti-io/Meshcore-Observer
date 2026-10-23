@@ -1,9 +1,9 @@
 # Telemetry polling configuration
 
 Delivered phases: **#34 T1–T6 startup, protocol, guarded owner, durable state, opt-in runtime producer and offline acceptance**.
-Polling remains disabled by default. Explicitly enabling it with valid policy and
-guest-secret files now activates guarded collection after the startup delay and
-distributed component deadlines. Integrated acceptance uses synthetic offline
+Polling remains disabled by default. Explicitly enabling it with a valid policy
+and optional guest-secret file now activates guarded collection after the
+startup delay and distributed component deadlines. Integrated acceptance uses synthetic offline
 transport frames; no live device, credential or deployment is used. Saved telemetry
 freshness and shared history retention continue to operate independently.
 
@@ -25,20 +25,24 @@ refresh cadence and pruning are separate settings.
 ## Protected files
 
 The default file paths are absent. With polling disabled and both paths omitted,
-no telemetry policy/secret files are opened. To configure polling, provide both
-`PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE` and
-`PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE`. Enabled polling requires the pair;
-explicit configuration while disabled also requires and validates the pair.
-This prevents a partially configured policy from quietly gaining unresolved
-credential references later.
+no telemetry policy/secret files are opened. Enabled polling requires
+`PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE`; the secrets path is optional. If no
+default guest password is defined, the default credential is the empty string,
+matching MeshCore repeaters whose guest password remains blank. A configured
+secret file may also define a reference with an empty value. Any non-default
+credential reference in a group or target must still resolve in that file.
+Providing a secrets path without a policy path is invalid.
 
 Use `telemetry.config.example.json` and `telemetry.secrets.example.json` as
 **synthetic examples only**. Their keys/passwords identify no real repeaters and
-are not community credentials. Choose an intentional guest-only credential;
-there is no guessed or built-in password. Keep it different from the management
-password. Firmware may grant management access before the host can reject a
-mistaken credential; the shared owner stops further queries on unsafe role proof.
-Guest login itself establishes transient remote ACL/session state.
+are not community credentials. MeshCore's documented default guest password is
+blank, so blank is the default when no value is configured. A nonblank guest
+credential may be supplied by the default reference or overridden by target or
+group. Never use the management password. On MeshCore firmware, a blank login
+may reuse the caller's existing ACL entry before password comparison; the
+Observer accepts only a verified guest-only proof and will not send telemetry
+data after an admin or otherwise unsafe proof. Guest login itself establishes
+transient remote ACL/session state.
 
 Store operator files under local names `telemetry.config.json` and
 `telemetry.secrets.json`, both ignored by Git, or supply explicit private mount
@@ -69,9 +73,11 @@ at every object boundary.
   optional `credentialRef` overrides its group/default. Target rows must be
   unique. A target row may intentionally also belong to a group: its explicit
   credential wins; a profile-only row inherits the group credential.
-- All references must exist in the supplied secret file, including defaults or
-  group references shadowed by an explicit target override. A failed login will
-  never try another reference. Names and shortened keys never select credentials.
+- All non-default references must exist in the supplied secret file, including
+  group references shadowed by an explicit target override. The default
+  reference may be absent, which selects the blank guest password. A failed
+  login will never try another reference. Names and shortened keys never select
+  credentials.
 - Profile overrides are target scoped. `statusProfile` requires a verified
   `layout` (`common48` or `current56`) and `evidence: "established"`.
   `emitterProfile: "positive-channels"` requires independently verified emitter
@@ -95,11 +101,15 @@ and MCU temperature; environmental readings can remain unavailable.
 ## Version 1 secret file and private memory
 
 The shape is `{ "version": 1, "secrets": { "default": "operator-guest-value" } }`.
+The secrets file itself may be omitted to use a blank default guest password.
+When present, an absent default reference or an explicit empty default value also
+means blank. Per-target and group references other than the default must resolve.
 Use 1–32 references, each 1–32 characters starting with a letter and containing
-only letters, digits, `_` or `-`. Group IDs use the same syntax. Each guest value
-must be nonblank, contain no control/unpaired-surrogate characters and encode to
-1–15 UTF-8 bytes. Multibyte characters count as multiple bytes. No trimming or
-silent wire truncation occurs. Every value is validated, including unused ones.
+only letters, digits, _ or -. Group IDs use the same syntax. Guest values may be
+empty; nonempty values must contain no control/unpaired-surrogate characters
+and encode to at most 15 UTF-8 bytes. Multibyte characters count as multiple
+bytes. No trimming or silent wire truncation occurs. Every value is validated,
+including unused ones.
 
 The normalized `telemetryPolling` config is deeply frozen and contains scheduling
 values, component parameters and safe profiles only. Paths, group IDs, references

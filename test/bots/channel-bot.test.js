@@ -10,6 +10,7 @@ import { ChannelBot } from '../../src/bots/channel-bot.js';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
+import { calculateRegionTransportCode, deriveRegionTransportKey } from '../../src/bots/region-scope.js';
 import { RepeatCheckTracker } from '../../src/bots/repeat-check-tracker.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { calculatePacketHash } from '../../src/packets/packet-hash.js';
@@ -48,12 +49,22 @@ function channelHashByteFor(key16) {
   return createHash('sha256').update(key16).digest().subarray(0, 1);
 }
 
-function buildGrpTxtFrame({ channelKey, hops = [], text, routeType = RouteType.FLOOD, timestamp }) {
+function buildGrpTxtFrame({ channelKey, hops = [], text, routeType = RouteType.FLOOD, timestamp, regionScope }) {
   const { ciphertext, mac } = encryptGroupTextPayload({ key16: channelKey, text, timestamp });
   const payload = Buffer.concat([channelHashByteFor(channelKey), mac, ciphertext]);
+  const frame = buildRawFrame({
+    payloadType: PayloadType.GRP_TXT,
+    routeType: regionScope ? RouteType.FLOOD : routeType,
+    pathHashSize: 1,
+    hops,
+    payload
+  });
+  if (!regionScope) return frame;
+  const packet = Packet.fromBytes(frame);
   return buildRawFrame({
     payloadType: PayloadType.GRP_TXT,
-    routeType,
+    routeType: RouteType.TRANSPORT_FLOOD,
+    transportCodes: [calculateRegionTransportCode(packet, regionScope), 0],
     pathHashSize: 1,
     hops,
     payload
@@ -66,8 +77,10 @@ function fakeRadioManager() {
   const connection = {
     getChannels: async () => [{ channelIdx: 0, name: '', secret: Buffer.alloc(16) }],
     setChannel: async () => {},
+    setFloodScope: async (key) => commandCalls.push({ action: 'set-scope', key: Buffer.from(key) }),
+    clearFloodScope: async () => commandCalls.push({ action: 'clear-scope' }),
     sendChannelTextMessage: async (channelIdx, message) => {
-      commandCalls.push({ channelIdx, message });
+      commandCalls.push({ action: 'send', channelIdx, message });
     }
   };
   return {
@@ -78,7 +91,7 @@ function fakeRadioManager() {
     listenerCount: (event) => emitter.listenerCount(event),
     emitConnected: () => emitter.emit('radio.connected', {}),
     emitPacket: (frame) => emitter.emit('radio.packet', { lastSnr: 10, lastRssi: -50, raw: frame }),
-    runCommand: async (fn) => fn(connection)
+    runCommand: async (fn) => fn(connection, { generation: 1 })
   };
 }
 
@@ -135,6 +148,19 @@ test('replies to an exact trigger on the bot channel meeting the hop requirement
   assert.equal(radioManager.commandCalls.length, 1);
   assert.equal(radioManager.commandCalls[0].message, '🔁 @[Jeymz]! 3 hops via AA➡️BB➡️CC');
   assert.equal(bot.getRepliesSent(), 1);
+});
+
+test('a configured region candidate scopes a reply when the command packet matches it', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey: deriveHashtagChannelKey('#echo'), hops: ['aa'],
+    text: 'Jeymz: !echo', regionScope: 'Oki' }));
+  await flush();
+  assert.deepEqual(radioManager.commandCalls.map(call => call.action), ['set-scope', 'send', 'clear-scope']);
+  assert.deepEqual(radioManager.commandCalls[0].key, deriveRegionTransportKey('Oki'));
+  assert.notDeepEqual(radioManager.commandCalls[0].key, deriveRegionTransportKey('oki'));
+  assert.equal(radioManager.commandCalls[1].channelIdx, 0);
 });
 
 test('does not reply to a non-trigger message, and logs why at debug level', async () => {

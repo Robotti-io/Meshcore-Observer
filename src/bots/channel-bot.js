@@ -5,6 +5,7 @@ import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
 import { RepeatCheckTracker } from './repeat-check-tracker.js';
 import { createDefaultCommandHandlers } from './command-handlers/index.js';
 import { channelHashForKey } from './channel-key.js';
+import { deriveRegionTransportKey, matchPacketRegionScope } from './region-scope.js';
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
 import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.js';
@@ -28,6 +29,12 @@ function formatPath(packet) {
     .getPathHashes()
     .map((hash) => Buffer.from(hash).toString('hex').toUpperCase())
     .join('➡️');
+}
+
+function hasConfiguredRegionScope(scope, configuredScopes) {
+  if (!scope || !configuredScopes) return false;
+  const scopeKey = deriveRegionTransportKey(scope).toString('hex');
+  return configuredScopes.some((candidate) => deriveRegionTransportKey(candidate).toString('hex') === scopeKey);
 }
 
 /**
@@ -64,6 +71,9 @@ export class ChannelBot {
   #radioManager;
   #name;
   #channelName;
+  #configuredRegionScope;
+  #configuredRegionScopes;
+  #getKnownRegionScopes;
   #enabled;
   #minHops;
   #maxMessageBytes;
@@ -107,6 +117,7 @@ export class ChannelBot {
     now = () => Date.now(),
     repeatCheckTracker = new RepeatCheckTracker({ timeoutMs: repeatCheckTimeoutMs, now }),
     replyQueue,
+    getKnownRegionScopes = () => [],
     nodeRegistry,
     statsReporter,
     commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter })
@@ -114,6 +125,9 @@ export class ChannelBot {
     this.#radioManager = radioManager;
     this.#name = botConfig.name;
     this.#channelName = botConfig.channel;
+    this.#configuredRegionScope = typeof botConfig.regionScope === 'string' ? botConfig.regionScope : null;
+    this.#configuredRegionScopes = Array.isArray(botConfig.regionScope) ? [...botConfig.regionScope] : null;
+    this.#getKnownRegionScopes = getKnownRegionScopes;
     this.#enabled = botConfig.enabled;
     this.#minHops = botConfig.minHops;
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
@@ -380,6 +394,45 @@ export class ChannelBot {
       return;
     }
 
+    // A string setting fixes every reply to one region. An array setting is
+    // an allowlist: only commands scoped to a listed region are answered, and
+    // the reply mirrors that command's scope. Bots without either setting
+    // mirror any scoped command whose region can be resolved.
+    let replyRegionScope = this.#configuredRegionScope;
+    if (!replyRegionScope) {
+      let knownRegionScopes;
+      try {
+        knownRegionScopes = this.#getKnownRegionScopes();
+      } catch (err) {
+        this.#logger.warn('bots.channelBot', 'could not read known regions; scoped command was not answered', {
+          bot: this.#name,
+          trigger: decrypted.text,
+          error: err.message
+        });
+        return;
+      }
+      const regionCandidates = [...new Set([...knownRegionScopes, ...(this.#configuredRegionScopes ?? [])])];
+      const regionMatch = matchPacketRegionScope(packet, regionCandidates);
+      if (regionMatch.status === 'unknown' || regionMatch.status === 'ambiguous') {
+        this.#logger.debug('bots.channelBot', 'scoped command region could not be resolved; reply was skipped', {
+          bot: this.#name,
+          trigger: decrypted.text,
+          resolution: regionMatch.status,
+          knownRegionCount: knownRegionScopes.length
+        });
+        return;
+      }
+      if (this.#configuredRegionScopes && !hasConfiguredRegionScope(regionMatch.regionScope, this.#configuredRegionScopes)) {
+        this.#logger.debug('bots.channelBot', 'command region is outside this bot\'s configured scopes; reply was skipped', {
+          bot: this.#name,
+          trigger: decrypted.text,
+          configuredRegionCount: this.#configuredRegionScopes.length
+        });
+        return;
+      }
+      replyRegionScope = regionMatch.regionScope;
+    }
+
     // Queued rather than sent immediately: the shared ReplyQueue holds
     // this until a quiet window is observed on the physical RF channel,
     // in FIFO order across every bot (see reply-queue.js). Enqueued after
@@ -394,6 +447,7 @@ export class ChannelBot {
     this.#replyQueue.enqueue({
       botName: this.#name,
       channel: this.#channelName,
+      regionScope: replyRegionScope,
       // command.trigger, not decrypted.text: argument-taking handlers
       // match text that also carries command-specific input.
       trigger: command.trigger,
@@ -432,9 +486,13 @@ export class ChannelBot {
    * is what provides that guarantee for this path, one level up from
    * where every other public method here still catches locally.
    *
-   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson: string}} item
+   * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson: string, regionScope?: string|null}} item
    */
-  async sendQueuedReply({ trigger, sender, hopCount, path, hash, handlerStateJson }) {
+  async sendQueuedReply({ trigger, sender, hopCount, path, hash, handlerStateJson, regionScope = null }) {
+    const effectiveRegionScope = this.#configuredRegionScope ?? regionScope;
+    if (this.#configuredRegionScopes && !hasConfiguredRegionScope(effectiveRegionScope, this.#configuredRegionScopes)) {
+      throw new Error('Queued bot reply has no allowed region scope');
+    }
     const command = this.#commands.get(trigger);
     if (!command) {
       // Not expected in the current architecture (bots.config.json is
@@ -470,7 +528,22 @@ export class ChannelBot {
       maxBytes: this.#maxMessageBytes
     });
 
-    await this.#radioManager.runCommand((connection) => connection.sendChannelTextMessage(this.#channelIdx, message));
+    await this.#radioManager.runCommand(async (connection, context) => {
+      if (!effectiveRegionScope) return connection.sendChannelTextMessage(this.#channelIdx, message);
+      const regionScopeKey = deriveRegionTransportKey(effectiveRegionScope);
+      try {
+        await connection.setFloodScope(regionScopeKey);
+        await connection.sendChannelTextMessage(this.#channelIdx, message);
+      } finally {
+        try { await connection.clearFloodScope(); }
+        catch {
+          // The region-scope override is connection-global. If it cannot be cleared,
+          // retire the radio session before another queued command can inherit it.
+          await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
+          throw new Error('Could not restore the Companion region scope after a bot reply');
+        }
+      }
+    });
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
 

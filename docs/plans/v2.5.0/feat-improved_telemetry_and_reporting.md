@@ -177,7 +177,7 @@ The implementation should support:
 - No telemetry passwords persisted in plaintext metrics/history tables.
 - No telemetry passwords included in structured logs, errors, dashboard APIs, or reports.
 
-The exact credential configuration model should be designed separately after protocol requirements are understood.
+The initial credential model is implemented by #34: polling requires an explicit policy file, while the protected secret file is optional. When the default reference has no secret entry, the guest password is blank, matching MeshCore's default. Non-default group/target references must resolve in the secret file; management credentials are never used. Password material remains private and is not persisted or logged. Live device/RF validation remains under #37.
 
 #### 1.3.6 Collected telemetry
 

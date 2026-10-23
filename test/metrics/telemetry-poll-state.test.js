@@ -23,7 +23,7 @@ test('migration 17 adds only empty polling datasets; legacy inventory and measur
   const prior = f.inspect(db => { db.exec(dropTelemetryPollSchema+' PRAGMA user_version=16;');
     return db.prepare('SELECT * FROM telemetry_observations').all(); });
   f.open(); assert.equal(f.store.queryTelemetryPollCandidates(query()).candidates.length, 0); f.close();
-  f.inspect(db => { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 17);
+  f.inspect(db => { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 18);
     assert.deepEqual(db.prepare('SELECT * FROM telemetry_observations').all(), prior);
     for (const table of ['telemetry_direct_evidence', 'telemetry_auth_outcomes', 'telemetry_poll_state'])
       assert.equal(db.prepare('SELECT count(*) AS n FROM '+table).get().n, 0);

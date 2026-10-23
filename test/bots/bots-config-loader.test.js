@@ -59,6 +59,17 @@ test('accepts an optional per-bot maxMessageBytes', () => {
   assert.equal(result[0].maxMessageBytes, 100);
 });
 
+test('accepts an optional case-sensitive regionScope separate from the channel', () => {
+  const bot = { ...VALID_BOT, channel: '#echo', regionScope: 'Oki' };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].channel, '#echo');
+  assert.equal(result[0].regionScope, 'Oki');
+  for (const regionScope of ['', '   ', 'bad\nregion', 'x'.repeat(31)]) {
+    assert.throws(() => withTempFile(JSON.stringify([{ ...VALID_BOT, regionScope }]),
+      (filePath) => loadBotsConfig(filePath)), BotsConfigError);
+  }
+});
+
 test('throws BotsConfigError for invalid JSON', () => {
   assert.throws(() => withTempFile('{ not valid json', (filePath) => loadBotsConfig(filePath)), BotsConfigError);
 });
