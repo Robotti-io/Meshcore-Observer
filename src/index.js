@@ -159,8 +159,10 @@ async function main() {
     preflightTimeoutMs: config.regions.queryPreflightTimeoutMs,
     hasForegroundWork: () => {
       if (replyQueue.size > 0) return true;
-      const status = metricsStore.getFloodAdvertState().status;
-      return status === 'pending' || status === 'sending';
+      const floodAdvert = metricsStore.getFloodAdvertState();
+      return floodAdvert.status === 'sending'
+        || (floodAdvert.status === 'pending'
+          && (floodAdvert.nextDueAt === null || Date.now() >= floodAdvert.nextDueAt));
     }
   });
 
