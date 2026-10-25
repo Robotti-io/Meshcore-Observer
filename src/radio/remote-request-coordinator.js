@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { Constants } from '@liamcottle/meshcore.js';
 import { performance } from 'node:perf_hooks';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { assertRemoteRequest, prepareRemoteRequest } from './remote-request.js';
@@ -14,6 +15,7 @@ import { telemetryPollConfigSchema } from '../telemetry/polling-schemas.js';
 import { withTelemetryGuestPassword } from '../telemetry/polling-config.js';
 import { createTelemetryGuestSessions } from '../telemetry/telemetry-guest-sessions.js';
 import { createTelemetryContactInventory } from '../telemetry/telemetry-contact-inventory.js';
+import { reconcileTelemetryContact } from '../telemetry/telemetry-contact-manager.js';
 import { prepareTelemetryContactInventory, prepareTelemetryContactRead, parseTelemetryContactFrame,
   parseTelemetryGuestLogin, parseTelemetryLoginAck, withPreparedTelemetryGuestLogin } from '../telemetry/telemetry-radio-adapter.js';
 import * as ownerSchemas from '../telemetry/telemetry-owner-schemas.js';
@@ -67,6 +69,18 @@ export class RemoteRequestCoordinator {
   #guestSessions;
   #guestScope = null;
   #sessionOnChange = null;
+
+  #responseTimeout(current, estimatedTimeoutMs) {
+    const routed = Boolean(current.telemetry);
+    const hopCount = current.telemetry?.routeEvidence?.path?.length ?? 0;
+    // Companion ACK estimates are commonly shorter than the complete routed
+    // request/response exchange. Leave a hop-scaled window for both directions.
+    const hopAllowanceMs = routed ? 4000 + hopCount * 5000 : 1000;
+    const timeoutMs = Math.min(this.#limits.responseTimeoutMaxMs,
+      Math.max(estimatedTimeoutMs + 1000, hopAllowanceMs));
+    current.responseTimeoutMs = timeoutMs;
+    return timeoutMs;
+  }
 
   constructor({ radio, airtimeCoordinator, hasForegroundWork, logger,
     ackTimeoutMs = REMOTE_REQUEST_DEFAULTS.ackTimeoutMs,
@@ -136,6 +150,96 @@ export class RemoteRequestCoordinator {
       ? `${snapshot.generation}:${snapshot.observerPublicKey.toUpperCase()}` : null;
     if (this.#guestScope && scope !== this.#guestScope) this.#clearGuestSessions();
     return this.#guestSessions.observe(snapshot);
+  }
+
+  async #traceTelemetryRoute(current, connection, route) {
+    const path = route.path;
+    if (!Array.isArray(path) || path.some(token => !/^[0-9A-F]{4}$/.test(token))) {
+      current.traceOutcome = 'invalid-route';
+      return { status: 'failed', reason: 'trace-invalid-route' };
+    }
+    const tagBytes = randomBytes(4);
+    const tag = tagBytes.readUInt32LE(0);
+    const pathBytes = path.flatMap(token => [Number.parseInt(token.slice(0, 2), 16), Number.parseInt(token.slice(2), 16)]);
+    const frame = Buffer.from([Constants.CommandCodes.SendTracePath, ...tagBytes, 0, 1, ...pathBytes]);
+    const timeoutMs = Math.min(this.#limits.responseTimeoutMaxMs, 15000 + path.length * 5000);
+    current.traceOutcome = 'pending';
+    current.traceAttemptedPath = [...path];
+    current.traceTimeoutMs = timeoutMs;
+    this.#logger.info('services.remoteRequests', 'Telemetry route trace started.', {
+      requestId: current.context.requestId, operation: current.context.operation,
+      generation: current.context.generation, phase: 'preflight', preflightKind: 'trace',
+      targetPublicKey: current.context.targetPublicKey, routeCandidatePath: path,
+      routeEvidenceSource: route.evidenceSource ?? null, hashWidth: 2, timeoutMs
+    });
+    let finish;
+    const result = new Promise(resolve => { finish = resolve; });
+    const onFrame = bytes => {
+      if (!(bytes instanceof Uint8Array) || bytes.length < 13 || bytes[0] !== Constants.PushCodes.TraceData) return;
+      const raw = Buffer.from(bytes);
+      const pathLengthBytes = raw[2];
+      const flags = raw[3];
+      if (raw.readUInt32LE(4) !== tag || raw.readUInt32LE(8) !== 0) return;
+      const hashWidthCode = flags & 0x03;
+      if (hashWidthCode !== 1 || pathLengthBytes > 64 || pathLengthBytes % 2 !== 0
+        || raw.length < 12 + pathLengthBytes + (pathLengthBytes / 2) + 1) {
+        finish({ status: 'failed', reason: 'trace-malformed' });
+        return;
+      }
+      const hashes = raw.subarray(12, 12 + pathLengthBytes);
+      const hopCount = pathLengthBytes / 2;
+      const snrBytes = raw.subarray(12 + pathLengthBytes, 12 + pathLengthBytes + hopCount + 1);
+      finish({ status: 'completed', pathHashes: Array.from({ length: hopCount }, (_, index) =>
+        hashes.subarray(index * 2, index * 2 + 2).toString('hex').toUpperCase()),
+      snrQuarterDb: [...snrBytes].map(value => value > 127 ? value - 256 : value) });
+    };
+    const onAbort = () => finish({ status: 'failed', reason: 'trace-disconnected' });
+    connection.on('rx', onFrame);
+    current.signal?.addEventListener('abort', onAbort, { once: true });
+    const startedAt = this.#now();
+    const timer = setTimeout(() => finish({ status: 'failed', reason: 'trace-timeout' }), timeoutMs);
+    let sent;
+    try {
+      sent = this.#airtime.tryRunWhenQuiet(async () => {
+        if (this.#current !== current || current.signal?.aborted || !this.#currentScope(current)) {
+          return { status: 'failed', reason: 'trace-disconnected' };
+        }
+        if (this.#admissionReason()) return { status: 'deferred', reason: 'foreground' };
+        if (current.source && !this.#background.allowed(current.source))
+          return { status: 'deferred', reason: 'background-turn' };
+        if (!synchronousPermission(current.reserve, current.context))
+          return { status: 'deferred', reason: 'reservation-unavailable' };
+        current.traceReserved = true;
+        current.traceDispatchedAt = this.#wallNow();
+        await connection.sendToRadioFrame(frame);
+        return result;
+      });
+    } catch {
+      sent = Promise.resolve({ status: 'failed', reason: 'trace-write-error' });
+    }
+    if (!sent) finish({ status: 'deferred', reason: 'quiet-air' });
+    let outcome;
+    try { outcome = await Promise.resolve(sent ?? result); }
+    catch { outcome = { status: 'failed', reason: 'trace-write-error' }; }
+    clearTimeout(timer);
+    connection.off('rx', onFrame);
+    current.signal?.removeEventListener('abort', onAbort);
+    current.traceOutcome = outcome.status === 'completed' ? 'response'
+      : outcome.status === 'deferred' ? outcome.reason === 'quiet-air' ? 'quiet-air' : 'trace-not-sent'
+        : outcome.reason ?? 'trace-failed';
+    current.tracePathHashes = outcome.pathHashes ?? [];
+    current.traceSnrQuarterDb = outcome.snrQuarterDb ?? [];
+    this.#logger[outcome.status === 'completed' ? 'info' : 'warn'](
+      'services.remoteRequests', outcome.status === 'completed'
+        ? 'Telemetry route trace response received.' : 'Telemetry route trace did not verify the candidate route.', {
+        requestId: current.context.requestId, operation: current.context.operation,
+        generation: current.context.generation, phase: 'preflight', preflightKind: 'trace',
+        targetPublicKey: current.context.targetPublicKey, routeCandidatePath: path,
+        routeHopWeights: route.hopWeights ?? [],
+        traceOutcome: current.traceOutcome, tracePathHashes: current.tracePathHashes,
+        traceSnrQuarterDb: current.traceSnrQuarterDb, elapsedMs: Math.max(0, this.#now() - startedAt)
+      });
+    return outcome;
   }
 
   #clearGuestSessions() {
@@ -232,7 +336,8 @@ export class RemoteRequestCoordinator {
     const current = { descriptor, expectedRoute, isEligible, reserve, anonymous, telemetry, source, prepared, context,
       phase: 'queued', tag: null, route: null, timer: null, deadline: null, expire: null,
       connection: null, signal: null, onAbort: null, onFrame: null, resolveCompletion,
-      releaseCommand, acknowledgement, completion, onChange: null };
+      releaseCommand, acknowledgement, completion, onChange: null,
+      inventoryContactCount: null, inventoryOutcome: null, contactSyncOutcome: null, targetContactOutcome: null };
     this.#current = current;
     current.onChange = () => {
       if (current.phase !== 'recovery' && !this.#currentScope(current)) this.#finish(current, 'failed', 'disconnected');
@@ -352,6 +457,13 @@ export class RemoteRequestCoordinator {
       this.#listen(current, connection, transaction);
       if (!await this.#telemetryPreflight(current, connection)) return this.#awaitCommand(current, transaction);
       if (this.#current !== current) return;
+      if (current.telemetry.login && current.traceOutcome === 'response') {
+        current.phase = 'ready';
+        const quietWaitMs = Math.min(this.#limits.responseTimeoutMaxMs, 30000);
+        this.#arm(current, quietWaitMs, () => this.#finish(current, 'deferred', 'quiet-air'));
+        if (!await this.#waitForTelemetryQuiet(current, quietWaitMs)) return this.#awaitCommand(current, transaction);
+        if (this.#current !== current) return;
+      }
       current.phase = 'ready';
       this.#arm(current, this.#limits.ackTimeoutMs, () => this.#finish(current, 'deferred', 'queue-timeout'));
     } else if (current.anonymous) {
@@ -430,7 +542,9 @@ export class RemoteRequestCoordinator {
       try {
         // Only literal synchronous permission allows RF. Promises and failed
         // storage reservations cannot accidentally grant permission.
-        if (!synchronousPermission(current.reserve, current.context)) { this.#finish(current, 'deferred', 'reservation-unavailable'); return; }
+        if (!current.traceReserved && !synchronousPermission(current.reserve, current.context)) {
+          this.#finish(current, 'deferred', 'reservation-unavailable'); return;
+        }
       } catch { this.#finish(current, 'failed', 'eligibility-error'); return; }
       if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) return;
       const afterReservation = this.#admissionReason();
@@ -451,6 +565,16 @@ export class RemoteRequestCoordinator {
         assertOwner(ownerSchemas.telemetryOwnerClockSchema, clock);
         current.dispatchClock = clock.wall;
       } catch { this.#finish(current, 'failed', 'clock-anomaly'); return; }
+      try {
+        const routeEvidence = current.telemetry.hooks.getContactRoute?.(current.context) ?? null;
+        if (routeEvidence && typeof routeEvidence.then === 'function') throw new Error('Contact route lookup must be synchronous');
+        current.routeFailureReason = routeEvidence?.status === 'unavailable' ? routeEvidence.reason : null;
+        current.routeEvidence = routeEvidence?.status === 'available' ? routeEvidence : null;
+      } catch {
+        // Route evidence is diagnostic here; contact preflight remains the
+        // authority for whether a device contact can safely be changed.
+        current.routeEvidence = null;
+      }
     }
     if (!this.#budget.recordAttempt()) { this.#finish(current, 'deferred', 'rate-limited'); return; }
     if (current.source) this.#background.sent(current.source);
@@ -495,19 +619,109 @@ export class RemoteRequestCoordinator {
       transaction.signal.removeEventListener('abort', onTerminated));
   }
 
+  async #waitForTelemetryQuiet(current, timeoutMs) {
+    const deadline = this.#time() + timeoutMs;
+    while (this.#current === current && this.#time() < deadline) {
+      if (current.signal?.aborted || !this.#currentScope(current)) {
+        this.#finish(current, 'failed', 'disconnected'); return false;
+      }
+      const admission = this.#admissionReason();
+      if (admission) { this.#finish(current, 'deferred', admission); return false; }
+      if (current.source && !this.#background.allowed(current.source)) {
+        this.#finish(current, 'deferred', 'background-turn'); return false;
+      }
+      if (this.#airtime.canRunWhenQuiet()) return true;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (this.#current === current) this.#finish(current, 'deferred', 'quiet-air');
+    return false;
+  }
+
   async #telemetryPreflight(current, connection) {
     current.phase = 'preflight';
     current.preflightStarted = this.#now();
     const timeout = current.telemetry.config.preflightTimeoutMs;
-    this.#arm(current, timeout, () => this.#recover(current, 'preflight-timeout', 'preflight-timeout'));
     if (current.telemetry.login) {
-      current.inventory = createTelemetryContactInventory({ targetPublicKey: current.context.targetPublicKey,
-        radius: current.telemetry.config.radius, startedAt: current.preflightStarted, timeoutMs: timeout });
+      const inventoryTimeout = current.telemetry.config.inventoryTimeoutMs;
       current.preflightKind = 'inventory';
+      current.preflightTimeoutMs = inventoryTimeout;
+      current.preflightStarted = this.#now();
+      this.#logger.info('services.remoteRequests', 'Telemetry contact inventory read started.', {
+        requestId: current.context.requestId, operation: current.context.operation,
+        generation: current.context.generation, phase: 'preflight', preflightKind: 'inventory',
+        timeoutMs: inventoryTimeout
+      });
+      this.#arm(current, inventoryTimeout, () => this.#recover(current, 'preflight-timeout', 'preflight-timeout'));
+      current.inventory = createTelemetryContactInventory({ targetPublicKey: current.context.targetPublicKey,
+        radius: current.telemetry.config.radius, startedAt: current.preflightStarted, timeoutMs: inventoryTimeout });
       if (!await this.#readTelemetryContact(current, connection, prepareTelemetryContactInventory())) return false;
       if (this.#current !== current) return false;
+      if (current.inventoryProof) {
+        try {
+          const inferredRoute = current.telemetry.hooks.getContactRoute?.(current.context) ?? null;
+          if (inferredRoute && typeof inferredRoute.then === 'function') throw new Error('Contact route lookup must be synchronous');
+          current.routeFailureReason = inferredRoute?.status === 'unavailable' ? inferredRoute.reason : null;
+          current.routeEvidence = inferredRoute?.status === 'available' ? inferredRoute : null;
+          if (current.routeEvidence) {
+            // From this point until contact proof completes, any NewAdvert
+            // push invalidates the inventory proof and is drained safely.
+            current.preflightKind = 'contact-sync';
+            const traced = await this.#traceTelemetryRoute(current, connection, current.routeEvidence);
+            if (this.#current !== current) return false;
+            if (traced.status !== 'completed') {
+              if (current.traceDispatchedAt !== undefined) current.dispatchedAt = current.traceDispatchedAt;
+              if (traced.status === 'deferred' || current.dispatchedAt === undefined) {
+                this.#finish(current, 'deferred', traced.reason === 'quiet-air' ? 'quiet-air'
+                  : traced.reason === 'background-turn' ? 'background-turn'
+                    : traced.reason === 'foreground' ? 'foreground' : 'reservation-unavailable');
+              } else this.#finish(current, 'failed', traced.reason === 'trace-malformed' ? 'trace-malformed'
+                : traced.reason === 'trace-write-error' ? 'trace-write-error' : 'trace-timeout');
+              return false;
+            }
+          }
+          current.preflightKind = 'contact-sync';
+          const synced = await reconcileTelemetryContact({ connection, targetPublicKey: current.context.targetPublicKey,
+            contacts: current.inventoryProof.contacts, route: current.routeEvidence });
+          current.contactSyncOutcome = synced.evicted ? 'added-evicted' : synced.status;
+          current.contactSyncChanged = synced.status === 'added' || synced.status === 'updated';
+          this.#logger[synced.status === 'deferred' ? 'warn' : 'info']('services.remoteRequests',
+            synced.status === 'deferred' ? 'Telemetry contact was not changed because no safe fresh route evidence was available.'
+              : `Telemetry target contact ${synced.status}.`, { requestId: current.context.requestId,
+              operation: current.context.operation, generation: current.context.generation, phase: 'preflight',
+              preflightKind: 'contact-sync', outcome: synced.status, hopCount: synced.hopCount ?? null,
+              routeReceptionCount: inferredRoute?.receptionCount ?? 0,
+              routeEvidenceSource: inferredRoute?.evidenceSource ?? null,
+              routeHopWeights: inferredRoute?.hopWeights ?? [],
+              routeFailureReason: current.routeFailureReason,
+              targetPublicKey: current.context.targetPublicKey,
+              targetName: inferredRoute?.target?.name ?? null,
+              routeCandidatePath: Array.isArray(inferredRoute?.path) ? inferredRoute.path : [] });
+          if (current.inventoryInvalidated) {
+            this.#finish(current, 'deferred', 'contacts-changed'); return false;
+          }
+          if (synced.status === 'deferred') {
+            const reason = current.inventoryProof.contact
+              ? 'unknown-contact-route' : current.inventoryProof.contactIssue ?? 'contact-missing';
+            this.#finish(current, 'deferred', reason); return false;
+          }
+        } catch {
+          current.contactSyncOutcome = 'failed';
+          this.#logger.warn('services.remoteRequests', 'Telemetry target contact could not be reconciled; poll deferred without reconnecting.', {
+            requestId: current.context.requestId, operation: current.context.operation,
+            generation: current.context.generation, phase: 'preflight', preflightKind: 'contact-sync', outcome: 'preflight-failed'
+          });
+          this.#finish(current, 'deferred', 'preflight-failed'); return false;
+        }
+      }
     }
     current.phase = 'preflight'; current.preflightKind = 'target';
+    current.preflightTimeoutMs = timeout;
+    current.preflightStarted = this.#now();
+    this.#arm(current, timeout, () => this.#recover(current, 'preflight-timeout', 'preflight-timeout'));
+    this.#logger.info('services.remoteRequests', 'Telemetry target contact read started.', {
+      requestId: current.context.requestId, operation: current.context.operation,
+      generation: current.context.generation, phase: 'preflight', preflightKind: 'target', timeoutMs: timeout
+    });
     return this.#readTelemetryContact(current, connection,
       prepareTelemetryContactRead({ targetPublicKey: current.context.targetPublicKey }));
   }
@@ -529,32 +743,99 @@ export class RemoteRequestCoordinator {
     if (current.preflightKind === 'inventory') {
       const parsed = current.inventory.accept({ bytes, monotonicNow: this.#now() });
       if (parsed.status === 'pending') return;
+      if (parsed.status === 'deferred') {
+        current.inventoryContactCount = parsed.contactCount;
+        current.inventoryOutcome = parsed.reason;
+        if (parsed.reason === 'preflight-unsupported') this.#pausedGeneration = current.context.generation;
+        // The inventory reducer emits this only for a terminal error response
+        // or after the complete, count-checked contact stream reached its end.
+        // Ownership is settled, so defer this target without reconnecting.
+        this.#logger.warn('services.remoteRequests', 'Telemetry contact inventory completed without a safe target proof; poll deferred.', {
+          requestId: current.context.requestId, operation: current.context.operation,
+          generation: current.context.generation, phase: 'preflight', preflightKind: 'inventory',
+          outcome: parsed.reason, contactCount: parsed.contactCount,
+          elapsedMs: Math.max(0, this.#now() - current.preflightStarted), streamComplete: true
+        });
+        this.#finish(current, 'deferred', parsed.reason); return;
+      }
       if (parsed.status === 'complete') {
         current.inventoryProof = parsed;
+        current.inventoryContactCount = parsed.contactCount;
+        current.inventoryOutcome = 'complete';
         current.preflightKind = 'between';
         current.readToken = null;
+        clearTimeout(current.timer);
+        this.#logger.info('services.remoteRequests', 'Telemetry contact inventory completed.', {
+          requestId: current.context.requestId, operation: current.context.operation,
+          generation: current.context.generation, phase: 'preflight', preflightKind: 'inventory',
+          contactCount: parsed.contactCount, elapsedMs: Math.max(0, this.#now() - current.preflightStarted),
+          streamComplete: true
+        });
         current.resolvePreflight(true); return;
       }
-      // An incomplete local stream may still be arriving. Reset ownership
-      // before another command can reuse the same untagged response channel.
+      // An invalid/incomplete local stream may still be arriving. Reset
+      // ownership before another command can reuse the untagged channel.
       this.#recover(current, parsed.reason, 'preflight-protocol-error'); return;
     }
     if (current.preflightKind === 'between') {
       const parsed = current.inventory.accept({ bytes, monotonicNow: this.#now() });
-      if (parsed.status !== 'complete') this.#recover(current, parsed.reason, 'preflight-protocol-error');
+      if (parsed.status === 'deferred') {
+        current.inventoryOutcome = parsed.reason;
+        this.#logger.warn('services.remoteRequests', 'Telemetry contact inventory changed before target proof; poll deferred.', {
+          requestId: current.context.requestId, operation: current.context.operation,
+          generation: current.context.generation, phase: 'preflight', preflightKind: 'inventory',
+          outcome: parsed.reason, contactCount: parsed.contactCount, streamComplete: true
+        });
+        this.#finish(current, 'deferred', parsed.reason);
+      } else if (parsed.status !== 'complete' && parsed.status !== 'pending') {
+        this.#recover(current, parsed.reason, 'preflight-protocol-error');
+      }
+      return;
+    }
+    if (['contact-sync', 'target'].includes(current.preflightKind) && bytes?.[0] === 0x8A) {
+      current.inventoryInvalidated = true;
       return;
     }
     const parsed = parseTelemetryContactFrame({ targetPublicKey: current.context.targetPublicKey, bytes, radius: config.radius });
     if (parsed.status === 'ignored') return;
     if (parsed.status === 'malformed') { this.#recover(current, 'protocol-error', 'preflight-protocol-error'); return; }
+    if (current.inventoryInvalidated) {
+      current.targetContactOutcome = 'contacts-changed';
+      this.#logger.warn('services.remoteRequests', 'Telemetry contact inventory changed during target lookup; poll deferred.', {
+        requestId: current.context.requestId, operation: current.context.operation,
+        generation: current.context.generation, phase: 'preflight', preflightKind: 'target',
+        outcome: 'contacts-changed', elapsedMs: Math.max(0, this.#now() - current.preflightStarted)
+      });
+      this.#finish(current, 'deferred', 'contacts-changed'); return;
+    }
     if (parsed.status === 'unavailable') {
+      current.targetContactOutcome = parsed.reason;
       if (parsed.reason === 'preflight-unsupported') this.#pausedGeneration = current.context.generation;
+      this.#logger.warn('services.remoteRequests', 'Telemetry target contact read did not produce an eligible contact; poll deferred.', {
+        requestId: current.context.requestId, operation: current.context.operation,
+        generation: current.context.generation, phase: 'preflight', preflightKind: 'target',
+        outcome: parsed.reason, timeoutMs: current.preflightTimeoutMs,
+        elapsedMs: Math.max(0, this.#now() - current.preflightStarted)
+      });
       this.#finish(current, 'deferred', parsed.reason); return;
     }
-    if (current.inventoryProof && JSON.stringify(parsed.contact.route) !== JSON.stringify(current.inventoryProof.contact.route)) {
+    if (current.inventoryProof?.contact && !current.contactSyncChanged
+      && JSON.stringify(parsed.contact.route) !== JSON.stringify(current.inventoryProof.contact.route)) {
+      current.targetContactOutcome = 'contacts-changed';
+      this.#logger.warn('services.remoteRequests', 'Telemetry target route changed after inventory proof; poll deferred.', {
+        requestId: current.context.requestId, operation: current.context.operation,
+        generation: current.context.generation, phase: 'preflight', preflightKind: 'target',
+        outcome: 'contacts-changed', elapsedMs: Math.max(0, this.#now() - current.preflightStarted)
+      });
       this.#finish(current, 'deferred', 'contacts-changed'); return;
     }
     current.contact = parsed.contact;
+    current.targetContactOutcome = 'eligible';
+    this.#logger.info('services.remoteRequests', 'Telemetry target contact read completed.', {
+      requestId: current.context.requestId, operation: current.context.operation,
+      generation: current.context.generation, phase: 'preflight', preflightKind: 'target',
+      elapsedMs: Math.max(0, this.#now() - current.preflightStarted), outcome: 'eligible'
+    });
     current.readToken = null;
     current.phase = 'ready';
     current.resolvePreflight(true);
@@ -574,7 +855,7 @@ export class RemoteRequestCoordinator {
       }
       current.tag = ack.tag; current.route = ack.route;
       current.phase = 'response';
-      this.#arm(current, Math.min(this.#limits.responseTimeoutMaxMs, Math.max(1000, ack.estimatedTimeoutMs + 1000)),
+      this.#arm(current, this.#responseTimeout(current, ack.estimatedTimeoutMs),
         () => this.#finish(current, 'failed', 'response-timeout'));
       current.releaseCommand(); return;
     }
@@ -596,15 +877,26 @@ export class RemoteRequestCoordinator {
 
   #onFrame(current, bytes) {
     if (this.#current !== current || current.phase === 'recovery' || current.finishing) return;
+    if (current.traceOutcome === 'pending' && bytes?.[0] === Constants.PushCodes.TraceData) return;
     if (!this.#currentScope(current) || current.signal.aborted) {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
-    if (current.telemetry && frameValid({ bytes }) && (bytes[0] === 0x8A
-      || (bytes[0] === 3 && current.phase !== 'preflight'))) {
+    if (current.telemetry && frameValid({ bytes }) && bytes[0] === 0x8A) {
       this.#clearGuestSessions();
-      if (current.phase === 'preflight') this.#recover(current, 'contacts-changed', 'preflight-protocol-error');
+      if (current.phase === 'preflight') {
+        if (current.preflightKind === 'target') current.inventoryInvalidated = true;
+        else if (current.preflightKind === 'contact-sync') current.inventoryInvalidated = true;
+        else this.#onTelemetryPreflight(current, bytes);
+      } else if (current.phase === 'ready') this.#finish(current, 'deferred', 'contacts-changed');
       else if (current.phase === 'ack') this.#recover(current, 'contacts-changed', 'protocol-error');
+      else this.#finish(current, 'failed', 'contacts-changed');
+      return;
+    }
+    if (current.telemetry && current.phase === 'preflight' && current.preflightKind === 'contact-sync') return;
+    if (current.telemetry && frameValid({ bytes }) && bytes[0] === 3 && current.phase !== 'preflight') {
+      this.#clearGuestSessions();
+      if (current.phase === 'ack') this.#recover(current, 'contacts-changed', 'protocol-error');
       else this.#finish(current, 'failed', 'contacts-changed');
       return;
     }
@@ -653,8 +945,8 @@ export class RemoteRequestCoordinator {
           this.#finish(current, 'failed', 'route-mismatch'); return;
         }
         current.phase = 'response';
-        this.#arm(current, Math.min(this.#limits.responseTimeoutMaxMs,
-          Math.max(1000, envelope.estimatedTimeoutMs + 1000)), () => this.#finish(current, 'failed', 'response-timeout'));
+        this.#arm(current, this.#responseTimeout(current, envelope.estimatedTimeoutMs),
+          () => this.#finish(current, 'failed', 'response-timeout'));
         current.releaseCommand();
       }
     } else if (envelope.kind === 'binary-response' && envelope.tag === current.tag) {
@@ -680,6 +972,9 @@ export class RemoteRequestCoordinator {
   #finish(current, status, reason, extra = {}, releaseCommand = true) {
     if (this.#current !== current || current.finishing) return;
     current.finishing = true;
+    const traceOnlyTerminal = Boolean(current.telemetry?.login && current.traceReserved
+      && current.dispatchedAt === undefined && current.traceDispatchedAt !== undefined);
+    if (traceOnlyTerminal) current.dispatchedAt = current.traceDispatchedAt;
     if (current.source && current.dispatchedAt === undefined && !['foreground', 'quiet-air', 'rate-limited',
       'background-turn', 'busy'].includes(reason)) this.#background.withdraw(current.source);
     if (current.telemetry) {
@@ -694,8 +989,11 @@ export class RemoteRequestCoordinator {
             && (current.receivedAt < current.dispatchedAt || current.receivedAt > completedAt))) {
             status = 'failed'; reason = 'clock-anomaly';
           }
-          const record = { context: current.context, dispatchedAt: current.dispatchedAt,
-            completedAt, status, reason, route: current.route, ...(extra.proof ? { proof: extra.proof } : {}) };
+          const record = { context: current.context, dispatchedAt: current.dispatchedAt ?? current.traceDispatchedAt,
+            completedAt, status: status === 'completed' ? 'completed' : 'failed',
+            reason: status === 'completed' ? null : traceOnlyTerminal ? 'trace-login-not-dispatched'
+              : reason ?? 'trace-login-not-dispatched',
+            route: current.route, ...(extra.proof ? { proof: extra.proof } : {}) };
           assertOwner(ownerSchemas.telemetryAuthenticationRecordSchema, record);
           if (!synchronousPermission(current.telemetry.hooks.recordAuthentication, Object.freeze(record))) throw new Error('not saved');
           if (status === 'completed' && (!this.#currentScope(current) || this.#stopped
@@ -724,14 +1022,41 @@ export class RemoteRequestCoordinator {
         status === 'completed' ? 'remote request completed' : 'remote request failed', {
           requestId: current.context.requestId, operation: current.context.operation,
           generation: current.context.generation, phase: current.phase, outcome: reason ?? status,
-          ...(current.route ? { route: current.route } : {}),
+          ...(current.telemetry ? { targetPublicKey: current.context.targetPublicKey,
+            targetName: current.routeEvidence?.target?.name ?? null,
+            routeFailureReason: current.routeFailureReason ?? null,
+            routeCandidatePath: Array.isArray(current.routeEvidence?.path) ? current.routeEvidence.path : [],
+            routeCandidateHopCount: current.routeEvidence?.path?.length ?? null,
+            routeHopWeights: current.routeEvidence?.hopWeights ?? [],
+            responseTimeoutMs: current.responseTimeoutMs ?? null,
+            traceOutcome: current.traceOutcome ?? null,
+            tracePathHashes: current.tracePathHashes ?? [], traceSnrQuarterDb: current.traceSnrQuarterDb ?? [],
+            traceTimeoutMs: current.traceTimeoutMs ?? null,
+            routeEvidenceSource: current.routeEvidence?.evidenceSource ?? null,
+            routeReceptionCount: current.routeEvidence?.receptionCount ?? null } : {}),
+          ...(current.route ? (current.telemetry ? { dispatchMode: current.route } : { route: current.route }) : {}),
           ...(extra.recovery ? { recovery: extra.recovery } : {})
         });
     }
     current.resolveCompletion({ status, ...(reason ? { reason } : {}), context: current.context,
       ...(current.dispatchedAt !== undefined ? { dispatchedAt: current.dispatchedAt } : {}),
       ...(current.receivedAt !== undefined ? { receivedAt: current.receivedAt } : {}),
-      ...(current.tag !== null ? { tag: current.tag, route: current.route } : {}), ...extra });
+      ...(current.tag !== null ? { tag: current.tag, route: current.route } : {}), ...extra,
+      ...(current.telemetry ? { diagnostics: { phase: current.phase,
+        targetName: current.routeEvidence?.target?.name ?? null,
+        routeCandidatePath: Array.isArray(current.routeEvidence?.path) ? current.routeEvidence.path : [],
+        routeHopWeights: current.routeEvidence?.hopWeights ?? [],
+        responseTimeoutMs: current.responseTimeoutMs ?? null,
+        traceOutcome: current.traceOutcome ?? null,
+        tracePathHashes: current.tracePathHashes ?? [], traceSnrQuarterDb: current.traceSnrQuarterDb ?? [],
+        traceTimeoutMs: current.traceTimeoutMs ?? null,
+        routeEvidenceSource: current.routeEvidence?.evidenceSource ?? null,
+        routeFailureReason: current.routeFailureReason ?? null,
+        routeEvidenceAt: current.routeEvidence?.receivedAt ?? null,
+        routeSupportCount: current.routeEvidence?.receptionCount ?? null,
+        inventoryContactCount: current.inventoryContactCount, inventoryOutcome: current.inventoryOutcome,
+        contactSyncOutcome: current.contactSyncOutcome, targetContactOutcome: current.targetContactOutcome,
+        dispatchMode: current.route ?? null } } : {}) });
   }
 
   #recover(current, reason, invalidationReason) {
@@ -750,11 +1075,23 @@ export class RemoteRequestCoordinator {
       'protocol-error': 'Remote request acknowledgement was malformed; the captured radio connection is being reset to prevent incorrect command attribution.',
       'request-cancelled': 'Remote request stopped before acknowledgement; the captured radio connection is being reset because acknowledgement ownership is uncertain.'
     };
-    this.#logger.warn('services.remoteRequests', current.telemetry && invalidationReason.startsWith('preflight-')
-      ? 'Telemetry contact read ownership is uncertain; the captured radio connection is being reset before further commands. Capture may pause during reconnection.'
-      : explanations[invalidationReason], {
+    const elapsedMs = current.preflightStarted === undefined ? undefined : Math.max(0, this.#now() - current.preflightStarted);
+    const message = current.telemetry && phase === 'preflight'
+      ? 'Telemetry contact preflight failed; the radio connection is being reset because response ownership is uncertain.'
+      : explanations[invalidationReason];
+    this.#logger.warn('services.remoteRequests', message, {
       requestId: current.context.requestId, operation: current.context.operation,
-      generation: current.context.generation, phase, outcome: reason
+      generation: current.context.generation, phase, outcome: reason, invalidationReason,
+      ...(current.telemetry ? { targetPublicKey: current.context.targetPublicKey,
+        targetName: current.routeEvidence?.target?.name ?? null,
+        routeFailureReason: current.routeFailureReason ?? null,
+        routeCandidatePath: Array.isArray(current.routeEvidence?.path) ? current.routeEvidence.path : [],
+        routeCandidateHopCount: current.routeEvidence?.path?.length ?? null,
+        routeEvidenceSource: current.routeEvidence?.evidenceSource ?? null,
+        routeReceptionCount: current.routeEvidence?.receptionCount ?? null } : {}),
+      ...(current.telemetry ? { preflightKind: current.preflightKind,
+        ...(current.preflightTimeoutMs ? { timeoutMs: current.preflightTimeoutMs } : {}),
+        ...(elapsedMs !== undefined ? { elapsedMs } : {}) } : {})
     });
     // T2 retires the generation before the command can settle/reuse the queue.
     Promise.resolve().then(() => this.#radio.invalidateConnection({ generation: current.context.generation,

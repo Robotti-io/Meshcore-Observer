@@ -62,9 +62,10 @@ export function parseTelemetryInventoryFrame(input) {
   const result = value => checkedTelemetryRadioResult(schemas.telemetryInventoryFrameResultSchema, value);
   if (!isTelemetryRadioInput(schemas.telemetryRadioFrameSchema, input)) return result(malformed('invalid-contact-inventory-frame'));
   const { bytes } = input;
-  if (bytes[0] === 0x8A) return result(unavailable('contacts-changed'));
   let envelope;
-  if (bytes[0] === 2) {
+  if (bytes[0] === 0x8A) {
+    envelope = { kind: 'changed' }; // PUSH_CODE_NEW_ADVERT may interleave with a contact-list read.
+  } else if (bytes[0] === 2) {
     if (!isTelemetryRadioInput(schemas.telemetryContactListStartSchema, input)) return result(malformed('invalid-contact-inventory-frame'));
     const count = Buffer.from(bytes).readUInt32LE(1);
     if (count > schemas.TELEMETRY_CONTACT_INVENTORY_MAX) return result(unavailable('inventory-too-large'));
@@ -74,8 +75,13 @@ export function parseTelemetryInventoryFrame(input) {
     envelope = { kind: 'end' }; // Lastmod is not a local time or a count.
   } else if (bytes[0] === 3) {
     if (!isTelemetryRadioInput(schemas.telemetryContactFrameSchema, input)) return result(malformed('invalid-contact-inventory-frame'));
-    envelope = { kind: 'contact', publicKey: keyOf(bytes.slice(1, 33)), contactType: bytes[33],
-      encodedPathLength: bytes[35], pathBytes: bytes.slice(36, 100) };
+    const nameBytes = Buffer.from(bytes.slice(100, 132));
+    const nameEnd = nameBytes.indexOf(0);
+    envelope = { kind: 'contact', publicKey: keyOf(bytes.slice(1, 33)), contactType: bytes[33], flags: bytes[34],
+      encodedPathLength: bytes[35], pathBytes: bytes.slice(36, 100),
+      name: nameBytes.subarray(0, nameEnd < 0 ? nameBytes.length : nameEnd).toString('utf8'),
+      lastAdvert: Buffer.from(bytes).readUInt32LE(132), lat: Buffer.from(bytes).readInt32LE(136),
+      lon: Buffer.from(bytes).readInt32LE(140), lastMod: Buffer.from(bytes).readUInt32LE(144) };
   } else if (bytes[0] === 1) {
     if (!isTelemetryRadioInput(schemas.telemetryContactErrorSchema, input)) return result(malformed('invalid-contact-inventory-frame'));
     envelope = { kind: 'error', errorCode: bytes[1] };

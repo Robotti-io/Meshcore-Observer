@@ -206,6 +206,9 @@ export function renderDashboardHtml() {
       <div class="tile"><h4>Telemetry outcomes</h4><p id="repeater-telemetry-outcomes">Unavailable</p></div>
       <div class="tile"><h4>Latest observation</h4><p id="repeater-telemetry-latest">Unavailable</p></div>
       <div class="tile"><h4>Latest outcome</h4><p id="repeater-telemetry-latest-outcome">Unavailable</p></div>
+      <div class="tile"><h4>Failures in latest 25</h4><p id="repeater-telemetry-failed">Unavailable</p></div>
+      <div class="tile"><h4>Request attempts in range</h4><p id="repeater-telemetry-attempts">Unavailable</p></div>
+      <div class="tile"><h4>Failed or deferred in latest 25</h4><p id="repeater-telemetry-attempt-failed">Unavailable</p></div>
     </div>
     <p class="data-status" id="repeater-reporting-status">Loading repeater evidence…</p>
     <div class="table-scroll" role="region" aria-label="Advert totals by type" tabindex="0">
@@ -213,6 +216,9 @@ export function renderDashboardHtml() {
     </div>
     <div class="table-scroll" role="region" aria-label="Bounded topology paths" tabindex="0">
       <table id="repeater-topology-table"><caption class="sr-only">Bounded topology paths retained in the database</caption><thead><tr><th>Path</th><th>Kind</th><th>Receptions</th><th>Last received</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="table-scroll" role="region" aria-label="Recent telemetry requests" tabindex="0">
+      <table id="repeater-telemetry-outcomes-table"><caption class="sr-only">Recent telemetry attempts with selected route, trace evidence, contact synchronization, response timeout, dispatch mode and outcome</caption><thead><tr><th>Attempt ended</th><th>Repeater</th><th>Operation</th><th>Phase</th><th>Selected path</th><th>Trace</th><th>Route evidence</th><th>Contact sync</th><th>Preflight</th><th>Response wait</th><th>Dispatch mode</th><th>Result</th><th>Reason</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
   <div class="search-bar">

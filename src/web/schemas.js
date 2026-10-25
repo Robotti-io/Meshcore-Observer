@@ -76,6 +76,11 @@ export const telemetryOutcomesQuerySchema = reportingQuerySchema('telemetry-outc
   runId: RUN_ID, component: { enum: ['status', 'sensors', 'neighbours'] },
   status: { enum: ['answered', 'partial', 'failed', 'unsupported'] }
 });
+export const telemetryDiagnosticsQuerySchema = reportingQuerySchema('telemetry-diagnostics-query', {
+  ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY, runId: RUN_ID,
+  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  status: { enum: ['deferred', 'failed', 'unsupported', 'completed'] }
+});
 export const topologyPathsQuerySchema = {
   $id: 'meshcore-observer/web/topology-paths-query', type: 'object', additionalProperties: false,
   properties: { ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY,
@@ -164,6 +169,7 @@ export const validateProcessSamplesQuery = compileSchema(processSamplesQuerySche
 export const validateRuntimeEventsQuery = compileSchema(runtimeEventsQuerySchema);
 export const validateTelemetryObservationsQuery = compileSchema(telemetryObservationsQuerySchema);
 export const validateTelemetryOutcomesQuery = compileSchema(telemetryOutcomesQuerySchema);
+export const validateTelemetryDiagnosticsQuery = compileSchema(telemetryDiagnosticsQuerySchema);
 export const validateTopologyPathsQuery = compileSchema(topologyPathsQuerySchema);
 export const validateTopologyPathQuery = compileSchema(topologyPathQuerySchema);
 export const validateTopologyDetailsQuery = compileSchema(topologyDetailsQuerySchema);

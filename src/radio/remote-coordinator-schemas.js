@@ -7,7 +7,7 @@ export const remotePreflightLimitsSchema = {
 };
 
 export const REMOTE_REQUEST_DEFAULTS = Object.freeze({
-  ackTimeoutMs: 5000, responseTimeoutMaxMs: 30000, minIntervalMs: 60000, maxPerMinute: 1
+  ackTimeoutMs: 5000, responseTimeoutMaxMs: 45000, minIntervalMs: 60000, maxPerMinute: 1
 });
 
 export const REMOTE_REQUEST_ENV_KEYS = Object.freeze({

@@ -60,6 +60,22 @@ test('a genuine relayed duplicate followed by zero-hop flood refreshes only rece
   assert.deepEqual(registry.getDirectHeardEligibility(signer.publicKeyHex), { lastDirectHeardAt: 3000, eligible: true });
 });
 
+test('only verified signed repeater receptions persist target-bound paths and repeated route receptions', async () => {
+  const { registry, store } = setup(); const relay = advertSigner(), target = advertSigner();
+  await registry.recordFromDecodedPacket(signedAdvertPacket(relay.payload({ name: 'Relay' }), { receivedAt: 1000 }));
+  const pathHash = relay.publicKeyHex.slice(0, 4).toLowerCase();
+  const targetPayload = target.payload({ name: 'Target' });
+  await registry.recordFromDecodedPacket(signedAdvertPacket(targetPayload, { receivedAt: 2000,
+    hops: [pathHash], pathHashSize: 2 }));
+  await registry.recordFromDecodedPacket(signedAdvertPacket(targetPayload, { receivedAt: 3000,
+    hops: [pathHash], pathHashSize: 2 }));
+  assert.deepEqual(store.getVerifiedAdvertRoute({ publicKeyHex: target.publicKeyHex, now: 3000, windowMs: HOUR, radius: 2 }), {
+    status: 'available', target: { publicKeyHex: target.publicKeyHex, name: 'Target', flags: 0x82,
+      advertTimestamp: 1700000000, lat: null, lon: null }, path: [relay.publicKeyHex.slice(0, 4)],
+    hashWidth: 2, receivedAt: 3000, receptionCount: 2
+  });
+});
+
 test('asynchronous verification uses captured reception time and preserves latest known name', async () => {
   const releases = new Map();
   const { registry, store } = setup({

@@ -4,7 +4,8 @@ import { telemetryLatestQuerySchema, telemetryObservationPageSchema, telemetryOu
 
 const POLICY = { retainedHistoryOnly: true, historyCompleteness: 'unknown' };
 const OUTCOME_COLUMNS = `o.request_id AS requestId,o.run_id AS runId,o.observer_public_key AS observerPublicKey,
-  o.target_public_key AS targetPublicKey,o.variant_json AS variantJson,o.decoder_version AS decoderVersion,
+  o.target_public_key AS targetPublicKey,(SELECT n.name FROM nodes n WHERE n.public_key_hex=o.target_public_key) AS targetName,
+  o.variant_json AS variantJson,o.decoder_version AS decoderVersion,
   o.started_at AS startedAt,o.completed_at AS completedAt,o.received_at AS receivedAt,
   o.clock_anomaly AS clockAnomaly,o.tag,o.route,o.status,o.reason`;
 const OBSERVATION_COLUMNS = `${OUTCOME_COLUMNS},a.id AS observationId,a.normalized_json AS normalizedJson,
@@ -32,7 +33,7 @@ function saved(row, withObservation = false) {
       outcome,
       clockAnomaly: outcome.clockAnomaly, sourceRunClockAnomaly: Boolean(row.sourceRunClockAnomaly),
       latestEligible: Boolean(row.latestEligible), observationTimeConflict: Boolean(row.observationTimeConflict) }
-      : { decoderVersion: row.decoderVersion, ...outcome };
+      : { decoderVersion: row.decoderVersion, targetName: row.targetName ?? null, ...outcome };
   } catch { throw new Error('Invalid stored telemetry data'); }
 }
 

@@ -3,11 +3,11 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
+    pool: 'threads',
     include: ['test/**/*.test.js'],
-    // The *-cost tests assert wall-clock p95 targets while entrypoint tests
-    // spawn child processes. Four workers match the hosted CI runner without
-    // allowing the full suite to oversubscribe the machine.
-    maxWorkers: 4,
+    // Cost gates assert wall-clock p95 targets. Run files one at a time so
+    // other test workers do not add contention to their measurements.
+    fileParallelism: false,
     reporters: [
       'default',
       ['junit', { outputFile: 'artifacts/junit.xml' }]

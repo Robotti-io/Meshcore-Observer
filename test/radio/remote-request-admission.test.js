@@ -212,7 +212,7 @@ test('all emitted remote logs use allowlisted metadata and exclude payloads, ide
   f.connections[0].sendCommandSendBinaryReq.mockRejectedValue(Error('SDK-PASSWORD-SECRET'));
   const second = f.coordinator.tryRequest(request()); await flush(); assert.equal((await second).reason, 'write-error');
   const remote = lines.filter(line => line.source === 'services.remoteRequests'); assert.equal(remote.length, 3);
-  const allowed = new Set(['requestId', 'operation', 'generation', 'phase', 'outcome', 'route', 'recovery']);
+  const allowed = new Set(['requestId', 'operation', 'generation', 'phase', 'outcome', 'route', 'recovery', 'invalidationReason']);
   for (const line of remote) {
     assert.ok(['info', 'warn'].includes(line.level)); assert.equal(line.reqInfo, undefined); assert.ok(line.message);
     assert.equal(line.meta.requestId, request().requestId); for (const key of Object.keys(line.meta)) assert.ok(allowed.has(key));

@@ -179,6 +179,25 @@ test('freshness excludes future/equality/stale evidence, cannot refresh on resta
   assert.equal(proximity(store, { observerPublicKey: 'AA'.repeat(32), now: 1000 + HOUR }).total, 0);
 });
 
+test('outbound route fallback ranks recent message receptions and rejects ties, ambiguity and stale evidence', () => {
+  const store = open(); const run = start(store);
+  const target = node(store, 'ABD8'); node(store, '9905'); node(store, 'E85C'); node(store, '7711');
+  const record = (at, hops) => store.recordTopologyObservation(evidence(run, at, { hops }));
+  record(1000, ['ABD8', '9905', 'E85C']); record(2000, ['ABD8', '9905', 'E85C']);
+  record(3000, ['ABD8', '7711', 'E85C']);
+  const query = { observerPublicKey: OBSERVER, targetPublicKey: target, now: 4000, windowMs: HOUR, radius: 3 };
+  const route = store.getTopologyOutboundRoute(query);
+  assert.equal(route.status, 'available'); assert.equal(route.evidenceSource, 'passive-topology');
+  assert.deepEqual(route.path, ['E85C', '9905']); assert.equal(route.receptionCount, 2);
+
+  record(4000, ['ABD8', '7711', 'E85C']);
+  assert.equal(store.getTopologyOutboundRoute({ ...query, now: 5000 }).reason, 'passive-route-support-tied');
+  node(store, '9905', '01', 'CHAT');
+  const remaining = store.getTopologyOutboundRoute({ ...query, now: 5000 });
+  assert.equal(remaining.status, 'available'); assert.deepEqual(remaining.path, ['E85C', '7711']);
+  assert.equal(store.getTopologyOutboundRoute({ ...query, now: HOUR + 5001 }).reason, 'no-fresh-passive-route');
+});
+
 test('all reads are strict and capped, range boundaries exact, metadata avoids nested identities', () => {
   const store = open(); const run = start(store);
   for (let i = 0; i < 205; i++) store.recordTopologyObservation(evidence(run, i + 1000, { hops: [i.toString(16).padStart(4, '0')] }));
@@ -216,7 +235,7 @@ test('migration 13 preserves earlier inventory/run state, creates no legacy obse
   store = open(path); assert.equal(store.getObserverRun({ runId: run.runId }).state, 'running');
   assert.equal(store.countNodesByType('REPEATER'), 1); assert.equal(store.queryTopologyPaths().total, 0);
   assert.equal(store.queryTopologyObservations(RANGE).total, 0); close(store);
-  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 18);
+  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []); db.close();
 });
 

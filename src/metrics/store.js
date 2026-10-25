@@ -4,7 +4,8 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
-import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
+import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema,
+  verifiedAdvertRouteQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
 import { processSampleSchema, processPageSchema, processHistorySchema, runtimeEventSchema, runtimeEventPageSchema } from './process-schemas.js';
 import { topologyMigration } from './topology-migration.js';
@@ -21,6 +22,7 @@ import { createTelemetryHistory } from './telemetry-history.js';
 import { createTelemetryReads } from './telemetry-reads.js';
 import { telemetryPollMigration } from './telemetry-poll-migration.js';
 import { createTelemetryPollState } from './telemetry-poll-state.js';
+import { createTelemetryDiagnostics } from './telemetry-diagnostics.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -77,6 +79,7 @@ const validateAdvert = compileSchema(verifiedAdvertSchema);
 const validateAdvertRange = compileSchema(advertRangeSchema);
 const validateAdvertPage = compileSchema(advertPageSchema);
 const validateDirectHeardQuery = compileSchema(directHeardQuerySchema);
+const validateVerifiedAdvertRouteQuery = compileSchema(verifiedAdvertRouteQuerySchema);
 const validateFingerprintPrune = compileSchema(fingerprintPruneSchema);
 
 function assertAdvertQuery(validate, query) {
@@ -108,6 +111,15 @@ const BOT_FILTER_SQL = `
 
 function botFilterValues({ botName, channel, trigger, sender }) {
   return [botName, channel, trigger, sender].flatMap((value) => [value ?? null, value ?? null]);
+}
+
+function nextHexPrefix(prefix) {
+  const alphabet = '0123456789ABCDEF';
+  for (let index = prefix.length - 1; index >= 0; index--) {
+    const digit = alphabet.indexOf(prefix[index]);
+    if (digit < 15) return `${prefix.slice(0, index)}${alphabet[digit + 1]}`;
+  }
+  return 'G';
 }
 
 // Fixed rungs above the (dynamic, config-derived) sample interval. Ordered
@@ -541,6 +553,53 @@ const MIGRATIONS = [
   telemetryPollMigration,
   { version: 18, statements: [
     "ALTER TABLE bot_replies ADD COLUMN region_scope TEXT CHECK(region_scope IS NULL OR length(region_scope) BETWEEN 1 AND 31)"
+  ] },
+  { version: 19, statements: [
+    `CREATE TABLE verified_advert_paths (
+      id INTEGER PRIMARY KEY,
+      public_key_hex TEXT NOT NULL REFERENCES nodes(public_key_hex) ON DELETE CASCADE,
+      first_received_at INTEGER NOT NULL,
+      received_at INTEGER NOT NULL,
+      reception_count INTEGER NOT NULL DEFAULT 1 CHECK(reception_count > 0),
+      event_digest TEXT NOT NULL,
+      hash_width INTEGER NOT NULL CHECK(hash_width BETWEEN 1 AND 3),
+      path_hashes_json TEXT NOT NULL CHECK(json_valid(path_hashes_json)),
+      flags INTEGER NOT NULL CHECK(flags BETWEEN 0 AND 255),
+      advert_timestamp INTEGER NOT NULL CHECK(advert_timestamp BETWEEN 0 AND 4294967295),
+      advert_lat INTEGER,
+      advert_lon INTEGER,
+      advert_name TEXT,
+      UNIQUE(public_key_hex,event_digest,path_hashes_json)
+    )`,
+    'CREATE INDEX idx_verified_advert_paths_source_time ON verified_advert_paths(public_key_hex,received_at DESC)'
+  ] },
+  { version: 20, statements: [
+    `CREATE TABLE telemetry_request_diagnostics (
+      request_id TEXT PRIMARY KEY CHECK(length(request_id)=36),
+      run_id TEXT NOT NULL REFERENCES observer_runs(id),
+      observer_public_key TEXT NOT NULL CHECK(length(observer_public_key)=64 AND observer_public_key NOT GLOB '*[^0-9A-F]*'),
+      target_public_key TEXT NOT NULL CHECK(length(target_public_key)=64 AND target_public_key NOT GLOB '*[^0-9A-F]*'),
+      operation TEXT NOT NULL CHECK(operation IN ('guest-login','status','telemetry','neighbours')),
+      started_at INTEGER NOT NULL CHECK(started_at BETWEEN 0 AND 9007199254740991),
+      completed_at INTEGER NOT NULL CHECK(completed_at BETWEEN 0 AND 9007199254740991),
+      clock_anomaly INTEGER NOT NULL CHECK(clock_anomaly IN (0,1)),
+      status TEXT NOT NULL CHECK(status IN ('deferred','failed','unsupported','completed')),
+      reason TEXT CHECK(reason IS NULL OR length(reason) BETWEEN 1 AND 64),
+      diagnostic_json TEXT NOT NULL CHECK(json_valid(diagnostic_json) AND json_type(diagnostic_json)='object'
+        AND length(CAST(diagnostic_json AS BLOB))<=4096
+        AND json_extract(diagnostic_json,'$.requestId') IS request_id
+        AND json_extract(diagnostic_json,'$.runId') IS run_id
+        AND json_extract(diagnostic_json,'$.observerPublicKey') IS observer_public_key
+        AND json_extract(diagnostic_json,'$.targetPublicKey') IS target_public_key
+        AND json_extract(diagnostic_json,'$.operation') IS operation
+        AND json_extract(diagnostic_json,'$.startedAt') IS started_at
+        AND json_extract(diagnostic_json,'$.completedAt') IS completed_at
+        AND json_extract(diagnostic_json,'$.clockAnomaly') IS (clock_anomaly=1)
+        AND json_extract(diagnostic_json,'$.status') IS status
+        AND json_extract(diagnostic_json,'$.reason') IS reason)
+    )`,
+    'CREATE INDEX idx_telemetry_diagnostics_time ON telemetry_request_diagnostics(completed_at DESC,request_id DESC)',
+    'CREATE INDEX idx_telemetry_diagnostics_target_time ON telemetry_request_diagnostics(target_public_key,completed_at DESC,request_id DESC)'
   ] }
 ];
 
@@ -624,6 +683,7 @@ export class MetricsStore {
   #regionPoll;
   #telemetry;
   #telemetryPoll;
+  #telemetryDiagnostics;
   #activeRunId = null;
   #ownsRuns = false;
   #insertSampleStmt;
@@ -675,6 +735,7 @@ export class MetricsStore {
       };
       this.#telemetry = createTelemetryHistory(this.#db, requireTelemetryRun);
       this.#telemetryPoll = createTelemetryPollState(this.#db, requireTelemetryRun, this.#telemetry.recordWithinTransaction);
+      this.#telemetryDiagnostics = createTelemetryDiagnostics(this.#db, requireTelemetryRun);
     } catch (error) {
       this.#db?.close();
       throw explainDatabaseLock(error);
@@ -1464,7 +1525,12 @@ export class MetricsStore {
   /** Atomic verified-reception write. Caller verifies authenticity; AJV guards the DTO. */
   recordVerifiedAdvert(observation) {
     if (!validateAdvert(observation)) throw new Error(`Invalid verified advert: ${formatErrors(validateAdvert.errors)}`);
-    const { publicKeyHex, eventDigest, name, type, receivedAt, hopCount } = observation;
+    if (observation.routeEvidence && observation.type !== 'REPEATER') throw new Error('Only verified repeater adverts can persist route evidence');
+    if (observation.routeEvidence && (observation.routeEvidence.pathHashesHex.length !== observation.hopCount
+      || observation.routeEvidence.pathHashesHex.some(hash => hash.length !== observation.routeEvidence.hashWidth * 2))) {
+      throw new Error('Verified advert route hashes must match the declared path width and hop count');
+    }
+    const { publicKeyHex, eventDigest, name, type, receivedAt, hopCount, routeEvidence } = observation;
     const digest = Buffer.from(eventDigest, 'hex');
     this.#db.exec('BEGIN IMMEDIATE');
     try {
@@ -1519,6 +1585,16 @@ export class MetricsStore {
       } else if (earlierDiscovery) {
         this.#db.prepare('UPDATE advert_events SET is_new=0 WHERE digest=?').run(previous.discovery_digest);
       }
+      if (routeEvidence) {
+        this.#db.prepare(`INSERT INTO verified_advert_paths
+          (public_key_hex,first_received_at,received_at,reception_count,event_digest,hash_width,path_hashes_json,flags,advert_timestamp,advert_lat,advert_lon,advert_name)
+          VALUES (?,?,?,1,?,?,?,?,?,?,?,?) ON CONFLICT(public_key_hex,event_digest,path_hashes_json) DO UPDATE SET
+          first_received_at=MIN(first_received_at,excluded.first_received_at),
+          received_at=MAX(received_at,excluded.received_at), reception_count=reception_count+1
+        `).run(publicKeyHex, receivedAt, receivedAt, eventDigest, routeEvidence.hashWidth,
+          JSON.stringify(routeEvidence.pathHashesHex), routeEvidence.flags, routeEvidence.advertTimestamp,
+          routeEvidence.lat, routeEvidence.lon, name);
+      }
       this.#db.exec('COMMIT');
       return { eventRecorded, newlyDiscovered: !previous };
     } catch (error) { this.#db.exec('ROLLBACK'); throw error; }
@@ -1533,6 +1609,70 @@ export class MetricsStore {
     return { lastDirectHeardAt, eligible: node?.type === 'REPEATER' && lastDirectHeardAt !== null &&
       query.now >= lastDirectHeardAt && query.now - lastDirectHeardAt < query.windowMs };
   }
+
+  /** Resolve fresh signed advert path hashes to unique repeater identities, then reverse the observed route. */
+  getVerifiedAdvertRoute(query) {
+    if (!validateVerifiedAdvertRouteQuery(query)) {
+      throw new Error(`Invalid verified advert route query: ${formatErrors(validateVerifiedAdvertRouteQuery.errors)}`);
+    }
+    const evidence = this.#db.prepare(`SELECT route.* FROM verified_advert_paths AS route
+      JOIN nodes AS target ON target.public_key_hex=route.public_key_hex AND target.type='REPEATER'
+      WHERE route.public_key_hex=? AND route.received_at<=? AND route.received_at>?
+      ORDER BY route.received_at DESC,route.id DESC LIMIT 1
+    `).get(query.publicKeyHex, query.now, query.now - query.windowMs);
+    if (!evidence) return { status: 'unavailable', reason: 'no-fresh-verified-route' };
+    const pathHashes = JSON.parse(evidence.path_hashes_json);
+    if (!Array.isArray(pathHashes) || pathHashes.length + 1 > query.radius) return { status: 'unavailable', reason: 'route-exceeds-radius' };
+    const nodesWithPrefix = prefix => this.#db.prepare(`SELECT public_key_hex AS publicKeyHex FROM nodes
+      WHERE type='REPEATER' AND public_key_hex>=? AND public_key_hex<? ORDER BY public_key_hex LIMIT 2
+    `).all(prefix, nextHexPrefix(prefix));
+    const relays = [];
+    for (const hash of pathHashes) {
+      const matches = nodesWithPrefix(hash);
+      if (matches.length !== 1) return { status: 'unavailable', reason: matches.length ? 'route-hop-ambiguous' : 'route-hop-unresolved' };
+      if (matches[0].publicKeyHex === query.publicKeyHex || relays.includes(matches[0].publicKeyHex)) {
+        return { status: 'unavailable', reason: 'route-loop' };
+      }
+      relays.push(matches[0].publicKeyHex);
+    }
+    const outboundPath = relays.reverse().map(key => key.slice(0, 4));
+    for (const prefix of outboundPath) {
+      if (nodesWithPrefix(prefix).length !== 1) {
+        return { status: 'unavailable', reason: 'two-byte-repeater-prefix-collision' };
+      }
+    }
+    if (query.observerPublicKey) {
+      const firstHop = relays[0] ?? query.publicKeyHex;
+      const directlyHeard = outboundPath.length === 0
+        ? this.#db.prepare(`SELECT 1 AS present FROM telemetry_direct_evidence d
+          JOIN observer_runs r ON r.id=d.run_id JOIN nodes n ON n.public_key_hex=d.target_public_key
+          WHERE d.observer_public_key=? AND d.target_public_key=? AND d.eligible=1 AND d.received_at<=?
+            AND d.received_at>? AND d.received_at>=r.started_at AND r.wall_time_anomaly=0 AND n.type='REPEATER'
+          LIMIT 1`).get(query.observerPublicKey, firstHop, query.now, query.now - query.windowMs)
+        : this.#db.prepare(`SELECT 1 AS present FROM (
+        SELECT a.target_public_key AS publicKeyHex,a.completed_at AS receivedAt,a.run_id AS runId,
+          a.clock_anomaly AS clockAnomaly,a.status AS status,a.route AS route
+          FROM telemetry_auth_outcomes a JOIN telemetry_request_diagnostics d ON d.request_id=a.request_id
+          WHERE a.observer_public_key=? AND json_array_length(json_extract(d.diagnostic_json,'$.routeCandidatePath'))=0
+        UNION ALL
+        SELECT o.target_public_key AS publicKeyHex,o.received_at AS receivedAt,o.run_id AS runId,
+          o.clock_anomaly AS clockAnomaly,o.status AS status,o.route AS route
+          FROM telemetry_query_outcomes o JOIN telemetry_request_diagnostics d ON d.request_id=o.request_id
+          WHERE o.observer_public_key=? AND json_array_length(json_extract(d.diagnostic_json,'$.routeCandidatePath'))=0
+        ) proof JOIN observer_runs r ON r.id=proof.runId JOIN nodes n ON n.public_key_hex=proof.publicKeyHex
+        WHERE proof.publicKeyHex=? AND proof.status IN ('completed','answered','partial')
+          AND proof.route='direct' AND proof.clockAnomaly=0 AND proof.receivedAt<=?
+          AND proof.receivedAt>? AND r.wall_time_anomaly=0 AND n.type='REPEATER' LIMIT 1`)
+          .get(query.observerPublicKey, query.observerPublicKey, firstHop, query.now, query.now - query.windowMs);
+      if (!directlyHeard) return { status: 'unavailable', reason: 'no-observer-adjacent-route' };
+    }
+    return { status: 'available', target: { publicKeyHex: evidence.public_key_hex, name: evidence.advert_name,
+      flags: evidence.flags, advertTimestamp: evidence.advert_timestamp, lat: evidence.advert_lat, lon: evidence.advert_lon },
+    path: outboundPath, hashWidth: 2, receivedAt: evidence.received_at, receptionCount: evidence.reception_count };
+  }
+
+  /** Best supported outbound candidate from recent flood message paths. */
+  getTopologyOutboundRoute(query) { return this.#topology.outboundRoute(query); }
 
   /** Opt-in local cleanup. Preserve inventory, retained event identities and original discovery.
    * One DELETE is atomic; validation precedes all side effects. Cutoff equality is inactive. */
@@ -1852,6 +1992,7 @@ export class MetricsStore {
     try {
       this.#telemetry.prune(cutoffMs);
       this.#telemetryPoll.prune(cutoffMs);
+      this.#telemetryDiagnostics.prune(cutoffMs);
       this.#regionReads.prune(cutoffMs);
       this.#db.prepare('DELETE FROM topology_observations WHERE received_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM topology_capture_samples WHERE sample_at < ?').run(cutoffMs);
@@ -1862,6 +2003,7 @@ export class MetricsStore {
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);
       this.#db.prepare("DELETE FROM bot_replies WHERE status != 'pending' AND resolved_at < ?").run(cutoffMs);
       this.#db.prepare('DELETE FROM advert_events WHERE received_at < ?').run(cutoffMs);
+      this.#db.prepare('DELETE FROM verified_advert_paths WHERE received_at < ?').run(cutoffMs);
       this.#pruneEndedRuns(cutoffMs);
       this.#db.exec('COMMIT');
     } catch (err) {
@@ -1892,6 +2034,8 @@ export class MetricsStore {
   getTelemetryLatest(query) { return this.#telemetryReads.latest(query); }
   queryTelemetryObservations(query) { return this.#telemetryReads.observations(query); }
   queryTelemetryOutcomes(query) { return this.#telemetryReads.outcomes(query); }
+  recordTelemetryRequestDiagnostic(input) { return this.#telemetryDiagnostics.record(input); }
+  queryTelemetryRequestDiagnostics(query) { return this.#telemetryDiagnostics.page(query); }
   queryRegionPollCandidates(query, policy) { return this.#regionPoll.candidates(query, policy); }
   getRegionPollState(query) { return this.#regionPoll.state(query); }
   getRegionPollHighWater() { return this.#regionPoll.highWater(); }

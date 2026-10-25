@@ -11,6 +11,7 @@ import { dropRegionSchema } from '../fixtures/region-downgrade.js';
 
 const OBSERVER = 'BE'.repeat(32), TARGET = 'AC'.repeat(32);
 const stores = new Set(), dirs = new Set();
+const legacyRow = row => { const copy = { ...row }; delete copy.region_scope; return copy; };
 afterEach(() => { for (const store of stores) store.close(); stores.clear();
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true }); dirs.clear(); });
 function file() { const dir = mkdtempSync(join(tmpdir(), 'region-history-')); dirs.add(dir); return join(dir, 'metrics.sqlite3'); }
@@ -56,12 +57,12 @@ test('migration 14 preserves version-13 run/inventory/bot/advert/topology/proces
     db.exec(`${dropRegionSchema} PRAGMA user_version=13`);
     return ['observer_runs','observer_instance','nodes','bot_replies','flood_advert_state','advert_events','advert_fingerprints',
       'process_samples','topology_paths','topology_path_hops','topology_observations','topology_capture_samples','runtime_events']
-      .map(table => [table, db.prepare(`SELECT * FROM ${table}`).all().map(row => ({ ...row }))]);
+      .map(table => [table, db.prepare(`SELECT * FROM ${table}`).all().map(legacyRow)]);
   });
   store = open(path); close(store);
   inspect(path, db => {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 18);
-    for (const [table, rows] of prior) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all().map(row => ({ ...row })), rows);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19);
+    for (const [table, rows] of prior) assert.deepEqual(db.prepare(`SELECT * FROM ${table}`).all().map(legacyRow), rows);
     assert.ok(Object.values(snapshot(db)).every(rows => rows.length === 0));
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
   });
@@ -78,7 +79,7 @@ test('a late migration-index failure rolls back every region table and user_vers
     assert.equal(db.prepare('SELECT name FROM nodes').get().name, 'Kept');
     db.exec('DROP INDEX idx_region_publications_claim_run');
   });
-  store = open(path); close(store); inspect(path, db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 18));
+  store = open(path); close(store); inspect(path, db => assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19));
 });
 
 test('real owned store persists every answer and terminal failure without RF tags/raw bodies or fabricated empty success', () => {

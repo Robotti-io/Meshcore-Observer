@@ -67,7 +67,7 @@ export class NodeRegistry {
     try {
       const reception = this.#parseAdvert(decodedPacket);
       if (!reception) return;
-      const { advert, eventDigest, hopCount } = reception;
+      const { advert, eventDigest, hopCount, pathHashWidth, pathHashesHex } = reception;
       // Capture Observer reception time before asynchronous verification;
       // never derive recency from the remote advert timestamp.
       const receivedAt = Date.parse(decodedPacket.timestamp);
@@ -80,6 +80,13 @@ export class NodeRegistry {
       }
       const observation = { publicKeyHex: Buffer.from(advert.publicKey).toString('hex').toUpperCase(),
         name: advert.parsed.name || null, type: advert.parsed.type ?? null, eventDigest, hopCount, receivedAt };
+      if (observation.type === 'REPEATER' && [1, 2, 3].includes(pathHashWidth)
+        && Array.isArray(pathHashesHex) && pathHashesHex.length === hopCount
+        && Number.isInteger(advert.timestamp) && typeof advert.getFlags === 'function') {
+        observation.routeEvidence = { hashWidth: pathHashWidth, pathHashesHex,
+          flags: advert.getFlags(), advertTimestamp: advert.timestamp,
+          lat: advert.parsed.lat, lon: advert.parsed.lon };
+      }
       if (!validateAdvert(observation)) {
         this.#logger.warn('services.nodeRegistry', 'dropped invalid verified advert evidence', { error: formatErrors(validateAdvert.errors) });
         return;

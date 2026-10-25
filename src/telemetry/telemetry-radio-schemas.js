@@ -39,6 +39,10 @@ export const telemetryLoginFailureSchema = object({ bytes: tuple(0x86, 8, { 1: {
 
 const ignored = object({ status: { const: 'ignored' } });
 const pending = object({ status: { const: 'pending' }, contactCount: integer(0, TELEMETRY_CONTACT_INVENTORY_MAX) });
+const inventoryContact = object({ publicKey: key, contactType: byte, flags: byte, encodedPathLength: byte,
+  pathBytes: bytes(TELEMETRY_CONTACT_PATH_BYTES), name: { type: 'string', maxLength: 32 }, lastAdvert: uint32,
+  lat: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+  lon: { type: 'integer', minimum: -2147483648, maximum: 2147483647 }, lastMod: uint32 });
 const unavailable = reasons => object({ status: { const: 'unavailable' }, reason: { enum: reasons } });
 const malformed = reason => object({ status: { const: 'malformed' }, reason: { const: reason } });
 export const TELEMETRY_ROUTE_FAILURES = Object.freeze([
@@ -59,12 +63,15 @@ export const telemetryContactReadResultSchema = { oneOf: [
   object({ status: { const: 'unavailable' }, reason: { enum: ['preflight-unsupported', 'contact-missing', 'preflight-failed'] }, errorCode: byte })
 ] };
 export const telemetryInventoryFrameResultSchema = { oneOf: [
-  ignored, malformed('invalid-contact-inventory-frame'), unavailable(['inventory-too-large', 'contacts-changed']),
+  ignored, malformed('invalid-contact-inventory-frame'), unavailable(['inventory-too-large']),
   object({ status: { const: 'accepted' }, envelope: { oneOf: [
     object({ kind: { const: 'start' }, count: integer(0, TELEMETRY_CONTACT_INVENTORY_MAX) }),
     object({ kind: { const: 'end' } }),
+    object({ kind: { const: 'changed' } }),
     object({ kind: { const: 'contact' }, publicKey: key, contactType: byte,
-      encodedPathLength: byte, pathBytes: bytes(TELEMETRY_CONTACT_PATH_BYTES) }),
+      flags: byte, encodedPathLength: byte, pathBytes: bytes(TELEMETRY_CONTACT_PATH_BYTES), name: { type: 'string', maxLength: 32 },
+      lastAdvert: uint32, lat: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+      lon: { type: 'integer', minimum: -2147483648, maximum: 2147483647 }, lastMod: uint32 }),
     object({ kind: { const: 'error' }, errorCode: byte })
   ] } })
 ] };
@@ -73,10 +80,18 @@ export const TELEMETRY_INVENTORY_FAILURES = Object.freeze([
   'inventory-protocol-error', 'duplicate-contact', 'login-prefix-collision', 'contact-missing',
   'non-repeater-contact', 'preflight-unsupported', 'preflight-failed', 'preflight-timeout', 'clock-anomaly'
 ]);
+const deferredInventoryReasons = ['preflight-unsupported', 'preflight-failed', 'login-prefix-collision',
+  'contacts-changed', 'contact-missing', 'non-repeater-contact', ...TELEMETRY_ROUTE_FAILURES];
+const deferredInventoryResult = object({ status: { const: 'deferred' }, reason: { enum: deferredInventoryReasons },
+  contactCount: integer(0, TELEMETRY_CONTACT_INVENTORY_MAX) });
 export const telemetryContactInventoryResultSchema = { oneOf: [pending, unavailable(TELEMETRY_INVENTORY_FAILURES),
-  object({ status: { const: 'complete' }, contactCount: integer(1, TELEMETRY_CONTACT_INVENTORY_MAX),
-    contact: telemetryContactProofSchema, prefixCollisionChecked: { const: true },
-    provenance: { const: 'companion-contact-inventory' } })
+  deferredInventoryResult,
+  object({ status: { const: 'complete' }, contactCount: integer(0, TELEMETRY_CONTACT_INVENTORY_MAX),
+    contact: { anyOf: [telemetryContactProofSchema, { type: 'null' }] }, contacts: { type: 'array', maxItems: TELEMETRY_CONTACT_INVENTORY_MAX, items: inventoryContact },
+    contactIssue: { enum: ['non-repeater-contact', ...TELEMETRY_ROUTE_FAILURES] },
+    prefixCollisionChecked: { const: true },
+    provenance: { const: 'companion-contact-inventory' } }, ['status', 'contactCount', 'contact', 'contacts',
+    'prefixCollisionChecked', 'provenance'])
 ] };
 export const telemetryLoginResultSchema = { oneOf: [ignored, malformed('invalid-login-frame'),
   unavailable(['unsafe-prefix', 'legacy-login-proof', 'unsafe-login-permissions', 'unsupported-login-protocol']),

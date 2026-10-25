@@ -202,6 +202,31 @@ test('duplicate path summaries preserve earliest reception and shortest observed
   assert.equal(eligible(store, 2000).lastDirectHeardAt, 2000);
 });
 
+test('migration 19 retains signed target-to-path evidence and resolves a reversed two-byte repeater route', () => {
+  const store = open();
+  const relayNear = 'BB'.repeat(2) + '10'.repeat(30), relayFar = 'CC'.repeat(2) + '20'.repeat(30);
+  const destination = 'DD'.repeat(2) + '30'.repeat(30);
+  store.recordVerifiedAdvert(evidence('near', { publicKeyHex: relayNear, hopCount: 0, receivedAt: 4000 }));
+  store.recordVerifiedAdvert(evidence('far', { publicKeyHex: relayFar, hopCount: 0, receivedAt: 4000 }));
+  store.recordVerifiedAdvert(evidence('destination', { publicKeyHex: destination, name: 'Destination', receivedAt: 4000,
+    hopCount: 2, routeEvidence: { hashWidth: 2, pathHashesHex: ['CCCC', 'BBBB'], flags: 0x82,
+      advertTimestamp: 1234, lat: null, lon: null } }));
+  store.recordVerifiedAdvert(evidence('destination', { publicKeyHex: destination, name: 'Destination', receivedAt: 4500,
+    hopCount: 2, routeEvidence: { hashWidth: 2, pathHashesHex: ['CCCC', 'BBBB'], flags: 0x82,
+      advertTimestamp: 1234, lat: null, lon: null } }));
+  assert.deepEqual(store.getVerifiedAdvertRoute({ publicKeyHex: destination, now: 5000, windowMs: 2000, radius: 3 }), {
+    status: 'available', target: { publicKeyHex: destination, name: 'Destination', flags: 0x82,
+      advertTimestamp: 1234, lat: null, lon: null }, path: ['BBBB', 'CCCC'], hashWidth: 2, receivedAt: 4500, receptionCount: 2
+  });
+  assert.deepEqual(store.getVerifiedAdvertRoute({ publicKeyHex: destination, now: 7000, windowMs: 2000, radius: 3 }),
+    { status: 'unavailable', reason: 'no-fresh-verified-route' });
+  assert.throws(() => store.recordVerifiedAdvert(evidence('invalid-route', { type: 'CHAT', routeEvidence: {
+    hashWidth: 2, pathHashesHex: [], flags: 1, advertTimestamp: 1234, lat: null, lon: null
+  } })), /Only verified repeater adverts/);
+  assert.throws(() => store.getVerifiedAdvertRoute({ publicKeyHex: destination, now: 5000, windowMs: 2000, radius: 3, extra: true }),
+    /Invalid verified advert route query/);
+});
+
 test('migration 10 preserves legacy data without inventing history or direct evidence', () => {
   const path = file(); makeV9(path);
   inspect(path, (db) => {
@@ -219,7 +244,7 @@ test('migration 10 preserves legacy data without inventing history or direct evi
   store.recordVerifiedAdvert(evidence('fresh', { name: null }));
   assert.equal(store.queryNodes({ limit: 100, offset: 0 }).nodes[0].name, 'Legacy');
   assert.equal(store.queryAdvertTotals(RANGE).newDiscoveries, 0);
-  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 18);
+  assert.equal(inspect(path, (db) => db.prepare('PRAGMA user_version').get().user_version), 19);
 });
 
 test('late migration failure rolls back the node rebuild and all new tables', () => {

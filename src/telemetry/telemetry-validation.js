@@ -3,7 +3,8 @@ import * as schemas from './telemetry-schemas.js';
 
 const known = [schemas.telemetryVariantSchema, schemas.telemetryDecoderInputSchema, schemas.telemetryParseInputSchema, schemas.telemetryObservationSchema,
   schemas.telemetryOutcomeSchema, schemas.telemetryResultSchema, schemas.telemetryConfigSchema, schemas.telemetryEnvSchema,
-  schemas.telemetryLatestQuerySchema, schemas.telemetryObservationPageSchema, schemas.telemetryOutcomePageSchema];
+  schemas.telemetryLatestQuerySchema, schemas.telemetryObservationPageSchema, schemas.telemetryOutcomePageSchema,
+  schemas.telemetryRequestDiagnosticSchema, schemas.telemetryRequestDiagnosticPageSchema];
 const validators = new Map(known.map(schema => [schema, compileSchema(schema)]));
 const invalid = () => new Error('Invalid telemetry data'); // Never disclose inbound fields/values.
 

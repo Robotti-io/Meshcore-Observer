@@ -9,7 +9,8 @@ export const TELEMETRY_FRESHNESS_DEFAULT_HOURS = 72;
 export const TELEMETRY_FRESHNESS_ENV_KEY = 'PACKETCAPTURE_TELEMETRY_FRESHNESS_HOURS';
 export const TELEMETRY_FAILURE_REASONS = Object.freeze([
   'disconnected', 'stopped', 'command-error', 'ack-timeout', 'response-timeout',
-  'write-error', 'protocol-error', 'retired-tag', 'route-mismatch', 'malformed-response'
+  'write-error', 'protocol-error', 'retired-tag', 'route-mismatch', 'malformed-response',
+  'trace-timeout', 'trace-malformed', 'trace-write-error', 'trace-login-not-dispatched'
 ]);
 
 // Pinned MeshCore a366955: little-endian status fields, with two extensions
@@ -155,3 +156,44 @@ const range = { start: epoch, end: epoch, observerPublicKey: key, targetPublicKe
   limit: integer(1, 200), offset: integer(0, 0x7FFFFFFF) };
 export const telemetryObservationPageSchema = object(range, ['start', 'end']);
 export const telemetryOutcomePageSchema = object({ ...range, status: { enum: ['answered', 'partial', 'failed', 'unsupported'] } }, ['start', 'end']);
+const telemetryRequestDiagnosticProperties = {
+  requestId: uuid, runId: uuid, observerPublicKey: key, targetPublicKey: key,
+  targetName: { anyOf: [{ type: 'string', maxLength: 32 }, { type: 'null' }] },
+  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  startedAt: epoch, completedAt: epoch, dispatchedAt: { anyOf: [epoch, { type: 'null' }] },
+  clockAnomaly: { type: 'boolean' },
+  phase: { enum: ['queued', 'admission', 'preflight', 'ready', 'ack', 'response', 'recovery'] },
+  status: { enum: ['deferred', 'failed', 'unsupported', 'completed'] }, reason: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
+  routeCandidatePath: { type: 'array', maxItems: 63, items: { type: 'string', pattern: '^[0-9A-F]{4}$' } },
+  routeHopWeights: { type: 'array', maxItems: 31, items: { type: 'object', additionalProperties: false,
+    required: ['position', 'repeaterId', 'anchorSuccessCount', 'pathReceptionCount'], properties: {
+      position: integer(1, 31), repeaterId: { type: 'string', pattern: '^[0-9A-F]{4}$' },
+      anchorSuccessCount: integer(0, Number.MAX_SAFE_INTEGER), pathReceptionCount: integer(0, Number.MAX_SAFE_INTEGER),
+      traceSuccessCount: integer(0, Number.MAX_SAFE_INTEGER), neighbourSupportCount: integer(0, Number.MAX_SAFE_INTEGER)
+    } } },
+  responseTimeoutMs: { anyOf: [integer(1, 120000), { type: 'null' }] },
+  traceOutcome: { anyOf: [{ enum: ['pending', 'response', 'trace-timeout', 'trace-malformed',
+    'trace-write-error', 'trace-disconnected', 'invalid-route', 'quiet-air', 'trace-failed', 'trace-not-sent'] }, { type: 'null' }] },
+  tracePathHashes: { type: 'array', maxItems: 32, items: { type: 'string', pattern: '^[0-9A-F]{4}$' } },
+  traceSnrQuarterDb: { type: 'array', maxItems: 33, items: { type: 'integer', minimum: -128, maximum: 127 } },
+  traceTimeoutMs: { anyOf: [integer(1, 120000), { type: 'null' }] },
+  routeEvidenceSource: { anyOf: [{ enum: ['verified-advert', 'passive-topology', 'telemetry-neighbours'] }, { type: 'null' }] },
+  routeFailureReason: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
+  routeEvidenceAt: { anyOf: [epoch, { type: 'null' }] },
+  routeSupportCount: { anyOf: [integer(0, Number.MAX_SAFE_INTEGER), { type: 'null' }] },
+  inventoryContactCount: { anyOf: [integer(0, 350), { type: 'null' }] },
+  inventoryOutcome: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
+  contactSyncOutcome: { anyOf: [{ enum: ['unchanged', 'added', 'added-evicted', 'updated', 'deferred', 'failed'] }, { type: 'null' }] },
+  targetContactOutcome: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
+  dispatchMode: { enum: [null, 'direct', 'flood'] }
+};
+// These diagnostic fields were added after migration 20; keep older retained
+// JSON records valid while the scheduler populates the fields on new writes.
+export const telemetryRequestDiagnosticSchema = object(telemetryRequestDiagnosticProperties,
+  Object.keys(telemetryRequestDiagnosticProperties).filter(key => !['responseTimeoutMs', 'routeHopWeights', 'traceOutcome',
+    'tracePathHashes', 'traceSnrQuarterDb', 'traceTimeoutMs'].includes(key)));
+export const telemetryRequestDiagnosticPageSchema = object({
+  start: epoch, end: epoch, observerPublicKey: key, targetPublicKey: key, runId: uuid,
+  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  status: { enum: ['deferred', 'failed', 'unsupported', 'completed'] }, limit: integer(1, 200), offset: integer(0, 0x7FFFFFFF)
+}, ['start', 'end']);

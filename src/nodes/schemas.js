@@ -28,7 +28,19 @@ export const verifiedAdvertSchema = {
     publicKeyHex: publicKey, eventDigest: digest,
     name: { type: ['string', 'null'] },
     type: { enum: ['NONE', 'CHAT', 'REPEATER', 'ROOM', 'SENSOR', null] },
-    receivedAt: epochMs, hopCount: { type: 'integer', minimum: 0, maximum: 63 }
+    receivedAt: epochMs, hopCount: { type: 'integer', minimum: 0, maximum: 63 },
+    routeEvidence: {
+      type: 'object', additionalProperties: false,
+      required: ['hashWidth', 'pathHashesHex', 'flags', 'advertTimestamp', 'lat', 'lon'],
+      properties: {
+        hashWidth: { type: 'integer', minimum: 1, maximum: 3 },
+        pathHashesHex: { type: 'array', maxItems: 63, items: { type: 'string', pattern: '^(?:[0-9A-F]{2}){1,3}$' } },
+        flags: { type: 'integer', minimum: 0, maximum: 255 },
+        advertTimestamp: { type: 'integer', minimum: 0, maximum: 0xFFFFFFFF },
+        lat: { type: ['integer', 'null'], minimum: -2147483648, maximum: 2147483647 },
+        lon: { type: ['integer', 'null'], minimum: -2147483648, maximum: 2147483647 }
+      }
+    }
   }
 };
 
@@ -54,5 +66,15 @@ export const directHeardQuerySchema = {
   properties: {
     publicKeyHex: publicKey, now: epochMs,
     windowMs: { type: 'integer', minimum: 3600000, maximum: 8760 * 3600000, multipleOf: 3600000 }
+  }
+};
+
+export const verifiedAdvertRouteQuerySchema = {
+  $id: 'meshcore-observer/nodes/verified-advert-route-query',
+  type: 'object', additionalProperties: false, required: ['publicKeyHex', 'now', 'windowMs', 'radius'],
+  properties: {
+    publicKeyHex: publicKey, observerPublicKey: publicKey, now: epochMs,
+    windowMs: { type: 'integer', minimum: 1, maximum: 8760 * 3600_000 },
+    radius: { type: 'integer', minimum: 1, maximum: 63 }
   }
 };

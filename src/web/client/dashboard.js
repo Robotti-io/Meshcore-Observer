@@ -447,10 +447,12 @@ function renderOperationalReporting(historyResponse, samplesResponse, runtimeRes
   ], 'No runtime events in this range.');
 }
 
-function renderRepeaterReporting(advertResponse, topologyResponse, coverageResponse, observationsResponse, outcomesResponse) {
+function renderRepeaterReporting(advertResponse, topologyResponse, coverageResponse, observationsResponse, outcomesResponse, diagnosticsResponse) {
   const adverts = summarizeAdvertReporting(advertResponse);
   const topology = summarizeTopologyReporting(topologyResponse, coverageResponse);
   const telemetry = summarizeTelemetryReporting(observationsResponse, outcomesResponse);
+  const telemetryRows = Array.isArray(outcomesResponse?.outcomes) ? outcomesResponse.outcomes : [];
+  const diagnosticRows = Array.isArray(diagnosticsResponse?.diagnostics) ? diagnosticsResponse.diagnostics : [];
   for (const [id, value] of [
     ['repeater-advert-events', adverts.events],
     ['repeater-advert-nodes', adverts.distinctNodes],
@@ -459,7 +461,10 @@ function renderRepeaterReporting(advertResponse, topologyResponse, coverageRespo
     ['repeater-telemetry-observations', telemetry.observations],
     ['repeater-telemetry-outcomes', telemetry.outcomes],
     ['repeater-telemetry-latest', telemetry.latestObservation ? formatTimestamp(telemetry.latestObservation.observedAt) : null],
-    ['repeater-telemetry-latest-outcome', telemetry.latestOutcome?.status ?? null]
+    ['repeater-telemetry-latest-outcome', telemetry.latestOutcome?.status ?? null],
+    ['repeater-telemetry-failed', telemetryRows.filter(row => row.status === 'failed').length],
+    ['repeater-telemetry-attempts', diagnosticsResponse?.total ?? null],
+    ['repeater-telemetry-attempt-failed', diagnosticRows.filter(row => row.status !== 'completed').length]
   ]) document.getElementById(id).textContent = formatReportingValue(value);
   renderBoundedRows('repeater-adverts-table', adverts.byType, [
     (row) => row.type,
@@ -473,6 +478,32 @@ function renderRepeaterReporting(advertResponse, topologyResponse, coverageRespo
     (row) => row.receptionCount,
     (row) => formatTimestamp(row.lastReceivedAt)
   ], 'No retained topology paths.');
+  renderBoundedRows('repeater-telemetry-outcomes-table', diagnosticRows.slice(0, 25), [
+    (row) => formatTimestamp(row.completedAt),
+    (row) => row.targetName || (row.targetPublicKey ? row.targetPublicKey.slice(0, 8) : 'Unknown repeater'),
+    (row) => row.operation ?? 'Unknown',
+    (row) => row.phase ?? 'Unknown',
+    (row) => row.routeCandidatePath?.length ? row.routeCandidatePath.join(' → ') : row.routeEvidenceSource ? 'Direct' : '—',
+    (row) => row.traceOutcome ? row.traceOutcome + (row.tracePathHashes?.length ? ' · ' + row.tracePathHashes.join(' → ') : '')
+      + (row.traceSnrQuarterDb?.length ? ' · SNR ' + row.traceSnrQuarterDb.map(value => (value / 4).toFixed(2)).join('/') + ' dB' : '') : '—',
+    (row) => row.routeEvidenceSource ? row.routeEvidenceSource + (row.routeSupportCount === null ? ''
+      : ' · ' + row.routeSupportCount + (row.routeEvidenceSource === 'telemetry-neighbours' ? ' neighbour reports' : ' receptions'))
+      + (row.routeEvidenceAt === null ? '' : ' · ' + formatTimestamp(row.routeEvidenceAt))
+      + (row.routeHopWeights?.length ? ' · ' + row.routeHopWeights.map(hop => 'H' + hop.position + ' ' + hop.repeaterId
+        + (hop.anchorSuccessCount ? ' anchor ' + hop.anchorSuccessCount : '')
+        + (hop.traceSuccessCount ? ' traces ' + hop.traceSuccessCount : '')
+        + (hop.neighbourSupportCount ? ' neighbours ' + hop.neighbourSupportCount : '')
+        + (hop.pathReceptionCount ? ' path ' + hop.pathReceptionCount : '')).join('; ') : '')
+      : row.routeFailureReason || 'No validated path',
+    (row) => row.contactSyncOutcome ?? '—',
+    (row) => [row.inventoryOutcome, row.targetContactOutcome].filter(Boolean).join(' / ') || '—',
+    (row) => Number.isSafeInteger(row.responseTimeoutMs) ? (row.responseTimeoutMs / 1000) + ' s' : '—',
+    (row) => row.dispatchMode ?? 'Not dispatched',
+    (row) => row.operation === 'guest-login' && row.status === 'completed'
+      ? 'Guest login completed; telemetry not yet collected'
+      : row.status ?? 'Unknown',
+    (row) => row.reason ?? '—'
+  ], 'No telemetry request attempts in this range.');
 }
 
 function reportingRequestDefinitions(view, params) {
@@ -498,7 +529,8 @@ function reportingRequestDefinitions(view, params) {
       { key: 'repeaters-topology-paths', path: '/api/metrics/topology/paths?limit=25' },
       { key: 'repeaters-topology-coverage', path: '/api/metrics/topology/coverage?' + range + '&limit=25' },
       { key: 'repeaters-telemetry-observations', path: '/api/metrics/telemetry/observations?' + range + '&limit=25' },
-      { key: 'repeaters-telemetry-outcomes', path: '/api/metrics/telemetry/outcomes?' + range + '&limit=25' }
+      { key: 'repeaters-telemetry-outcomes', path: '/api/metrics/telemetry/outcomes?' + range + '&limit=25' },
+      { key: 'repeaters-telemetry-diagnostics', path: '/api/metrics/telemetry/diagnostics?' + range + '&limit=25' }
     ];
   }
   return [];
@@ -519,7 +551,8 @@ function renderReportingSection(view, results) {
     renderBotReporting(reportingDataByKey.get('bots-usage'), reportingDataByKey.get('bots-outcomes'));
   } else if (view === 'repeaters') {
     renderRepeaterReporting(reportingDataByKey.get('repeaters-adverts'), reportingDataByKey.get('repeaters-topology-paths'),
-      reportingDataByKey.get('repeaters-topology-coverage'), reportingDataByKey.get('repeaters-telemetry-observations'), reportingDataByKey.get('repeaters-telemetry-outcomes'));
+      reportingDataByKey.get('repeaters-topology-coverage'), reportingDataByKey.get('repeaters-telemetry-observations'),
+      reportingDataByKey.get('repeaters-telemetry-outcomes'), reportingDataByKey.get('repeaters-telemetry-diagnostics'));
   }
 }
 

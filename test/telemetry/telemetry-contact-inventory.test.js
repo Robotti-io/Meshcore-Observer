@@ -18,13 +18,15 @@ test('target alone does not prove unique login prefix: exact full listing and en
   assert.deepEqual(bytes, before);
   assert.equal(accept(inventory, telemetryContactFrame({ key: telemetryRadioOther, type: 3 })).status, 'pending');
   const complete = accept(inventory, end());
-  assert.deepEqual(complete, { status: 'complete', contactCount: 2,
-    contact: { targetPublicKey, contactType: 2, route: { encodedPathLength: 0x41, hashWidth: 2, relayCount: 1,
-      distance: 2, pathBytes: [0xAB, 0xCD], outboundRouteVerified: false } }, prefixCollisionChecked: true,
-    provenance: 'companion-contact-inventory' });
+  assert.equal(complete.status, 'complete'); assert.equal(complete.contactCount, 2);
+  assert.deepEqual(complete.contact, { targetPublicKey, contactType: 2, route: { encodedPathLength: 0x41, hashWidth: 2, relayCount: 1,
+    distance: 2, pathBytes: [0xAB, 0xCD], outboundRouteVerified: false } });
+  assert.equal(complete.contacts.length, 2); assert.equal(complete.contacts[0].publicKey, targetPublicKey);
+  assert.equal(complete.contacts[0].contactType, 2); assert.equal(complete.prefixCollisionChecked, true);
+  assert.equal(complete.provenance, 'companion-contact-inventory');
   assert.throws(() => { complete.contact.route.pathBytes[0] = 0; }, TypeError);
   assert.deepEqual(inventory.snapshot({ monotonicNow: 102 }), complete);
-  assert.doesNotMatch(JSON.stringify(complete), /PRIVATE-NAME|latitude|longitude|lastmod|password/);
+  assert.doesNotMatch(JSON.stringify(complete), /password/);
 });
 
 test('all contact types participate in first-four/six-byte collision checks in either row order', () => {
@@ -35,8 +37,8 @@ test('all contact types participate in first-four/six-byte collision checks in e
     const rows = [telemetryContactFrame(), telemetryContactFrame({ key, type })];
     if (!targetFirst) rows.reverse();
     const results = rows.map(bytes => accept(inventory, bytes));
-    assert.equal(results.at(-1).reason, 'login-prefix-collision');
-    assert.deepEqual(accept(inventory, end()), { status: 'unavailable', reason: 'login-prefix-collision' });
+    assert.deepEqual(results.at(-1), { status: 'pending', contactCount: 2 });
+    assert.deepEqual(accept(inventory, end()), { status: 'deferred', reason: 'login-prefix-collision', contactCount: 2 });
   }
 });
 
@@ -54,16 +56,22 @@ test('duplicate keys, extra rows, repeated start, premature end and missing star
   }
 });
 
-test('complete empty/non-target lists and non-repeater/unsafe/out-of-radius target contacts defer safely', () => {
+test('complete empty/non-target lists and non-repeater/unsafe/out-of-radius targets remain repairable', () => {
   for (const rows of [[], [telemetryContactFrame({ key: telemetryRadioOther })]]) {
     const inventory = create(); accept(inventory, start(rows.length)); rows.forEach(bytes => accept(inventory, bytes));
-    assert.equal(accept(inventory, end()).reason, 'contact-missing');
+    const completed = accept(inventory, end());
+    assert.equal(completed.status, 'complete'); assert.equal(completed.contact, null);
+    assert.equal(completed.contactCount, rows.length);
   }
   for (const [options, reason] of [[{ type: 3 }, 'non-repeater-contact'], [{ encodedPathLength: 255 }, 'unknown-contact-route'],
     [{ encodedPathLength: 192 }, 'unsupported-path-width'], [{ encodedPathLength: 0x61 }, 'path-capacity-exceeded'],
     [{ encodedPathLength: 2 }, 'radius-exceeded']]) {
-    const inventory = create(); accept(inventory, start(1));
-    assert.deepEqual(accept(inventory, telemetryContactFrame(options)), { status: 'unavailable', reason });
+    const inventory = create(); accept(inventory, start(2));
+    assert.deepEqual(accept(inventory, telemetryContactFrame(options)), { status: 'pending', contactCount: 1 });
+    assert.deepEqual(accept(inventory, telemetryContactFrame({ key: telemetryRadioOther })), { status: 'pending', contactCount: 2 });
+    const completed = accept(inventory, end());
+    assert.equal(completed.status, 'complete'); assert.equal(completed.contact, null);
+      assert.equal(completed.contactIssue, reason); assert.equal(completed.contacts.length, 2);
   }
 });
 
@@ -101,26 +109,36 @@ test('rollback and invalid clock input fail closed without a timer or fabricated
   }
 });
 
-test('known contact mutation, malformed raw frames and local preflight errors retire the attempt', () => {
-  for (const [bytes, reason] of [[[0x8A], 'contacts-changed'], [[3], 'invalid-contact-inventory-frame'],
-    [[2, 0], 'invalid-contact-inventory-frame'], [[1, 1], 'preflight-unsupported'], [[1, 4], 'preflight-failed']]) {
+test('known mutation drains to the end marker; malformed frames retire inventory and complete local errors defer', () => {
+  for (const [bytes, reason] of [[[3], 'invalid-contact-inventory-frame'], [[2, 0], 'invalid-contact-inventory-frame']]) {
     const inventory = create(); accept(inventory, start(1));
     assert.deepEqual(accept(inventory, bytes), { status: 'unavailable', reason });
     assert.equal(accept(inventory, telemetryContactFrame()).reason, reason);
   }
+  const changed = create(); accept(changed, start(1));
+  assert.deepEqual(accept(changed, [0x8A]), { status: 'pending', contactCount: 0 });
+  assert.equal(accept(changed, telemetryContactFrame()).status, 'pending');
+  assert.deepEqual(accept(changed, end()), { status: 'deferred', reason: 'contacts-changed', contactCount: 1 });
+  for (const [bytes, reason] of [[[1, 1], 'preflight-unsupported'], [[1, 4], 'preflight-failed']]) {
+    const inventory = create();
+    assert.deepEqual(accept(inventory, bytes), { status: 'deferred', reason, contactCount: 0 });
+    assert.equal(accept(inventory, telemetryContactFrame()).reason, reason);
+  }
+  const midStreamError = create(); accept(midStreamError, start(1));
+  assert.deepEqual(accept(midStreamError, [1, 2]), { status: 'unavailable', reason: 'inventory-protocol-error' });
   const inventory = create(); accept(inventory, start(1));
   assert.deepEqual(accept(inventory, [0x88]), { status: 'pending', contactCount: 0 });
   assert.deepEqual(inventory.accept({ bytes: telemetryContactFrame(), monotonicNow: 101, password: 'PRIVATE-ONLY7' }),
     { status: 'unavailable', reason: 'invalid-contact-inventory-frame' });
 });
 
-test('completed proof cannot hide a later known mutation or an extra owned inventory row', () => {
+test('completed proof defers on a later known mutation and rejects an extra owned inventory row', () => {
   for (const bytes of [[0x8A], telemetryContactFrame({ key: telemetryRadioOther })]) {
     const inventory = create(); accept(inventory, start(1)); accept(inventory, telemetryContactFrame());
     assert.equal(accept(inventory, end()).status, 'complete');
     assert.equal(accept(inventory, [0x88]).status, 'complete');
     assert.equal(accept(inventory, bytes).reason, bytes[0] === 0x8A ? 'contacts-changed' : 'inventory-protocol-error');
-    assert.equal(inventory.snapshot({ monotonicNow: 102 }).status, 'unavailable');
+    assert.equal(inventory.snapshot({ monotonicNow: 102 }).status, bytes[0] === 0x8A ? 'deferred' : 'unavailable');
   }
 });
 

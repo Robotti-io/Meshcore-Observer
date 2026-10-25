@@ -48,4 +48,9 @@ export const topologyPrefixPageSchema = object({ hashWidth: width, prefix, ...pa
 export const topologyProximitySchema = object({ observerPublicKey: key, now: epoch,
   windowMs: topologyConfigSchema.properties.freshnessWindowMs,
   radius: { type: 'integer', minimum: 0, maximum: 63 }, ...page });
+export const topologyOutboundRouteQuerySchema = object({ observerPublicKey: key, targetPublicKey: key, now: epoch,
+  windowMs: { type: 'integer', minimum: 1, maximum: 8760 * 3600000 },
+  radius: { type: 'integer', minimum: 1, maximum: 63 }, excludedPaths: { type: 'array', maxItems: 64,
+    uniqueItems: true, items: { type: 'array', maxItems: 31, items: { type: 'string', pattern: '^[0-9A-F]{4}$' } } } },
+['observerPublicKey', 'targetPublicKey', 'now', 'windowMs', 'radius']);
 export const topologyPruneSchema = object({ cutoffMs: epoch });

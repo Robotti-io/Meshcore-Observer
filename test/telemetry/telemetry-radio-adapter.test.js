@@ -115,20 +115,22 @@ test('contact preflight errors and malformed frames produce only fixed safe outc
   assert.equal(parseTelemetryContactFrame({ targetPublicKey: '00000000' + 'AC'.repeat(28), bytes: telemetryContactFrame(), radius: 2 }).reason, 'unsafe-prefix');
 });
 
-test('inventory envelope parser preserves only bounded full keys/type/path and complete start/end shapes', () => {
+test('inventory envelope parser returns the bounded contact record needed for reconciliation', () => {
   assert.deepEqual(parseTelemetryInventoryFrame({ bytes: telemetryInventoryBoundary(2, 1024) }),
     { status: 'accepted', envelope: { kind: 'start', count: 1024 } });
   assert.deepEqual(parseTelemetryInventoryFrame({ bytes: telemetryInventoryBoundary(4, 0xFFFFFFFF) }),
     { status: 'accepted', envelope: { kind: 'end' } });
   const result = parseTelemetryInventoryFrame({ bytes: telemetryContactFrame() });
-  assert.deepEqual(Object.keys(result.envelope).sort(), ['contactType', 'encodedPathLength', 'kind', 'pathBytes', 'publicKey']);
+  assert.deepEqual(Object.keys(result.envelope).sort(), ['contactType', 'encodedPathLength', 'flags', 'kind', 'lastAdvert',
+    'lastMod', 'lat', 'lon', 'name', 'pathBytes', 'publicKey']);
   assert.equal(result.envelope.publicKey, targetPublicKey);
-  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-NAME|lastmod|latitude|longitude/);
+  assert.equal(result.envelope.name, 'PRIVATE-NAME-NOT-RETURNED');
   for (const count of [1025, 0xFFFFFFFF]) assert.equal(parseTelemetryInventoryFrame({ bytes: telemetryInventoryBoundary(2, count) }).reason, 'inventory-too-large');
   for (const bytes of [[2], [2, 1, 0, 0], [4, 0, 0, 0, 0, 0], [3], [1], [1, 1, 0]]) {
     assert.equal(parseTelemetryInventoryFrame({ bytes }).status, 'malformed');
   }
-  assert.equal(parseTelemetryInventoryFrame({ bytes: [0x8A] }).reason, 'contacts-changed');
+  assert.deepEqual(parseTelemetryInventoryFrame({ bytes: [0x8A] }),
+    { status: 'accepted', envelope: { kind: 'changed' } });
   assert.deepEqual(parseTelemetryInventoryFrame({ bytes: [0x88] }), { status: 'ignored' });
 });
 

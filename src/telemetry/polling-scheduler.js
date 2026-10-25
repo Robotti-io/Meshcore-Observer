@@ -15,6 +15,7 @@ const TRANSIENT = new Set(['foreground', 'quiet-air', 'rate-limited', 'backgroun
   'ineligible', 'reservation-unavailable', 'stopped', 'disconnected', 'not-ready']);
 const MAX_TIME = Number.MAX_SAFE_INTEGER;
 const add = (time, delay) => Math.min(MAX_TIME, time + delay);
+const routeKey = (target, path) => `${target}:${JSON.stringify(path)}`;
 
 /** One producer, no RF replay queue. The shared owner retains session authority;
  * the store retains deadlines. Exactly one terminal can await a local save. */
@@ -24,6 +25,7 @@ export class TelemetryPollingScheduler {
   #cursor = null; #observer = null; #recoveryCursor = null; #recovered = false;
   #anchor = null; #lastMono = 0; #highWater = 0; #clockPaused = false;
   #unsaved = null; #unconfirmed = false; #fault = null; #pausedGeneration = null;
+  #invalidRoutes = new Map();
 
   constructor({ config, store, runId, radio, coordinator, logger, wallNow = Date.now,
     monotonicNow = () => performance.now(), createId = randomUUID }) {
@@ -170,12 +172,14 @@ export class TelemetryPollingScheduler {
     const variant = login ? AUTH : selected.variant;
     const request = { requestId: this.#createId(), targetPublicKey: selected.target,
       ...(!login ? { operation: variant.component === 'sensors' ? 'telemetry' : variant.component, params: variant.params } : {}) };
-    let reservation = null;
+    let reservation = null, routeCandidate = null;
     const hooks = {
       isEligible: (dto, current) => this.#eligible(dto, current, admitted, variant, reservation),
       reserve: context => {
         if (!contextValid(context) || context.requestId !== request.requestId || context.targetPublicKey !== request.targetPublicKey
           || context.observerPublicKey !== admitted.observerPublicKey || context.generation !== admitted.generation) return false;
+        if (reservation) return reservation.requestId === request.requestId
+          && reservation.generation === admitted.generation;
         if (!this.#eligible(request, this.#snapshot(), admitted, variant, null)) return false;
         const input = { observerPublicKey: admitted.observerPublicKey, targetPublicKey: selected.target, variant,
           runId: this.#runId, requestId: request.requestId, reservedAt: this.#clock().wall,
@@ -188,6 +192,30 @@ export class TelemetryPollingScheduler {
           || context.observerPublicKey !== admitted.observerPublicKey || context.targetPublicKey !== selected.target)
           throw new Error('Invalid telemetry replay ownership');
         return this.#store.getTelemetryAuthReplayState({ observerPublicKey: context.observerPublicKey, targetPublicKey: context.targetPublicKey }).serverTimestamp;
+      },
+      getContactRoute: context => {
+        if (!contextValid(context) || context.requestId !== request.requestId || context.generation !== admitted.generation
+          || context.observerPublicKey !== admitted.observerPublicKey || context.targetPublicKey !== selected.target)
+          throw new Error('Invalid telemetry contact route ownership');
+        const now = this.#clock();
+        if (now.paused) return null;
+        const route = this.#store.getVerifiedAdvertRoute({ publicKeyHex: selected.target,
+          observerPublicKey: admitted.observerPublicKey, now: now.wall,
+          windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius });
+        const excludedPaths = this.#invalidRoutePaths(selected.target, now.wall);
+        if (route.status === 'available' && !excludedPaths.some(path => JSON.stringify(path) === JSON.stringify(route.path))) {
+          routeCandidate = { path: route.path, evidenceSource: 'verified-advert' };
+          return { ...route, evidenceSource: 'verified-advert' };
+        }
+        if (route.status !== 'available' && !['no-fresh-verified-route', 'no-observer-adjacent-route'].includes(route.reason)) return route;
+        const topologyRoute = this.#store.getTopologyOutboundRoute({ observerPublicKey: admitted.observerPublicKey,
+          targetPublicKey: selected.target, now: now.wall, windowMs: this.#config.evidenceWindowMs,
+          radius: this.#config.radius, excludedPaths });
+        // Preserve unavailable decisions so preflight logs explain why no
+        // route was chosen; the contact manager still accepts only `available`.
+        if (topologyRoute.status === 'available') routeCandidate = { path: topologyRoute.path,
+          evidenceSource: topologyRoute.evidenceSource ?? 'passive-topology' };
+        return topologyRoute;
       },
       recordAuthentication: record => {
         if (!authValid(record) || !reservation || record.context.requestId !== request.requestId
@@ -206,12 +234,49 @@ export class TelemetryPollingScheduler {
         return this.#persist();
       }
     };
+    const requestStartedAt = this.#wall();
     const response = await (login ? this.#coordinator.tryGuestLogin(request, this.#config, hooks)
       : this.#coordinator.tryTelemetryRequest(request, this.#config, hooks));
     if (!validateTelemetryCompletion(response) || (response.context && (response.context.requestId !== request.requestId
       || response.context.observerPublicKey !== admitted.observerPublicKey || response.context.targetPublicKey !== selected.target
       || response.context.generation !== admitted.generation))) throw new Error('Invalid telemetry owner completion');
+    const detail = response.diagnostics ?? {};
+    const completedAt = this.#wall();
+    const dispatchedAt = response.dispatchedAt ?? null;
+    const diagnostic = { requestId: request.requestId, runId: this.#runId, observerPublicKey: admitted.observerPublicKey,
+      targetPublicKey: selected.target, operation: login ? 'guest-login' : variant.component === 'sensors' ? 'telemetry' : variant.component,
+      startedAt: requestStartedAt, completedAt, dispatchedAt,
+      clockAnomaly: completedAt < requestStartedAt || (dispatchedAt !== null
+        && (dispatchedAt < requestStartedAt || dispatchedAt > completedAt)),
+      phase: detail.phase ?? 'admission', status: response.status, reason: response.reason ?? null,
+      targetName: detail.targetName ?? null,
+      routeCandidatePath: detail.routeCandidatePath ?? [], routeEvidenceSource: detail.routeEvidenceSource ?? null,
+      routeHopWeights: detail.routeHopWeights ?? [],
+      responseTimeoutMs: detail.responseTimeoutMs ?? null,
+      traceOutcome: detail.traceOutcome ?? null,
+      tracePathHashes: detail.tracePathHashes ?? [], traceSnrQuarterDb: detail.traceSnrQuarterDb ?? [],
+      traceTimeoutMs: detail.traceTimeoutMs ?? null,
+      routeFailureReason: detail.routeFailureReason ?? null, routeEvidenceAt: detail.routeEvidenceAt ?? null,
+      routeSupportCount: detail.routeSupportCount ?? null,
+      inventoryContactCount: detail.inventoryContactCount ?? null, inventoryOutcome: detail.inventoryOutcome ?? null,
+      contactSyncOutcome: detail.contactSyncOutcome ?? null, targetContactOutcome: detail.targetContactOutcome ?? null,
+      dispatchMode: detail.dispatchMode ?? response.route ?? null };
+    const persistDiagnostic = () => {
+      try { this.#store.recordTelemetryRequestDiagnostic(diagnostic); }
+      catch {
+        this.#logger.error('services.telemetryPolling', 'Telemetry request diagnostics could not be persisted.', {
+          requestId: request.requestId, targetPublicKey: selected.target, outcome: 'diagnostic-persistence'
+        });
+      }
+    };
+    // A missed trace is the path-validation signal. A guest-login timeout can
+    // also mean a slow or unavailable repeater/return path, so it must not
+    // poison route selection on its own.
+    if (routeCandidate && ['trace-timeout', 'trace-malformed'].includes(detail.traceOutcome))
+      this.#invalidateRoute(selected.target, routeCandidate.path, this.#wall());
+    else if (routeCandidate && detail.traceOutcome === 'response') this.#confirmRoute(selected.target, routeCandidate.path);
     if (response.dispatchedAt === undefined) {
+      persistDiagnostic();
       // Reservation without physical dispatch remains a conservative block
       // until restart recovery. It is never written as a fabricated outcome.
       this.#unconfirmed = false;
@@ -225,6 +290,7 @@ export class TelemetryPollingScheduler {
     }
     if (!reservation) throw new Error('Telemetry dispatch lacks durable reservation');
     if (login) {
+      persistDiagnostic();
       if (this.#unconfirmed && !this.#unsaved) throw new Error('Telemetry authentication terminal was not captured');
       return response;
     }
@@ -235,11 +301,48 @@ export class TelemetryPollingScheduler {
     let clock;
     try { clock = this.#clock(); } catch { clock = { paused: true }; }
     const profile = this.#config.targetProfiles.find(p => p.targetPublicKey === selected.target);
-    this.#unsaved = { kind: 'data', input: { policy: this.#policy, result: telemetryPollingResult({ response, reservation,
+    const result = telemetryPollingResult({ response, reservation,
       variant, emitterProfile: profile?.emitterProfile ?? this.#config.emitterProfile,
-      completedAt: sample.wall, clockAnomaly: clock.paused }) } };
+      completedAt: sample.wall, clockAnomaly: clock.paused });
+    diagnostic.status = result.outcome.status === 'unsupported' ? 'unsupported'
+      : ['answered', 'partial'].includes(result.outcome.status) ? 'completed' : 'failed';
+    diagnostic.reason = result.outcome.reason;
+    diagnostic.completedAt = sample.wall;
+    diagnostic.clockAnomaly = sample.wall < requestStartedAt || (dispatchedAt !== null
+      && (dispatchedAt < requestStartedAt || dispatchedAt > sample.wall));
+    persistDiagnostic();
+    this.#unsaved = { kind: 'data', input: { policy: this.#policy, result } };
     this.#persist();
     return response;
+  }
+  #invalidRoutePaths(target, now) {
+    const paths = [];
+    for (const [key, invalid] of this.#invalidRoutes) {
+      if (invalid.expiresAt <= now) { this.#invalidRoutes.delete(key); continue; }
+      if (invalid.target === target && invalid.failureCount > 3) paths.push(invalid.path);
+    }
+    return paths.slice(0, 64);
+  }
+  #invalidateRoute(target, path, now) {
+    if (!Array.isArray(path) || !Number.isSafeInteger(now) || now < 0) return;
+    const key = routeKey(target, path);
+    const prior = this.#invalidRoutes.get(key);
+    this.#invalidRoutes.delete(key);
+    const failureCount = (prior?.failureCount ?? 0) + 1;
+    this.#invalidRoutes.set(key, { target, path: [...path], failureCount,
+      expiresAt: add(now, this.#policy.retryMaxMs) });
+    while (this.#invalidRoutes.size > 256) this.#invalidRoutes.delete(this.#invalidRoutes.keys().next().value);
+    this.#logger.warn('services.telemetryPolling', failureCount > 3
+      ? 'Telemetry route candidate suppressed after four unsuccessful traces; route discovery will try another candidate.'
+      : 'Telemetry route trace failed; the candidate remains eligible for the configured retry count.', {
+      targetPublicKey: target, path, traceFailureCount: failureCount,
+      outcome: failureCount > 3 ? 'route-candidate-suppressed' : 'route-trace-retry',
+      expiresAt: add(now, this.#policy.retryMaxMs)
+    });
+  }
+  #confirmRoute(target, path) {
+    if (!Array.isArray(path)) return;
+    this.#invalidRoutes.delete(routeKey(target, path));
   }
   #persist() {
     if (!this.#unsaved) return true;

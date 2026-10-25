@@ -188,13 +188,51 @@ for (const change of ['foreground', 'quiet', 'eligibility', 'reservation', 'repo
   assert.equal(f.writes.filter(write => write.bytes[0] === 26).length, 0); assert.equal(f.records.length, 0);
 });
 
-test('prefix collisions and incomplete lists recover untagged ownership without consuming RF budget', async () => {
+test('complete inventory with a missing or unusable target defers without reconnecting or consuming RF budget', async () => {
+  for (const scenario of [
+    { rows: [contact({ key: other })], reason: 'contact-missing' },
+    { rows: [contact({ encodedPathLength: 255 }), contact({ key: other })], reason: 'unknown-contact-route' },
+    { rows: [contact({ type: 3 })], reason: 'non-repeater-contact' }
+  ]) {
+    const f = await rig({ budget: { canAttempt: () => true, recordAttempt: vi.fn(() => true) } });
+    const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks); await flush();
+    await frame(f, boundary(2, scenario.rows.length));
+    for (const bytes of scenario.rows) await frame(f, bytes);
+    // A target ineligible result is not final until the full owned stream ends.
+    assert.equal(f.connections.length, 1);
+    await frame(f, boundary(4));
+    assert.equal((await pending).reason, scenario.reason);
+    assert.equal(f.connections.length, 1);
+    assert.equal(f.writes.some(write => [26, 30].includes(write.bytes[0])), false);
+    assert.equal(f.logger.warn.mock.calls.some(([, message]) => message.includes('ownership is uncertain')), false);
+    clean(f);
+  }
+});
+
+test('prefix collisions drain the complete inventory before deferring without RF', async () => {
   const recordAttempt = vi.fn(() => true), f = await rig({ budget: { canAttempt: () => true, recordAttempt } });
   const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks); await flush();
-  await frame(f, boundary(2, 2)); await frame(f, contact());
+  await frame(f, boundary(2, 3)); await frame(f, contact());
   await frame(f, contact({ key: target.slice(0, 8) + 'E2'.repeat(28), type: 1 }));
+  await frame(f, contact({ key: other }));
+  assert.equal(f.connections.length, 1);
+  await frame(f, boundary(4));
   assert.equal((await pending).reason, 'login-prefix-collision'); assert.equal(recordAttempt.mock.calls.length, 0);
+  assert.equal(f.connections.length, 1);
   assert.equal(f.writes.filter(write => write.bytes[0] === 26).length, 0);
+  clean(f);
+});
+
+test('new-advert mutation drains inventory and defers without resetting the radio', async () => {
+  const f = await rig(); const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks); await flush();
+  await frame(f, boundary(2, 1)); await frame(f, [0x8A]); await frame(f, contact());
+  assert.equal(f.connections.length, 1);
+  await frame(f, boundary(4));
+  assert.equal((await pending).reason, 'contacts-changed');
+  assert.equal(f.connections.length, 1);
+  assert.equal(f.writes.some(write => [26, 30].includes(write.bytes[0])), false);
+  assert.match(JSON.stringify(f.logger.warn.mock.calls), /streamComplete/);
+  clean(f);
 });
 
 for (const phase of ['inventory', 'contact', 'ack', 'response']) test(`stop during ${phase} drains the captured owner and revokes authority`, async () => {
@@ -210,7 +248,7 @@ for (const phase of ['inventory', 'contact', 'ack', 'response']) test(`stop duri
 
 for (const broken of ['silent inventory', 'silent ACK', 'silent proof', 'flood ACK', 'wrong ACK', 'write']) test(`${broken} has bounded cleanup, safe failure and no session`, async () => {
   const f = await rig(); const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks); await flush();
-  if (broken === 'silent inventory') await f.tick(5000);
+  if (broken === 'silent inventory') await f.tick(30000);
   else {
     if (broken === 'write') f.current().fail = true;
     await preflight(f);

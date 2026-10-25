@@ -12,7 +12,7 @@ export const TELEMETRY_POLL_MAX_SECRETS = 32;
 export const TELEMETRY_POLL_DEFAULTS = Object.freeze({
   enabled: false, radius: 2, evidenceWindowMs: 72 * 3600000,
   refreshIntervalMs: 24 * 3600000, startupDelayMs: 75000, tickIntervalMs: 10000,
-  preflightTimeoutMs: 5000, sessionTtlMs: 10 * 60000,
+  preflightTimeoutMs: 5000, inventoryTimeoutMs: 30000, sessionTtlMs: 10 * 60000,
   retryBaseMs: 15 * 60000, retryMaxMs: 360 * 60000, maxAttempts: 3,
   authCooldownMs: 24 * 3600000
 });
@@ -23,6 +23,7 @@ export const TELEMETRY_POLL_NUMERIC_SETTINGS = Object.freeze([
   ['startupDelayMs', 'STARTUP_DELAY_SECONDS', 1000, 1, 3600],
   ['tickIntervalMs', 'TICK_SECONDS', 1000, 1, 60],
   ['preflightTimeoutMs', 'PREFLIGHT_SECONDS', 1000, 1, 30],
+  ['inventoryTimeoutMs', 'INVENTORY_SECONDS', 1000, 5, 30],
   ['sessionTtlMs', 'SESSION_MINUTES', 60000, 1, 60],
   ['retryBaseMs', 'RETRY_BASE_MINUTES', 60000, 1, 10080],
   ['retryMaxMs', 'RETRY_MAX_MINUTES', 60000, 1, 10080],

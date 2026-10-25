@@ -20,6 +20,7 @@ import {
   validateRuntimeEventsQuery,
   validateTelemetryObservationsQuery,
   validateTelemetryOutcomesQuery,
+  validateTelemetryDiagnosticsQuery,
   validateTopologyPathsQuery,
   validateTopologyPathQuery,
   validateTopologyDetailsQuery,
@@ -369,6 +370,11 @@ export class MetricsServer {
 
     if (pathname === '/api/metrics/telemetry/outcomes') {
       this.#handleTelemetryOutcomes(res, searchParams);
+      return;
+    }
+
+    if (pathname === '/api/metrics/telemetry/diagnostics') {
+      this.#handleTelemetryDiagnostics(res, searchParams);
       return;
     }
 
@@ -813,6 +819,17 @@ export class MetricsServer {
     this.#sendJson(res, 200, this.#metricsStore.queryTelemetryOutcomes({
       ...window, ...definedProperties({ observerPublicKey: query.observerPublicKey, targetPublicKey: query.targetPublicKey,
         runId: query.runId, component: query.component, status: query.status }),
+      limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
+    }));
+  }
+
+  #handleTelemetryDiagnostics(res, searchParams) {
+    const resolved = this.#resolveWindowOrRespondError(res, searchParams, validateTelemetryDiagnosticsQuery, 'telemetryDiagnostics');
+    if (!resolved) return;
+    const { query, window } = resolved;
+    this.#sendJson(res, 200, this.#metricsStore.queryTelemetryRequestDiagnostics({
+      ...window, ...definedProperties({ observerPublicKey: query.observerPublicKey, targetPublicKey: query.targetPublicKey,
+        runId: query.runId, operation: query.operation, status: query.status }),
       limit: query.limit ?? DEFAULT_REPORTING_LIMIT, offset: query.offset ?? 0
     }));
   }

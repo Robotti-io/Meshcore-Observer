@@ -57,7 +57,9 @@ export function parseAdvertReceptionFromPacket(decodedPacket) {
     return {
       advert: Advert.fromBytes(Buffer.from(packet.payload)),
       eventDigest: createHash('sha256').update(packet.payload).digest('hex'),
-      hopCount: packet.getPathHashCount()
+      hopCount: packet.getPathHashCount(),
+      pathHashWidth: packet.getPathHashSize(),
+      pathHashesHex: packet.getPathHashes().map(hash => Buffer.from(hash).toString('hex').toUpperCase())
     };
   } catch {
     return null;

@@ -104,6 +104,12 @@ TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
       encodedPathLength: fixture.contact === 'flood' ? 255 : fixture.contact === 'out-of-radius' ? 2 : 0,
       path: fixture.contact === 'out-of-radius' ? [1, 2] : [] }), this); return;
   }
+  // Contact reconciliation is a local companion command, not a telemetry RF
+  // request. Acknowledge the real SDK method so entrypoint fixtures exercise
+  // the subsequent exact-key read and login/data flow.
+  if (code === Constants.CommandCodes.AddUpdateContact || code === Constants.CommandCodes.RemoveContact) {
+    feed([Constants.ResponseCodes.Ok], this); return;
+  }
   if (!component) throw Error('Unexpected contact mutation or command');
   crash('after-send', component);
   if (mode === 'unsupported') { feed([1, 1], this); return; }

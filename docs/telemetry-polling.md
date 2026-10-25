@@ -22,6 +22,61 @@ request per minute). Refresh is an objective; login and data compete with
 region discovery and foreground work. Passive eligibility, sample freshness,
 refresh cadence and pruning are separate settings.
 
+### Contact preflight and reconnect diagnostics
+
+Guest-login preflight reads the full local contact inventory before reading the
+exact target contact. `PACKETCAPTURE_TELEMETRY_POLL_INVENTORY_SECONDS` bounds
+the inventory drain (default 30 seconds);
+`PACKETCAPTURE_TELEMETRY_POLL_PREFLIGHT_SECONDS` separately bounds the exact
+target read (default 5 seconds). Inventory logs include the
+request ID, operation, radio generation, preflight kind, timeout, elapsed time,
+contact count and whether the stream reached its terminal marker. They never
+include contact names, keys, routes, credentials or raw frames.
+
+A new-advert/contact-list mutation during inventory invalidates the snapshot.
+The observer drains the response through its end marker and defers that target
+without resetting the radio. A stable snapshot can add or repair a target
+contact from a fresh signed advert route. If no fresh signed route is
+available, the observer can infer a fallback from recent captured
+flood-traversed message paths: the target must appear as a uniquely resolved
+repeater in the path, and the relay suffix after it is reversed into
+observer-to-target order. Candidate routes are ranked by the number of
+individual recent path receptions, not the lifetime aggregate counter. Every
+relay must resolve uniquely to a repeater and to a unique two-byte contact ID.
+The first outbound relay must also have fresh, reporter-scoped proof of a
+zero-hop signed advert from this observer. The observer applies the same
+adjacency check to signed-advert routes before using them. This prevents a
+high-count path from treating a relay heard deeper in the mesh as a directly
+reachable next hop. If the route does not begin with a proven local neighbor,
+the request is deferred and logs the route rejection reason; no missing relay
+is guessed or prepended.
+Stale, future, anomalous or looping evidence, repeated prefixes, routes outside
+the configured radius, and tied top reception counts are rejected. The fallback
+is used when fresh advert evidence is absent or when that exact advert route
+was temporarily suppressed after a delivery failure; it does not override a
+usable fresh signed route. Migration 19 persists target-bound signed-advert
+route evidence and its reception count with the contact metadata. If a target
+is absent and no fresh, unambiguous route is available, the poll defers without
+changing device contacts. An explicit firmware TABLE_FULL response is the only condition that
+allows removal of the oldest non-favourite contact other than the target,
+followed by one retry. The exact target is reread before login. Request
+diagnostic logs include the target identity and selected route evidence; the
+full device contact inventory and raw contact frames are never logged. Malformed or
+count-inconsistent frames, an oversized list, an incomplete stream or a timeout
+still reset the connection because the untagged local response stream cannot be
+proven settled. Recovery warnings include the preflight phase/kind, configured
+timeout, elapsed time, reason and connection generation so operators can tell
+which read caused recovery.
+
+A dispatched route that ends in an ACK timeout, response timeout or route
+mismatch is marked temporarily invalid for that target. The next attempt skips
+that exact path and asks the topology history for the next supported candidate;
+for example, a failed direct path can yield a route through E85C when recent
+message-path evidence supports it. The exclusion expires after the configured
+maximum retry interval and is process-local, so a restart clears it. Other
+failures such as authentication denial, radio disconnect or a local write error
+do not invalidate route evidence.
+
 ## Protected files
 
 The default file paths are absent. With polling disabled and both paths omitted,
@@ -405,6 +460,66 @@ transport and controlled clocks. It checks actual reserve-before-send boundaries
 all three components, default-off capture/bot behavior, busy air, rejection paths,
 timeouts, both auth/data save failures, stop at ACK/reply waits, ten crash
 boundaries, clean/abrupt restart, and closed-backup restore. No operator secret,
-real socket, radio login, firmware/contact edit or deployment is exercised.
+real socket, radio login, physical device contact edit or deployment is exercised.
 Pinned protocol fixtures establish code behavior; #37 owns separately authorized
 named-device/RF/soak proof and rollout readiness.
+
+Each completed telemetry scheduler attempt is retained in
+`telemetry_request_diagnostics`, including preflight deferrals that never send an
+RF request. The record captures operation and phase, selected route candidate and
+evidence/support, contact inventory size and result, target-contact result,
+contact synchronization action (including a table-full eviction), actual
+dispatch mode, and terminal status/reason. Read bounded retained records through
+`GET /api/metrics/telemetry/diagnostics`; the Repeaters dashboard renders these
+attempt records beside the observation/outcome summaries.
+
+`dispatchMode: direct` means direct packet mode using the target's configured
+outbound contact path; it does not mean a zero-hop route. The selected hop list is
+shown separately. `No validated path` means the request was deferred without
+changing the device contact. Use request IDs from structured logs to correlate
+radio recovery details with the retained dashboard attempt. Historical coverage
+is retention-bounded and cannot reconstruct attempts from before this migration.
+
+Outbound routes are anchored only by a recent successful direct telemetry
+exchange with a repeater. Verified adverts and passive message paths seed route
+candidates, but direct reception alone does not make a repeater eligible as the
+first outbound hop. Before the contact table is changed or guest login is sent,
+the selected route is traced using two-byte repeater identifiers. A matching,
+structurally valid TraceData response is required. Trace timeouts retry the
+same exact path three times; the fourth timeout suppresses that path temporarily
+and permits another candidate. A guest-login timeout does not by itself
+disqualify the route because the failure may be on the response/return
+direction. Routed responses receive a minimum wait of four seconds plus five
+seconds per contact hop, bounded by
+`PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS` (45 seconds by default).
+The zero-hop target is the bootstrap case: a fresh direct advert can seed its
+own trace and telemetry attempt, and only a successful direct telemetry result
+promotes that repeater into the first-hop anchor set. Candidate ranking gives
+each relay a position-specific support count; a strong second-hop record does
+not promote that relay into first-hop eligibility. The dashboard displays the
+selected route's anchor and position weights.
+
+A completed `guest-login` diagnostic records a completed login exchange; it is
+not a telemetry observation or query outcome. The Repeaters table labels this
+state explicitly. A successful login is useful target-specific
+request/response evidence, while route-anchor promotion still requires a
+successful direct telemetry exchange. Route support counts describe observed
+traffic and do not predict that every target on a route accepts guest login or
+returns a response.
+
+For route ranking, count recent successful trace responses against the exact
+requested two-byte contact-path token at each position. Compare direct
+telemetry anchor successes first, then trace-success counts from hop one outward,
+then fresh decoded neighbour reports, then passive path receptions at the
+corresponding position. A neighbour report can seed exactly one additional hop:
+append the reporting repeater's unique two-byte ID to the trace-confirmed path
+used to query it. Resolve the reported target prefix to one known repeater,
+require the report and its heard-age to be within the evidence window, and reject
+ambiguous identities, loops, stale reports, unanchored reporter paths, and paths
+beyond the configured radius. The resulting candidate is traced independently
+before contact synchronization or login; a neighbor report is a route seed, not
+proof of a working return path. Keep its support count separate from message-path
+receptions in diagnostics and the dashboard. TraceData-returned hashes and SNR
+remain diagnostic measurements; they are not resolved as normal repeater
+identities. A guest-login response never contributes to first-hop anchor or
+trace-success weights.
