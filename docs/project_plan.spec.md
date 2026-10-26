@@ -682,7 +682,27 @@ Preserve the current logical shape where data is available:
 }
 ```
 
-Optional device statistics may be included later when supported and tested.
+Observer status refreshes use `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`,
+independently of RF quiet-air delays. The default is 47 hours; `0` disables
+periodic refreshes, while broker/radio reconnects still refresh immediately.
+Reads use the existing serialized Companion command queue and issue only local
+device-query and core/radio-statistics commands, never remote telemetry probes.
+
+When available, include top-level `repeat` (the device's boolean repeating
+setting) and `stats: { battery_mv, uptime_secs, noise_floor }`. Uptime is the
+firmware's uptime, distinct from the local dashboard's process uptime. Battery
+is measured millivolts, with zero treated as unavailable; noise floor is dBm.
+Unsupported/invalid readings are omitted rather than replaced with zero or
+republished as fresh cached measurements. Offline/Last Will payloads omit stats.
+
+The firmware release comes from the fixed-width device version string, not
+the Companion protocol code or build date. Older responses without a release
+string report unknown firmware. No authentication/PIN fields are retained.
+Each local read has a two-second bound. Uncertain command ownership retires
+the captured radio generation before another command can reuse its responses.
+Status publication uses the existing per-broker bounded publication path with
+a five-second limit; triggers coalesce while a refresh is in flight. No new
+database dataset, dependency, configuration flag, or RF traffic is introduced.
 
 On a graceful shutdown, publish `offline` when possible.
 

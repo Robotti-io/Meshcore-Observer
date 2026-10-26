@@ -425,7 +425,7 @@ already have accepted it. Flood adverts can be retransmitted by repeaters.
 
 | Variable | Purpose |
 | --- | --- |
-| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert interval in whole hours; default and local community recommendation `47`, valid values `47` through `168`. Set to `0` for startup-only. One-hour zero-hop adverts are a separate mode. |
+| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert and observer-status refresh interval in whole hours; default and local community recommendation `47`, valid values `47` through `168`. Set to `0` for startup/connect-only. Status refreshes read firmware/relay settings and local battery, device uptime, and noise floor without RF traffic. One-hour zero-hop adverts are a separate mode. |
 
 ### 3. Metrics UI (optional)
 

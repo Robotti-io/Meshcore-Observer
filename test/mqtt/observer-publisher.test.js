@@ -35,7 +35,7 @@ test('publishes a retained status payload to the status topic, keyed by device p
   assert.equal(mqttManager.calls.length, 1);
   assert.equal(mqttManager.calls[0].topic, 'meshcore/CVG/ABC123/status');
   assert.equal(JSON.parse(mqttManager.calls[0].payload).status, 'online');
-  assert.deepEqual(mqttManager.calls[0].options, { retain: true });
+  assert.deepEqual(mqttManager.calls[0].options, { retain: true, timeoutMs: 5000 });
 });
 
 test('status and packets topics for the same device use the same casing', async () => {

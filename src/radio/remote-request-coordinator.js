@@ -72,7 +72,7 @@ export class RemoteRequestCoordinator {
 
   #responseTimeout(current, estimatedTimeoutMs) {
     const routed = Boolean(current.telemetry);
-    const hopCount = current.telemetry?.routeEvidence?.path?.length ?? 0;
+    const hopCount = routed ? current.routeEvidence?.path?.length ?? 0 : 0;
     // Companion ACK estimates are commonly shorter than the complete routed
     // request/response exchange. Leave a hop-scaled window for both directions.
     const hopAllowanceMs = routed ? 4000 + hopCount * 5000 : 1000;
@@ -154,17 +154,25 @@ export class RemoteRequestCoordinator {
 
   async #traceTelemetryRoute(current, connection, route) {
     const path = route.path;
-    if (!Array.isArray(path) || path.some(token => !/^[0-9A-F]{4}$/.test(token))) {
+    const targetPrefix = current.context.targetPublicKey.slice(0, 4);
+    if (!ownerValid(ownerSchemas.telemetryTraceRequestSchema, { targetPublicKey: current.context.targetPublicKey, path })
+      || route.target?.publicKeyHex !== current.context.targetPublicKey || path.includes(targetPrefix)
+      || targetPrefix === current.context.observerPublicKey.slice(0, 4)
+      || path.includes(current.context.observerPublicKey.slice(0, 4))) {
       current.traceOutcome = 'invalid-route';
-      return { status: 'failed', reason: 'trace-invalid-route' };
+      current.routeEvidence = null; // Invalid provider data must not escape through diagnostics.
+      return { status: 'deferred', reason: 'ineligible' };
     }
+    // Contact paths exclude their destination. TRACE needs a full loop ending
+    // with the last relay's transmission back to this non-forwarding companion.
+    const tracePath = [...path, targetPrefix, ...path.toReversed()];
     const tagBytes = randomBytes(4);
     const tag = tagBytes.readUInt32LE(0);
-    const pathBytes = path.flatMap(token => [Number.parseInt(token.slice(0, 2), 16), Number.parseInt(token.slice(2), 16)]);
-    const frame = Buffer.from([Constants.CommandCodes.SendTracePath, ...tagBytes, 0, 1, ...pathBytes]);
-    const timeoutMs = Math.min(this.#limits.responseTimeoutMaxMs, 15000 + path.length * 5000);
+    const pathBytes = Buffer.from(tracePath.join(''), 'hex');
+    const frame = Buffer.from([Constants.CommandCodes.SendTracePath, ...tagBytes, 0, 0, 0, 0, 1, ...pathBytes]);
+    const timeoutMs = Math.min(this.#limits.responseTimeoutMaxMs, 15000 + tracePath.length * 5000);
     current.traceOutcome = 'pending';
-    current.traceAttemptedPath = [...path];
+    current.traceAttemptedPath = tracePath;
     current.traceTimeoutMs = timeoutMs;
     this.#logger.info('services.remoteRequests', 'Telemetry route trace started.', {
       requestId: current.context.requestId, operation: current.context.operation,
@@ -173,16 +181,45 @@ export class RemoteRequestCoordinator {
       routeEvidenceSource: route.evidenceSource ?? null, hashWidth: 2, timeoutMs
     });
     let finish;
+    let timer;
+    let acknowledged = false;
     const result = new Promise(resolve => { finish = resolve; });
     const onFrame = bytes => {
-      if (!(bytes instanceof Uint8Array) || bytes.length < 13 || bytes[0] !== Constants.PushCodes.TraceData) return;
-      const raw = Buffer.from(bytes);
+      if (this.#current !== current || current.finishing || current.signal?.aborted
+        || current.traceOutcome !== 'pending') return;
+      const frame = { bytes: bytes instanceof Uint8Array ? Array.from(bytes) : bytes };
+      if (current.traceDispatchedAt === undefined) return;
+      // The exclusive command lease owns untagged errors until the matching
+      // Sent ACK. A serial write alone does not prove RF transmission.
+      if (!acknowledged && frameValid(frame)) {
+        const parsed = parseRemoteResponseFrame(frame);
+        if (parsed.status === 'accepted' && parsed.envelope.kind === 'error') {
+          const { errorCode, reason: errorReason } = parsed.envelope;
+          finish({ status: 'failed', reason: 'command-error', errorCode, errorReason });
+          return;
+        }
+        if (parsed.status === 'accepted' && parsed.envelope.kind === 'sent' && parsed.envelope.tag === tag) {
+          if (parsed.envelope.route !== 'direct') {
+            finish({ status: 'failed', reason: 'trace-malformed' }); return;
+          }
+          acknowledged = true;
+          clearTimeout(timer);
+          current.traceTimeoutMs = Math.min(this.#limits.responseTimeoutMaxMs,
+            Math.max(timeoutMs, parsed.envelope.estimatedTimeoutMs + 1000));
+          timer = setTimeout(() => finish({ status: 'failed', reason: 'trace-timeout' }),
+            current.traceTimeoutMs);
+        }
+      }
+      if (!acknowledged) return;
+      if (!ownerValid(ownerSchemas.telemetryTraceFrameSchema, frame)
+        || frame.bytes[0] !== Constants.PushCodes.TraceData) return;
+      const raw = Buffer.from(frame.bytes);
       const pathLengthBytes = raw[2];
       const flags = raw[3];
       if (raw.readUInt32LE(4) !== tag || raw.readUInt32LE(8) !== 0) return;
-      const hashWidthCode = flags & 0x03;
-      if (hashWidthCode !== 1 || pathLengthBytes > 64 || pathLengthBytes % 2 !== 0
-        || raw.length < 12 + pathLengthBytes + (pathLengthBytes / 2) + 1) {
+      if (raw[1] !== 0 || flags !== 1 || pathLengthBytes !== pathBytes.length
+        || raw.length !== 13 + pathLengthBytes + tracePath.length
+        || !raw.subarray(12, 12 + pathLengthBytes).equals(pathBytes)) {
         finish({ status: 'failed', reason: 'trace-malformed' });
         return;
       }
@@ -197,7 +234,6 @@ export class RemoteRequestCoordinator {
     connection.on('rx', onFrame);
     current.signal?.addEventListener('abort', onAbort, { once: true });
     const startedAt = this.#now();
-    const timer = setTimeout(() => finish({ status: 'failed', reason: 'trace-timeout' }), timeoutMs);
     let sent;
     try {
       sent = this.#airtime.tryRunWhenQuiet(async () => {
@@ -211,6 +247,7 @@ export class RemoteRequestCoordinator {
           return { status: 'deferred', reason: 'reservation-unavailable' };
         current.traceReserved = true;
         current.traceDispatchedAt = this.#wallNow();
+        timer = setTimeout(() => finish({ status: 'failed', reason: 'ack-timeout' }), this.#limits.ackTimeoutMs);
         await connection.sendToRadioFrame(frame);
         return result;
       });
@@ -226,7 +263,7 @@ export class RemoteRequestCoordinator {
     current.signal?.removeEventListener('abort', onAbort);
     current.traceOutcome = outcome.status === 'completed' ? 'response'
       : outcome.status === 'deferred' ? outcome.reason === 'quiet-air' ? 'quiet-air' : 'trace-not-sent'
-        : outcome.reason ?? 'trace-failed';
+        : ['command-error', 'ack-timeout'].includes(outcome.reason) ? 'trace-failed' : outcome.reason ?? 'trace-failed';
     current.tracePathHashes = outcome.pathHashes ?? [];
     current.traceSnrQuarterDb = outcome.snrQuarterDb ?? [];
     this.#logger[outcome.status === 'completed' ? 'info' : 'warn'](
@@ -667,15 +704,21 @@ export class RemoteRequestCoordinator {
             // push invalidates the inventory proof and is drained safely.
             current.preflightKind = 'contact-sync';
             const traced = await this.#traceTelemetryRoute(current, connection, current.routeEvidence);
-            if (this.#current !== current) return false;
+            if (this.#current !== current || current.phase === 'recovery' || current.finishing) return false;
             if (traced.status !== 'completed') {
               if (current.traceDispatchedAt !== undefined) current.dispatchedAt = current.traceDispatchedAt;
+              if (['ack-timeout', 'trace-write-error'].includes(traced.reason)) {
+                this.#recover(current, traced.reason, traced.reason === 'ack-timeout' ? 'ack-timeout' : 'preflight-write-error');
+                return false;
+              }
               if (traced.status === 'deferred' || current.dispatchedAt === undefined) {
                 this.#finish(current, 'deferred', traced.reason === 'quiet-air' ? 'quiet-air'
                   : traced.reason === 'background-turn' ? 'background-turn'
-                    : traced.reason === 'foreground' ? 'foreground' : 'reservation-unavailable');
+                    : traced.reason === 'foreground' ? 'foreground'
+                      : traced.reason === 'ineligible' ? 'ineligible' : 'reservation-unavailable');
               } else this.#finish(current, 'failed', traced.reason === 'trace-malformed' ? 'trace-malformed'
-                : traced.reason === 'trace-write-error' ? 'trace-write-error' : 'trace-timeout');
+                : traced.reason === 'command-error' ? 'command-error' : 'trace-timeout',
+              traced.reason === 'command-error' ? { errorCode: traced.errorCode, errorReason: traced.errorReason } : {});
               return false;
             }
           }

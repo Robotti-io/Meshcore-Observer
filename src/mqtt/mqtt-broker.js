@@ -143,7 +143,7 @@ export class MqttBroker {
     });
   }
 
-  /** QoS acknowledgement deadline for the durable region worker only.
+  /** QoS acknowledgement deadline shared by region and observer status work.
    * One timeout fails just that publish and keeps the shared connection.
    * After REGION_ACK_TIMEOUTS_BEFORE_RETIRE consecutive timeouts, retire the
    * client before a durable retry can be admitted; otherwise MQTT.js could
@@ -178,7 +178,7 @@ export class MqttBroker {
         settle(new Error('Region broker acknowledgement timed out'));
       },timeoutMs);
       timer.unref();this.#boundedReject=settle;
-      try { client.publish(topic,payload,{ qos,retain },error=>settle(error)); }
+      try { client.publish(topic,payload,{ qos: qos ?? this.#config.qos, retain: retain ?? this.#config.retain },error=>settle(error)); }
       catch { settle(new Error('Region broker publish failed')); }
     });
   }

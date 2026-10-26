@@ -26,6 +26,7 @@ export class TelemetryPollingScheduler {
   #anchor = null; #lastMono = 0; #highWater = 0; #clockPaused = false;
   #unsaved = null; #unconfirmed = false; #fault = null; #pausedGeneration = null;
   #invalidRoutes = new Map();
+  #afterLogin = null;
 
   constructor({ config, store, runId, radio, coordinator, logger, wallNow = Date.now,
     monotonicNow = () => performance.now(), createId = randomUUID }) {
@@ -41,7 +42,7 @@ export class TelemetryPollingScheduler {
     try { this.#clock(); } catch { this.#warn('selection'); }
     this.#arm(this.#config.startupDelayMs);
   }
-  stop() { this.#stopped = true; clearTimeout(this.#timer); this.#timer = null; this.#cursor = null; }
+  stop() { this.#stopped = true; clearTimeout(this.#timer); this.#timer = null; this.#cursor = null; this.#afterLogin = null; }
   async drain() {
     await this.#pending;
     this.#persist();
@@ -132,11 +133,26 @@ export class TelemetryPollingScheduler {
       nextDueAt: Math.max(now, add(this.#anchor.wall, Math.floor(offset * this.#config.refreshIntervalMs))),
       reason: 'rate-limited', policy: this.#policy });
   }
+  async #resumeAfterLogin(snapshot) {
+    const pending = this.#afterLogin;
+    if (!pending) return false;
+    const { selected, admitted, expiresAt } = pending;
+    if (this.#lastMono >= expiresAt || snapshot.generation !== admitted.generation
+      || snapshot.observerPublicKey !== admitted.observerPublicKey
+      || !this.#eligible({ targetPublicKey: selected.target }, snapshot, admitted, selected.variant, null)) {
+      this.#afterLogin = null; return false;
+    }
+    // One transient continuation, not a durable RF queue or new authority.
+    // The owner rechecks the real guest session, airtime and budget on every try.
+    const response = await this.#request(selected, admitted, false);
+    if (response.dispatchedAt !== undefined || !TRANSIENT.has(response.reason)) this.#afterLogin = null;
+    return true;
+  }
   async #pass() {
     this.#persist();
     if (this.#stopped || this.#unsaved || this.#unconfirmed) return;
     const clock = this.#clock();
-    if (clock.paused) return;
+    if (clock.paused) { this.#afterLogin = null; return; }
     if (!this.#recovered) {
       const page = this.#store.recoverTelemetryPollReservations({ runId: this.#runId, observedAt: clock.wall,
         policy: this.#policy, limit: 100, ...(this.#recoveryCursor ? { afterRequestId: this.#recoveryCursor } : {}) });
@@ -145,8 +161,11 @@ export class TelemetryPollingScheduler {
     }
     const snapshot = this.#snapshot();
     if (!snapshot.ready || snapshot.generation === null || !snapshot.observerPublicKey
-      || this.#pausedGeneration === snapshot.generation) return;
-    if (this.#observer !== snapshot.observerPublicKey) { this.#observer = snapshot.observerPublicKey; this.#cursor = null; }
+      || this.#pausedGeneration === snapshot.generation) { this.#afterLogin = null; return; }
+    if (this.#observer !== snapshot.observerPublicKey) {
+      this.#observer = snapshot.observerPublicKey; this.#cursor = null; this.#afterLogin = null;
+    }
+    if (await this.#resumeAfterLogin(snapshot)) return;
     const page = this.#store.queryTelemetryPollCandidates({ observerPublicKey: this.#observer, now: clock.wall,
       windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius, limit: 16,
       ...(this.#cursor ? { afterPublicKey: this.#cursor } : {}) });
@@ -165,7 +184,12 @@ export class TelemetryPollingScheduler {
     if (!selected) { if (page.exhausted) this.#cursor = null; return; }
     const response = await this.#request(selected, snapshot, false);
     if (response.reason === 'guest-session-unavailable' && response.dispatchedAt === undefined && !this.#stopped) {
-      if (this.#due(this.#scope(selected.target, AUTH), this.#clock().wall)) await this.#request(selected, snapshot, true);
+      if (this.#due(this.#scope(selected.target, AUTH), this.#clock().wall)) {
+        const authenticated = await this.#request(selected, snapshot, true);
+        if (authenticated.status === 'completed' && !this.#stopped && !this.#unsaved && !this.#unconfirmed) {
+          this.#afterLogin = { selected, admitted: snapshot, expiresAt: add(this.#lastMono, this.#config.sessionTtlMs) };
+        }
+      }
     }
   }
   async #request(selected, admitted, login) {

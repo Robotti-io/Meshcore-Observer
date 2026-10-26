@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { Connection, Constants, NodeJSSerialConnection, TCPConnection } from '@liamcottle/meshcore.js';
 import { RadioManager } from '../../src/radio/radio-manager.js';
 import { createRunShutdown } from '../../src/metrics/run-history.js';
+import { observerStatusReply, radioStatsFrame, coreStatsFrame } from '../fixtures/observer-status-wire.js';
 
 const managers = new Set();
 
@@ -81,7 +82,7 @@ test('connects successfully and emits radio.connected with normalized device inf
   assert.equal(deviceInfo.publicKey, 'deadbeef');
   assert.equal(deviceInfo.name, 'Test Node');
   assert.equal(deviceInfo.model, 'Heltec V3');
-  assert.equal(deviceInfo.firmwareVersion, '7 (19 Feb 2025)');
+  assert.equal(deviceInfo.firmwareVersion, null, 'a protocol code is not a firmware release');
   assert.equal(manager.isConnected(), true);
   assert.deepEqual(manager.getDeviceInfo(), deviceInfo);
 
@@ -107,6 +108,56 @@ test('a failed device query does not block connection, and leaves model/firmware
   assert.equal(deviceInfo.firmwareVersion, null);
 
   await manager.stop();
+});
+
+test('observer refresh serializes local reads and publishes actual metadata and device uptime', async () => {
+  const connection = createFakeConnection(), commands = [];
+  connection.sendToRadioFrame = async bytes => { commands.push([...bytes]); connection.emit('rx', observerStatusReply(bytes)); };
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  const info = await manager.refreshObserverStatus();
+  assert.deepEqual(commands, [[22, 3], [56, 0], [56, 1]]);
+  assert.equal(info.firmwareVersion, 'v1.18.0'); assert.equal(info.repeat, true);
+  assert.deepEqual(info.stats, { uptime_secs: 98765, battery_mv: 4123, noise_floor: -118 });
+  assert.deepEqual(manager.getDeviceInfo(), info);
+  assert.equal(connection.listenerCount('rx'), 0);
+  assert.doesNotMatch(JSON.stringify(info), /11223344|15-Oct-2026/);
+});
+
+test('unsupported or invalid local readings omit stale stats on the following refresh', async () => {
+  const connection = createFakeConnection(); let mode = 'valid';
+  connection.sendToRadioFrame = async bytes => connection.emit('rx', mode === 'unsupported' ? [1, 1]
+    : mode === 'partial' && bytes[0] === 56 && bytes[1] === 0 ? coreStatsFrame().slice(0, -1) : observerStatusReply(bytes));
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  assert.equal((await manager.refreshObserverStatus()).stats.battery_mv, 4123);
+  mode = 'partial'; assert.deepEqual((await manager.refreshObserverStatus()).stats, { noise_floor: -118 });
+  mode = 'unsupported'; const unknown = await manager.refreshObserverStatus();
+  assert.equal(unknown.stats, undefined); assert.equal(unknown.repeat, undefined); assert.equal(unknown.firmwareVersion, null);
+  assert.equal(manager.isConnected(), true);
+});
+
+test('a timed-out local status read retires the generation before any following command can run', async () => {
+  vi.useFakeTimers(); const connection = createFakeConnection(), commands = [];
+  connection.sendToRadioFrame = async bytes => { commands.push([...bytes]); };
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  const failed = assert.rejects(manager.refreshObserverStatus());
+  await vi.advanceTimersByTimeAsync(2001); await failed;
+  assert.equal(manager.getConnectionSnapshot().ready, false); assert.deepEqual(commands, [[22, 3]]);
+  connection.emit('rx', radioStatsFrame()); assert.equal(manager.getDeviceInfo().stats, undefined);
+});
+
+test('cancelled local status reads settle and cannot mutate the retained device info', async () => {
+  const connection = createFakeConnection(), controller = new AbortController();
+  let started;
+  const entered = new Promise(resolve => { started = resolve; });
+  connection.sendToRadioFrame = async () => { started(); };
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  const failed = assert.rejects(manager.refreshObserverStatus({ signal: controller.signal }));
+  await entered; controller.abort(); await failed;
+  assert.equal(connection.listenerCount('rx'), 0); assert.equal(manager.getDeviceInfo().stats, undefined);
 });
 
 test('strips trailing null-padding and any packed data after it from manufacturerModel', async () => {

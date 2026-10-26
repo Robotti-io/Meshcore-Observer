@@ -163,6 +163,32 @@ test('a configured region candidate scopes a reply when the command packet match
   assert.equal(radioManager.commandCalls[1].channelIdx, 0);
 });
 
+for (const failure of ['set', 'send', 'restore', 'send-and-restore']) test(`scoped reply ${failure} failure restores scope or retires the captured connection`, async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  const events = [];
+  radioManager.connection.setFloodScope = async () => {
+    events.push('set'); if (failure === 'set') throw new Error('scope setup failed');
+  };
+  radioManager.connection.sendChannelTextMessage = async () => {
+    events.push('send'); if (failure.includes('send')) throw new Error('send failed');
+  };
+  radioManager.connection.clearFloodScope = async () => {
+    events.push('restore'); if (failure.includes('restore')) throw new Error('restore failed');
+  };
+  radioManager.invalidateConnection = async input => {
+    events.push('retire'); assert.deepEqual(input, { generation: 1, reason: 'scope-restore-failed' });
+  };
+  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }),
+  failure.includes('restore') ? /Could not restore/ : failure === 'set' ? /scope setup failed/ : /send failed/);
+  assert.deepEqual(events, ['set', ...(failure === 'set' ? [] : ['send']), 'restore',
+    ...(failure.includes('restore') ? ['retire'] : [])]);
+  assert.equal(bot.getRepliesSent(), 0);
+  bot.stop();
+});
+
 test('does not reply to a non-trigger message, and logs why at debug level', async () => {
   const radioManager = fakeRadioManager();
   const logger = silentLogger();

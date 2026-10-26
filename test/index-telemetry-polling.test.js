@@ -87,6 +87,23 @@ function inspect(f, callback) {
   try { return callback(db); } finally { db.close(); }
 }
 
+test('real entrypoint refreshes retained observer hardware status on broker reconnect without RF polling', async () => {
+  const f = environment({ enabled: false }), child = await launch(f, { observerStatus: true });
+  const initial = await child.ask({ action: 'snapshot' });
+  assert.equal(initial.statusPayloads.length, 1);
+  const status = initial.statusPayloads[0];
+  assert.equal(status.origin_id, OBSERVER); assert.equal(status.status, 'online');
+  assert.equal(status.model, 'Heltec V3'); assert.equal(status.firmware_version, 'v1.18.0');
+  assert.equal(status.repeat, true); assert.equal(status.client_version, '2.4.0');
+  assert.deepEqual(status.stats, { uptime_secs: 98765, battery_mv: 4123, noise_floor: -118 });
+  assert.deepEqual(initial.statusReads, [[22, 3], [56, 0], [56, 1]]);
+  assert.deepEqual(initial.writes, []);
+  const updated = await child.ask({ action: 'broker-connect' });
+  assert.equal(updated.statusPayloads.length, 2); assert.equal(updated.statusPayloads[1].stats.uptime_secs, 98766);
+  assert.deepEqual(updated.writes, []); assert.equal(updated.outcomes.total, 0);
+  const ended = await child.stop(); assert.doesNotMatch(ended.output, /PRIVATE-ONLY7|fixtureGuest|11223344/);
+});
+
 test('default-off actual entrypoint captures verified direct evidence and duplicate bot commands without remote collection or internet', async () => {
   const f = environment({ enabled: false, bots: true }), child = await launch(f);
   await child.ask({ action: 'advert', count: 2 }); await child.ask({ action: 'group', count: 2 });
@@ -100,8 +117,14 @@ for (const profiles of [false, true]) test(`real opt-in entrypoint stores all th
   const f = environment({ profiles }), child = await launch(f); await due(child);
   let saved;
   for (let n = 0; n < 4; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
-  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'status', 'sensors', 'neighbours']);
+  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'status', 'sensors', 'neighbours'],
+    JSON.stringify({ writes: saved.writes, diagnostics: saved.diagnostics }));
   assert.equal(saved.auth.outcomes[0].record.status, 'completed'); assert.equal(saved.observations.total, 3); assert.equal(saved.outcomes.total, 3);
+  const loginDiagnostic = saved.diagnostics.diagnostics.find(row => row.operation === 'guest-login');
+  assert.equal(loginDiagnostic.traceOutcome, 'response');
+  assert.equal(loginDiagnostic.contactSyncOutcome, 'updated');
+  assert.equal(loginDiagnostic.targetContactOutcome, 'eligible');
+  assert.deepEqual(saved.writes.filter(w => [36, 26, 50].includes(w.code)).map(w => w.code), [36, 26, 50, 50, 50]);
   for (const outcome of saved.outcomes.outcomes) {
     assert.equal(outcome.runId, saved.runId); assert.equal(outcome.observerPublicKey, OBSERVER); assert.equal(outcome.targetPublicKey, f.targetPublicKey);
     assert.equal(outcome.route, 'direct'); assert.equal(outcome.receivedAt, outcome.completedAt);
@@ -127,7 +150,13 @@ for (const mode of ['admin', 'read-write', 'legacy', 'denied', 'unsupported', 'f
 for (const contact of ['flood', 'out-of-radius', 'collision', 'unsupported']) test(`real entrypoint ${contact} contact preflight defers without physical auth/data`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { contact }); await due(child);
   const saved = await child.ask({ action: 'tick', ms: 10000 });
-  assert.equal(physical(saved).length, 0); assert.equal(saved.auth.outcomes.length, 0); assert.equal(saved.outcomes.total, 0); await child.stop();
+  assert.equal(physical(saved).length, 0); assert.equal(saved.outcomes.total, 0);
+  assert.equal(saved.auth.outcomes.length, ['flood', 'out-of-radius'].includes(contact) ? 1 : 0);
+  for (const { record } of saved.auth.outcomes) {
+    assert.equal(record.status, 'failed'); assert.equal(record.reason, 'trace-login-not-dispatched');
+    assert.equal(record.proof, undefined);
+  }
+  await child.stop();
 });
 test('stale and relayed-only adverts cannot create direct eligibility or blind probing through the real entrypoint', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f);

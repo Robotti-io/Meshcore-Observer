@@ -175,3 +175,18 @@ test('getStates reports each broker id to its current state', () => {
   assert.deepEqual(manager.getStates(), { a: 'connected', b: 'retrying' });
   assert.equal(manager.hasAnyConnected(), true);
 });
+
+test('retained observer status uses the bounded broker path while packet publishing keeps its existing path', async () => {
+  const a = fakeBroker('a'), b = fakeBroker('b'), bounded = [];
+  a.publishBounded = async (...args) => { bounded.push(['a', ...args]); throw new Error('ack timeout'); };
+  b.publishBounded = async (...args) => { bounded.push(['b', ...args]); };
+  const manager = new MqttManager({ config: { brokers: [{}, {}] }, logger: silentLogger(),
+    createBroker: (() => { const brokers = [a, b]; return () => brokers.shift(); })() });
+  const results = await manager.publish('meshcore/CVG/AA/status', '{}', { retain: true, timeoutMs: 5000 });
+  assert.deepEqual(results.map(result => result.outcome), ['failed', 'sent']);
+  assert.equal(bounded.length, 2); assert.equal(a.publishCalls.length, 0);
+  await manager.publish('meshcore/CVG/AA/packets', '{}', { retain: false });
+  assert.equal(a.publishCalls.length, 1); assert.equal(b.publishCalls.length, 1);
+  await assert.rejects(manager.publish('topic', '{}', { retain: true, timeoutMs: 6000 }), /Invalid observer status publish options/);
+  assert.equal(bounded.length, 2);
+});

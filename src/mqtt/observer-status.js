@@ -1,3 +1,8 @@
+import { compileSchema } from '../validation/ajv.js';
+import { observerStatusPayloadSchema } from './observer-status-schemas.js';
+
+const valid = compileSchema(observerStatusPayloadSchema);
+
 /**
  * Builds the retained observer status payload (see
  * docs/project_plan.spec.md Section 18). `deviceInfo` is RadioManager's
@@ -8,7 +13,7 @@ export function buildObserverStatusPayload({ deviceInfo, clientVersion, status, 
     ? `${(deviceInfo.radio.frequency / 1000).toFixed(3)}MHz BW${(deviceInfo.radio.bandwidth / 1000).toFixed(1)}kHz SF${deviceInfo.radio.spreadingFactor} CR${deviceInfo.radio.codingRate}`
     : null;
 
-  return {
+  const payload = {
     status,
     timestamp: now().toISOString(),
     origin: deviceInfo.name,
@@ -16,6 +21,10 @@ export function buildObserverStatusPayload({ deviceInfo, clientVersion, status, 
     model: deviceInfo.model ?? null,
     firmware_version: deviceInfo.firmwareVersion ?? null,
     radio,
-    client_version: clientVersion
+    client_version: clientVersion,
+    ...(deviceInfo.repeat !== undefined ? { repeat: deviceInfo.repeat } : {}),
+    ...(status === 'online' && deviceInfo.stats && Object.keys(deviceInfo.stats).length ? { stats: deviceInfo.stats } : {})
   };
+  if (!valid(payload)) throw new Error('Invalid observer status payload');
+  return payload;
 }

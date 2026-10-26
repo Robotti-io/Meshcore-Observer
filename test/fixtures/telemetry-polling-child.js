@@ -11,7 +11,8 @@ import { MetricsServer } from '../../src/web/metrics-server.js';
 import mqtt from 'mqtt';
 import { loadConfig } from '../../src/config/index.js';
 import { telemetryWire, telemetryBytes, neighbourPage } from './telemetry-wire.js';
-import { telemetryContactFrame, telemetryInventoryBoundary } from './telemetry-radio-wire.js';
+import { telemetryContactFrame, telemetryInventoryBoundary, telemetryTraceAck, telemetryTraceResponse } from './telemetry-radio-wire.js';
+import { observerStatusReply } from './observer-status-wire.js';
 
 const fixture = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 const { observerPublicKey, targetPublicKey, startAt, ledger } = fixture;
@@ -33,7 +34,8 @@ MetricsServer.prototype.start = () => { throw Error('Unexpected HTTP listener');
 let store, run, radio, closed = false, identity = observerPublicKey;
 let writeFault = fixture.writeFault ?? false, mode = fixture.mode ?? 'success';
 let pending = null, serverTimestamp = fixture.serverTimestamp ?? 100;
-const connections = [], writes = [], replies = [], publishTopics = [], localCalls = [];
+const connections = [], writes = [], replies = [], publishTopics = [], localCalls = [], statusPayloads = [], statusReads = [];
+let statusMqtt, localUptime = 98765;
 const range = { start: 0, end: Number.MAX_SAFE_INTEGER };
 const record = value => appendFileSync(ledger, JSON.stringify(value) + '\n');
 const crash = (boundary, component) => {
@@ -82,6 +84,14 @@ TCPConnection.prototype.sendFloodAdvert = async () => {};
 TCPConnection.prototype.sendChannelTextMessage = async (channel, text) => { replies.push({ channel, text }); };
 TCPConnection.prototype.sign = async () => { localCalls.push('sign'); return new Uint8Array(64).fill(7); };
 TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
+  const localStatus = observerStatusReply(bytes);
+  if (localStatus) {
+    statusReads.push([...bytes]);
+    if (bytes[0] === 56 && bytes[1] === 0) {
+      const core = Buffer.from(localStatus); core.writeUInt32LE(localUptime++, 4); feed([...core], this);
+    } else feed(localStatus, this);
+    return;
+  }
   const code = bytes[0], component = code === 26 ? 'guest-login' : code === 50
     ? ({ 1: 'status', 3: 'sensors', 6: 'neighbours' })[bytes[33]] : null;
   // Password-bearing guest wire buffers never enter IPC, logs or the ledger.
@@ -92,6 +102,12 @@ TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
     write.requestId = reservation.requestId;
   }
   writes.push(write); record(write);
+  if (code === Constants.CommandCodes.SendTracePath) {
+    const reservation = store.getTelemetryPollState({ observerPublicKey: identity, targetPublicKey,
+      variant: { component: 'guest-login', params: {} } });
+    if (reservation?.reason !== 'reserved' || reservation.reservedAt !== Date.now()) throw Error('Trace lacks durable reservation');
+    feed(telemetryTraceAck(bytes), this); feed(telemetryTraceResponse(bytes), this); return;
+  }
   if (code === 4) {
     if (fixture.contact === 'unsupported') { feed([1, 1], this); return; }
     feed(telemetryInventoryBoundary(2, 1), this);
@@ -146,8 +162,16 @@ MetricsStore.prototype.close = function () {
 // Empty broker configuration keeps the actual MQTT manager offline. Observe
 // capture through its ordinary publication call without opening a connection.
 const { MqttManager } = await import('../../src/mqtt/mqtt-manager.js');
+if (fixture.observerStatus) {
+  MqttManager.prototype.hasAnyConnected = () => true;
+  MqttManager.prototype.connectAll = function () { statusMqtt = this; this.emit('broker.connected', 'offline-status-fixture'); };
+}
 const publish = MqttManager.prototype.publish;
-MqttManager.prototype.publish = function (topic, ...args) { publishTopics.push(topic); return publish.call(this, topic, ...args); };
+MqttManager.prototype.publish = function (topic, ...args) {
+  publishTopics.push(topic);
+  if (topic.endsWith('/status')) statusPayloads.push(JSON.parse(args[0]));
+  return publish.call(this, topic, ...args);
+};
 function variants() {
   const c = loadConfig().telemetryPolling;
   const profile = c.targetProfiles.find(p => p.targetPublicKey === targetPublicKey)?.statusProfile ?? c.statusProfile;
@@ -156,8 +180,9 @@ function variants() {
 }
 function snapshot() {
   return { now: Date.now(), runId: run.runId, instanceId: run.instanceId, radio: radio.getConnectionSnapshot(), writes,
-    replies, localCalls, publishTopics, runs: store.queryObserverRuns(range),
+    replies, localCalls, publishTopics, statusPayloads, statusReads, runs: store.queryObserverRuns(range),
     auth: store.queryTelemetryAuthenticationOutcomes(range), outcomes: store.queryTelemetryOutcomes(range),
+    diagnostics: store.queryTelemetryRequestDiagnostics(range),
     observations: store.queryTelemetryObservations(range),
     states: variants().map(variant => store.getTelemetryPollState({ observerPublicKey, targetPublicKey, variant })),
     inventory: store.countNodesByType('REPEATER'), advertTotals: store.queryAdvertTotals(range),
@@ -167,6 +192,7 @@ function snapshot() {
 let commands = Promise.resolve();
 process.on('message', message => {
   commands = commands.then(async () => {
+    if (message.action === 'broker-connect') { statusMqtt.emit('broker.connected', 'offline-status-fixture'); await pump(); }
     if (message.action === 'tick') await pump(message.ms);
     if (message.action === 'jump') { clockOffset += message.ms; await pump(1000); }
     if (message.action === 'advert' || message.action === 'group') {

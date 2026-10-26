@@ -2,7 +2,9 @@ import { EventEmitter } from 'node:events';
 import { MqttBroker } from './mqtt-broker.js';
 import { compileSchema } from '../validation/ajv.js';
 import { regionTransportSchema } from './region-publication-schemas.js';
+import { observerStatusPublishOptionsSchema } from './observer-status-schemas.js';
 const regionTransportValid=compileSchema(regionTransportSchema);
+const statusOptionsValid = compileSchema(observerStatusPublishOptionsSchema);
 
 /**
  * Owns an arbitrary configured list of independent brokers. One broker
@@ -98,12 +100,14 @@ export class MqttManager extends EventEmitter {
    * @returns {Promise<{brokerId: string, outcome: 'sent'|'skipped'|'failed', error?: string}[]>}
    */
   async publish(topic, payload, options) {
+    if (options?.timeoutMs !== undefined && !statusOptionsValid(options)) throw new Error('Invalid observer status publish options');
     // Each connected broker's publish() is started here, synchronously,
     // not deferred - Promise.allSettled below just waits for whichever
     // ones were actually started.
     const attempts = this.#brokers.map((broker) => ({
       broker,
-      promise: broker.isConnected() ? broker.publish(topic, payload, options) : null
+      promise: broker.isConnected() ? options?.timeoutMs !== undefined
+        ? broker.publishBounded(topic, payload, options) : broker.publish(topic, payload, options) : null
     }));
 
     const settled = await Promise.allSettled(attempts.filter(({ promise }) => promise).map(({ promise }) => promise));

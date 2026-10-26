@@ -79,6 +79,8 @@ TCPConnection.prototype.sendFloodAdvert = async () => { adverts.push(Date.now())
 TCPConnection.prototype.sendChannelTextMessage = async (channel, text) => { replies.push({ channel, text }); };
 TCPConnection.prototype.sign = async () => { localCalls.push('sign'); return new Uint8Array(64).fill(7); };
 TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
+  // Local observer status reads are outside this fixture's region/RF ledger.
+  if (bytes[0] === 22 || bytes[0] === 56) { feed([1, 1], this); return; }
   const write = { at: Date.now(), generation: connections.indexOf(this) + 1, bytes: [...bytes] };
   writes.push(write); record(write);
   if (bytes[0] === 0x1E) {

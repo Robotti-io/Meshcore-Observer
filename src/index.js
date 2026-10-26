@@ -4,6 +4,7 @@ import { RadioManager } from './radio/radio-manager.js';
 import { PacketPipeline } from './packets/packet-pipeline.js';
 import { MqttManager } from './mqtt/mqtt-manager.js';
 import { ObserverPublisher } from './mqtt/observer-publisher.js';
+import { ObserverStatusScheduler } from './mqtt/observer-status-scheduler.js';
 import { RegionPublisher } from './mqtt/region-publisher.js';
 import { buildObserverStatusPayload } from './mqtt/observer-status.js';
 import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
@@ -218,6 +219,9 @@ async function main() {
     iata: config.observer.iata,
     clientVersion: packageInfo.version
   });
+  const observerStatusScheduler = new ObserverStatusScheduler({ radioManager, mqttManager,
+    publisher: observerPublisher, logger, intervalHours: config.floodAdvert.intervalHours });
+  observerStatusScheduler.start();
   const regionPublisher=new RegionPublisher({ store:metricsStore,runId:runHistory.runId,radio:radioManager,
     mqttManager,brokers:config.brokers,logger });
   regionPublisher.start();
@@ -242,11 +246,6 @@ async function main() {
         }),
         payload: JSON.stringify(offlinePayload)
       };
-      mqttManager.on('broker.connected', () => {
-        observerPublisher.publishStatus(deviceInfo, 'online').catch((err) => {
-          logger.warn('services.mqtt', 'failed to publish observer status', { error: err.message });
-        });
-      });
       mqttManager.connectAll(will);
 
       for (const [brokerId, auth] of letsMeshAuthByBrokerId) {
@@ -379,6 +378,7 @@ async function main() {
 
   const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
     teardown: async () => {
+      const stoppingObserverStatus = observerStatusScheduler.stop();
       regionDiscovery?.stop();
       telemetryPolling?.stop();
       regionPublisher.stop();
@@ -392,6 +392,7 @@ async function main() {
       // Cancel background ownership before outbound schedulers await commands,
       // then retire the radio later under the existing shutdown deadline.
       await remoteRequestCoordinator.stop();
+      await stoppingObserverStatus;
       await regionDiscovery?.drain();
       await telemetryPolling?.drain();
       await regionPublisher.drain();

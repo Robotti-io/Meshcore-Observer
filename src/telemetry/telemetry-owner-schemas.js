@@ -15,6 +15,13 @@ export const telemetryOwnedRequestSchema = { oneOf: remoteRequestSchema.oneOf.sl
 export const telemetryOwnerSnapshotSchema = object({ generation: { anyOf: [integer(1), { type: 'null' }] },
   ready: { type: 'boolean' }, observerPublicKey: { anyOf: [{ ...base.targetPublicKey, pattern: '^[0-9a-fA-F]{64}$' }, { type: 'null' }] } });
 export const telemetryReplayReadSchema = object({ serverTimestamp: { anyOf: [integer(0, 0xFFFFFFFF), { type: 'null' }] } });
+// Round trip = outbound relays + target + reverse relays. Keep all returned
+// hashes/SNRs inside the existing 32/33-entry diagnostic contracts.
+export const telemetryTraceRequestSchema = object({ targetPublicKey: base.targetPublicKey,
+  path: { type: 'array', maxItems: 15, uniqueItems: true,
+    items: { type: 'string', pattern: '^[0-9A-F]{4}$' } } });
+export const telemetryTraceFrameSchema = object({ bytes: { type: 'array', minItems: 13, maxItems: 141,
+  items: integer(0, 255) } });
 export const telemetryOwnerClockSchema = object({ wall: integer(0), monotonic: { type: 'number', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } });
 export const telemetryOwnerContextSchema = object({ requestId: base.requestId, targetPublicKey: base.targetPublicKey,
   operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] }, params: { oneOf: [

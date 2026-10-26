@@ -369,8 +369,14 @@ wall-time high-water before RF permission is considered.
 
 The scheduler uses guarded data admission; when a guest session is absent, it
 attempts one due guest login instead. Successful proof must be saved synchronously
-before the owner grants its ephemeral session. The component is revisited on a
-later tick under the shared physical budget. Session expiry, disconnect/reporter
+before the owner grants its ephemeral session. The exact selected component is
+retained for the next eligible tick, ahead of scanning other targets, under the
+shared physical budget. One transient continuation can wait through foreground,
+quiet-air or budget deferrals; it is discarded after dispatch, a terminal
+deferral, session-window expiry, lost eligibility, connection/reporter change,
+clock rollback or shutdown. The owner rechecks actual session authority on each
+attempt. This continuation is never persisted or restored after restart and
+does not extend the session lifetime. Session expiry, disconnect/reporter
 change or failures require fresh proof; stored permission history is never a
 live grant. Slower cadence overrides are checked before spending RF on login;
 the store still enforces conservative current-cycle timing and attempt limits.
@@ -492,6 +498,25 @@ disqualify the route because the failure may be on the response/return
 direction. Routed responses receive a minimum wait of four seconds plus five
 seconds per contact hop, bounded by
 `PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS` (45 seconds by default).
+Contact paths exclude the target; the actual trace contains the outbound relay
+IDs, the target's two-byte ID, and the relay IDs in reverse order. For example,
+contact path `[A001, B002]` to `C003` is probed as
+`[A001, B002, C003, B002, A001]`. A direct contact path `[]` is probed as
+`[C003]`, allowing that repeater to forward the trace back to the observer.
+The command has a ten-byte header (command, four-byte tag, four-byte zero auth,
+two-byte-hash flags). A matching `Sent` acknowledgement must arrive before a
+trace response is accepted; a command rejection fails immediately as
+`command-error`, and a missing acknowledgement resets uncertain command ownership.
+Replies must echo the complete requested loop and contain exactly one SNR per
+hash plus the receiver's SNR. The radio adapter corrects the installed SDK's
+multi-byte SNR decoding without changing the SDK package or its prototypes.
+Round trips are bounded to 15 outbound relays to preserve the existing 32-hash
+and 33-SNR diagnostic limits; longer, repeated, target-containing, or self-containing
+contact paths defer as `ineligible` before reserving or transmitting a probe.
+Diagnostic `routeCandidatePath` remains the outbound contact path;
+`tracePathHashes` contains the full returned loop. A non-null `dispatchedAt`
+records handing a command to the companion; `command-error` and `ack-timeout`
+do not establish that a packet was transmitted over the air.
 The zero-hop target is the bootstrap case: a fresh direct advert can seed its
 own trace and telemetry attempt, and only a successful direct telemetry result
 promotes that repeater into the first-hop anchor set. Candidate ranking gives

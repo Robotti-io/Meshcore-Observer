@@ -49,6 +49,16 @@ export function telemetrySnapshot(db) {
     .map(table => [table, db.prepare('SELECT * FROM '+table).all().map(row => ({ ...row }))]));
 }
 
+export function telemetryDiagnostic(run, changes = {}) {
+  return { requestId: randomUUID(), runId: run.runId, observerPublicKey: TELEMETRY_OBSERVER,
+    targetPublicKey: TELEMETRY_TARGET, targetName: null, operation: 'telemetry',
+    startedAt: 999, completedAt: 1001, dispatchedAt: 999, clockAnomaly: false,
+    phase: 'response', status: 'completed', reason: null, routeCandidatePath: [],
+    routeEvidenceSource: null, routeFailureReason: null, routeEvidenceAt: null,
+    routeSupportCount: null, inventoryContactCount: null, inventoryOutcome: null,
+    contactSyncOutcome: null, targetContactOutcome: null, dispatchMode: 'direct', ...changes };
+}
+
 // Synthetic lifecycle corpus spanning each supported interpretation and
 // failure/partial/empty scope. No producer or deployed-radio fixture implied.
 export function telemetryLifecycleResults(run, at) {

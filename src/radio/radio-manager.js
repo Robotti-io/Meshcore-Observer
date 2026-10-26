@@ -8,6 +8,8 @@ import { openTcpConnection } from './transports/tcp-transport.js';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { radioCommandOptionsSchema, radioInvalidationSchema, radioLifecycleOptionsSchema } from './lifecycle-schemas.js';
 import { RadioConnectionError, closeConnection, waitForSettlement } from './connection-lifecycle.js';
+import { installTraceDecoder } from './trace-decoder.js';
+import { normalizeDeviceQuery, readObserverStatusPart } from './observer-status-reader.js';
 
 const HANDSHAKE_TIMEOUT_MS = 5000;
 const commandOptionsValid = compileSchema(radioCommandOptionsSchema);
@@ -117,6 +119,41 @@ export class RadioManager extends EventEmitter {
 
   getDeviceInfo() {
     return this.#deviceInfo;
+  }
+
+  /** Fresh local device readings, guarded by the captured connection generation.
+   * No RF requests and no persistence or dashboard dataset are involved.
+   */
+  async refreshObserverStatus({ signal } = {}) {
+    const snapshot = this.getConnectionSnapshot();
+    if (!snapshot.ready || signal?.aborted) return null;
+    const deviceInfo = { ...this.#deviceInfo }, stats = {};
+    delete deviceInfo.stats;
+    for (const kind of ['metadata', 'core', 'radio']) {
+      const result = await this.runCommand(async (connection, context) => {
+        const result = await readObserverStatusPart(connection, kind, { signals: [signal, context.signal] });
+        if (['timeout', 'write-error', 'aborted'].includes(result.reason)) {
+          // An untagged late response must never be assigned to the next command.
+          if (result.dispatched && !context.signal.aborted) await this.invalidateConnection({ generation: context.generation,
+            reason: result.reason === 'write-error' ? 'write-error' : result.reason === 'aborted' ? 'request-cancelled' : 'ack-timeout' });
+          throw new RadioConnectionError('stale-generation');
+        }
+        return result;
+      }, { generation: snapshot.generation, requireReady: true });
+      if (signal?.aborted) return null;
+      if (kind === 'metadata') {
+        // Missing fresh metadata is unknown, never a stale relay/firmware claim.
+        deviceInfo.model = result.data?.model ?? deviceInfo.model;
+        deviceInfo.firmwareVersion = result.data?.firmwareVersion ?? null;
+        delete deviceInfo.repeat;
+        if (result.data?.repeat !== undefined) deviceInfo.repeat = result.data.repeat;
+      } else if (result.data) Object.assign(stats, result.data);
+    }
+    if (signal?.aborted || this.getConnectionSnapshot().generation !== snapshot.generation) return null;
+    const fresh = { ...deviceInfo, ...(Object.keys(stats).length ? { stats } : {}) };
+    this.#deviceInfo = fresh;
+    this.#session.deviceInfo = fresh;
+    return fresh;
   }
 
   /** Internal immutable admission snapshot; never added to public status DTOs. */
@@ -252,6 +289,7 @@ export class RadioManager extends EventEmitter {
     let session;
     try {
       connection = await this.#openTransport(this.#config.radio, this.#logger);
+      installTraceDecoder(connection);
       const controller = new AbortController();
       let confirmDisconnected;
       const disconnectedEvidence = new Promise((resolve) => { confirmDisconnected = resolve; });
@@ -303,19 +341,10 @@ export class RadioManager extends EventEmitter {
         session.connection.deviceQuery(Constants.SupportedCompanionProtocolVersion)
       );
       this.#assertCurrent(session);
-      // manufacturerModel is documented as "remainder of frame" - on real
-      // firmware this includes trailing null-padding and an extra packed
-      // git-describe string after the model name (confirmed live), so only
-      // the text up to the first null byte is the actual model name.
-      session.deviceInfo.model = deviceInfoResponse.manufacturerModel
-        ? deviceInfoResponse.manufacturerModel.split('\0')[0].trim() || null
-        : null;
-      session.deviceInfo.firmwareVersion = deviceInfoResponse.firmware_build_date
-        ? `${deviceInfoResponse.firmwareVer} (${deviceInfoResponse.firmware_build_date})`
-        : String(deviceInfoResponse.firmwareVer ?? '');
+      Object.assign(session.deviceInfo, normalizeDeviceQuery(deviceInfoResponse));
     } catch (err) {
       if (!this.#isCurrent(session)) throw err;
-      this.#logger.warn('services.radio', 'device query failed', { error: err.message });
+      this.#logger.warn('services.radio', 'device query failed; firmware metadata unavailable');
     }
   }
 

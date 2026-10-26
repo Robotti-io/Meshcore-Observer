@@ -76,7 +76,7 @@ for(const version of [13,14,15])test(`offline real entrypoint upgrades v${versio
   assert.equal(saved.observations.total,0);assert.equal(saved.outcomes.total,0);assert.deepEqual(saved.latest,[]);
   assert.equal(saved.nodes,1);assert.equal(saved.adverts.events,1);assert.equal(saved.topology.total,1);
   assert.equal(saved.packets.received,1);noCollection(saved);await stop(child);
-  inspect(path,db=>{assert.equal(db.prepare('PRAGMA user_version').get().user_version,19);
+  inspect(path,db=>{assert.equal(db.prepare('PRAGMA user_version').get().user_version,20);
     assert.equal(db.prepare('SELECT name FROM nodes').get().name,'Retained fixture');assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);});
 });
 
@@ -160,7 +160,7 @@ test('real startup migration failure rolls back v15/schema/legacy data, releases
     assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE name LIKE 'telemetry_%'").get().n,0);
     assert.equal(db.prepare('SELECT name FROM nodes').get().name,'Retained fixture');db.exec('DROP INDEX idx_telemetry_latest_decoded');});
   const child=launch(env);await child.next();noCollection(await command(child,'snapshot'));await stop(child);
-  inspect(path,db=>assert.equal(db.prepare('PRAGMA user_version').get().user_version,19));
+  inspect(path,db=>assert.equal(db.prepare('PRAGMA user_version').get().user_version,20));
 });
 
 test('live telemetry database ownership rejects a second startup clearly; capture still samples and original telemetry survives',async()=>{

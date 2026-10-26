@@ -531,18 +531,21 @@ export class ChannelBot {
     await this.#radioManager.runCommand(async (connection, context) => {
       if (!effectiveRegionScope) return connection.sendChannelTextMessage(this.#channelIdx, message);
       const regionScopeKey = deriveRegionTransportKey(effectiveRegionScope);
+      let sendFailure;
       try {
         await connection.setFloodScope(regionScopeKey);
         await connection.sendChannelTextMessage(this.#channelIdx, message);
-      } finally {
-        try { await connection.clearFloodScope(); }
-        catch {
-          // The region-scope override is connection-global. If it cannot be cleared,
-          // retire the radio session before another queued command can inherit it.
-          await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
-          throw new Error('Could not restore the Companion region scope after a bot reply');
-        }
+      } catch (error) {
+        sendFailure = { error };
       }
+      try { await connection.clearFloodScope(); }
+      catch {
+        // The region-scope override is connection-global. If it cannot be cleared,
+        // retire the radio session before another queued command can inherit it.
+        await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
+        throw new Error('Could not restore the Companion region scope after a bot reply');
+      }
+      if (sendFailure) throw sendFailure.error;
     });
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });

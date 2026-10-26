@@ -11,7 +11,7 @@ import { RemoteRequestBudget } from '../../src/radio/remote-request-budget.js';
 import { loadTelemetryPolling } from '../../src/telemetry/polling-config.js';
 import { TELEMETRY_POLL_DEFAULTS } from '../../src/telemetry/polling-schemas.js';
 import { telemetryRadioTarget as target, telemetryRadioOther as other, telemetryContactFrame as contact,
-  telemetryInventoryBoundary as boundary } from '../fixtures/telemetry-radio-wire.js';
+  telemetryInventoryBoundary as boundary, telemetryRoute, telemetryTraceAck, telemetryTraceResponse } from '../fixtures/telemetry-radio-wire.js';
 
 const observer = 'BE'.repeat(32), secret = 'PRIVATE-ONLY7';
 const active = [], root = mkdtempSync(join(tmpdir(), 'meshcore-telemetry-owner-'));
@@ -44,7 +44,14 @@ async function rig({ kind = 'mock', policy = config(), budget = false, ...option
       const c = kind === 'serial' ? new NodeJSSerialConnection('UNUSED') : kind === 'tcp' ? new TCPConnection('unused', 0) : new EventEmitter();
       c.getSelfInfo = async () => ({ publicKey: [...Buffer.from(reporter, 'hex')], name: 'Offline fixture' });
       c.getDeviceTime = async () => ({ epochSecs: Math.floor(Date.now() / 1000) }); c.setDeviceTime = async () => {}; c.deviceQuery = async () => ({});
-      c.sendToRadioFrame = vi.fn(async bytes => { writes.push({ at: clock.value, bytes: [...bytes] }); buffers.push(bytes); if (c.fail) throw new Error(secret); });
+      c.sendToRadioFrame = vi.fn(async bytes => {
+        writes.push({ at: clock.value, bytes: [...bytes] }); buffers.push(bytes);
+        if (c.fail) throw new Error(secret);
+        if (bytes[0] === Constants.CommandCodes.SendTracePath) {
+          if (f.traceMode !== 'hold-ack') receive(f, telemetryTraceAck(bytes), c);
+          if (!f.traceMode) receive(f, telemetryTraceResponse(bytes), c);
+        }
+      });
       if (kind === 'mock') {
         c.close = vi.fn(async () => c.emit('disconnected'));
         c.sendCommandSendBinaryReq = vi.fn(async (key, bytes) => c.sendToRadioFrame([50, ...key, ...bytes]));
@@ -62,19 +69,23 @@ async function rig({ kind = 'mock', policy = config(), budget = false, ...option
       : budget || { canAttempt: () => true, recordAttempt: () => true }, ...options });
   let highWater = null;
   const hooks = { isEligible: vi.fn(() => true), reserve: vi.fn(() => true), getReplayHighWater: () => highWater,
+    getContactRoute: () => telemetryRoute(),
     recordAuthentication: vi.fn(record => { records.push(record); if (record.proof) highWater = record.proof.serverTimestamp; return true; }) };
   const f = { clock, foreground, quiet, logger, radio, coordinator, connections, writes, buffers, records, policy, hooks,
     setReporter: value => { reporter = value; }, setHighWater: value => { highWater = value; }, current: () => connections.at(-1),
     tick: async ms => { clock.value += ms; await vi.advanceTimersByTimeAsync(ms); await flush(); } };
   active.push(f); return f;
 }
-async function frame(f, bytes, c = f.current()) {
+function receive(f, bytes, c = f.current()) {
   if (c instanceof EventEmitter) c.emit('rx', bytes);
   else {
     const data = Buffer.from(bytes), wire = Buffer.concat([Buffer.from([Constants.SerialFrameTypes.Incoming, data.length & 255, data.length >> 8]), data]);
     if (c instanceof TCPConnection) { c.onSocketDataReceived(wire.subarray(0, 2)); c.onSocketDataReceived(wire.subarray(2)); }
-    else { await c.onDataReceived(wire.subarray(0, 2)); await c.onDataReceived(wire.subarray(2)); }
+    else { c.onDataReceived(wire.subarray(0, 2)); c.onDataReceived(wire.subarray(2)); }
   }
+}
+async function frame(f, bytes, c = f.current()) {
+  receive(f, bytes, c);
   await f.tick(1);
 }
 async function preflight(f, contacts = [contact()]) {
@@ -116,6 +127,8 @@ for (const kind of ['mock', 'serial', 'tcp']) test(`${kind}: saved guest proof g
   await frame(f, login()); const completed = await result;
   assert.equal(completed.status, 'completed'); assert.equal(completed.context.observerPublicKey, observer);
   assert.equal(f.records.length, 1); assert.ok(f.records[0].dispatchedAt < completed.receivedAt);
+  assert.deepEqual(f.writes.filter(write => [36, 26].includes(write.bytes[0])).map(write => write.bytes[0]), [36, 26]);
+  assert.equal(completed.diagnostics.traceOutcome, 'response');
   assert.equal(f.buffers.find(bytes => bytes[0] === 26), undefined, 'private buffer cleared after ACK');
   assert.deepEqual(f.writes.find(write => write.bytes[0] === 26).bytes.slice(33), [...Buffer.from(secret)]);
   for (const operation of ['status', 'telemetry', 'neighbours']) assert.equal((await data(f, operation, 42 + sequence++)).status, 'completed');
@@ -123,6 +136,179 @@ for (const kind of ['mock', 'serial', 'tcp']) test(`${kind}: saved guest proof g
   assert.doesNotMatch(JSON.stringify([completed, f.records, f.logger.info.mock.calls, f.logger.warn.mock.calls]), /PRIVATE-ONLY7|testRef|PRIVATE-NAME/);
   assert.equal(getEventListeners(signal, 'abort').length, 0); clean(f);
 });
+
+for (const path of [[], ['9905'], ['9905', '7702'], Array.from({ length: 15 }, (_, i) => (0xA000 + i).toString(16).toUpperCase())]) test(`trace encodes the full header and target round trip for ${JSON.stringify(path)}`, async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  f.hooks.getContactRoute = () => telemetryRoute(target, path);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  const command = Buffer.from(f.writes.at(-1).bytes);
+  const expectedPath = [...path, 'AC01', ...path.toReversed()];
+  assert.equal(command[0], 36);
+  assert.deepEqual([...command.subarray(5, 10)], [0, 0, 0, 0, 1]);
+  assert.equal(command.subarray(10).toString('hex').toUpperCase(), expectedPath.join(''));
+  assert.equal(command.length, 10 + expectedPath.length * 2);
+  await frame(f, [...telemetryTraceAck(command)]);
+  await frame(f, [...telemetryTraceResponse(command)]);
+  await f.coordinator.stop(); await pending; clean(f);
+});
+
+for (const errorCode of [1, 2, 3, 4, 5, 6]) test(`trace command rejection ${errorCode} fails immediately without login`, async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  await frame(f, [1, errorCode]);
+  const result = await pending;
+  assert.equal(result.status, 'failed'); assert.equal(result.reason, 'command-error');
+  assert.equal(result.errorCode, errorCode); assert.equal(result.diagnostics.traceOutcome, 'trace-failed');
+  assert.equal(f.writes.some(write => [26, 30, 50].includes(write.bytes[0])), false);
+  assert.equal(f.records.length, 1); assert.equal(f.records[0].proof, undefined);
+  assert.equal((await f.coordinator.tryTelemetryRequest(request(), f.policy, f.hooks)).reason, 'guest-session-unavailable');
+  assert.equal(f.connections.length, 1, 'a definite rejection does not reset the radio'); clean(f);
+});
+
+test('trace requires its own Sent ACK before accepting a matching response', async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  const command = f.writes.at(-1).bytes, response = telemetryTraceResponse(command);
+  const wrongAck = telemetryTraceAck(command); wrongAck.writeUInt32LE((wrongAck.readUInt32LE(2) + 1) >>> 0, 2);
+  for (const bytes of [[1], [1, 6, 0], [...wrongAck], [...response]]) await frame(f, bytes);
+  assert.equal(f.writes.at(-1).bytes[0], 36);
+  await frame(f, [...telemetryTraceAck(command)]); await frame(f, [...response]);
+  assert.equal(f.writes.at(-1).bytes[0], 30);
+  await frame(f, contact()); await frame(f, ack()); await frame(f, login());
+  assert.equal((await pending).status, 'completed'); clean(f);
+});
+
+test('missing trace ACK resets uncertain command ownership without attempting login', async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f); await f.tick(1000);
+  const result = await pending;
+  assert.equal(result.status, 'failed'); assert.equal(result.reason, 'ack-timeout');
+  assert.equal(result.recovery, 'reset'); assert.equal(result.diagnostics.traceOutcome, 'trace-failed');
+  assert.equal(f.writes.some(write => [26, 30, 50].includes(write.bytes[0])), false); clean(f);
+});
+
+test('stop during trace retires queued ACK/response callbacks without reviving timers or login', async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  const command = f.writes.at(-1).bytes, delayed = f.current().listeners('rx').at(-1);
+  await f.coordinator.stop(); assert.equal((await pending).reason, 'stopped');
+  delayed([...telemetryTraceAck(command)]); delayed([...telemetryTraceResponse(command)]);
+  await f.tick(2000);
+  assert.equal(f.writes.some(write => [26, 30, 50].includes(write.bytes[0])), false);
+  assert.equal(vi.getTimerCount(), 0); clean(f);
+});
+
+for (const change of ['hash', 'extra byte', 'missing SNR', 'reserved', 'flags']) test(`trace rejects matching-tag replies with wrong ${change}`, async () => {
+  const f = await rig(); f.traceMode = 'hold';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  let response = telemetryTraceResponse(f.writes.at(-1).bytes);
+  if (change === 'hash') response[12] ^= 1;
+  if (change === 'extra byte') response = Buffer.concat([response, Buffer.from([0])]);
+  if (change === 'missing SNR') response = response.subarray(0, -1);
+  if (change === 'reserved') response[1] = 1;
+  if (change === 'flags') response[3] = 5;
+  await frame(f, [...response]);
+  const result = await pending;
+  assert.equal(result.reason, 'trace-malformed');
+  assert.equal(f.writes.some(write => [26, 30, 50].includes(write.bytes[0])), false); clean(f);
+});
+
+for (const path of [Array.from({ length: 16 }, (_, i) => (0xA000 + i).toString(16).toUpperCase()),
+  ['9905', '9905'], ['AC01'], ['BEBE'], ['bad']]) test(`unusable trace route defers before reservation or transmission: ${JSON.stringify(path)}`, async () => {
+  const f = await rig(); f.hooks.getContactRoute = () => telemetryRoute(target, path);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  const result = await pending;
+  assert.equal(result.status, 'deferred'); assert.equal(result.reason, 'ineligible');
+  assert.equal(result.diagnostics.traceOutcome, 'invalid-route');
+  assert.equal(f.hooks.reserve.mock.calls.length, 0);
+  assert.equal(f.writes.some(write => [36, 26, 30, 50].includes(write.bytes[0])), false); clean(f);
+});
+
+test('trace validates SDK byte arrays and ignores invalid or unrelated frames before contact read and login', async () => {
+  const f = await rig(); f.traceMode = 'hold';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  let ended = false; pending.then(() => { ended = true; });
+  await preflight(f);
+  const command = f.writes.at(-1).bytes; assert.equal(command[0], 36);
+  const response = telemetryTraceResponse(command);
+  const wrongTag = Buffer.from(response); wrongTag.writeUInt32LE((response.readUInt32LE(4) + 1) >>> 0, 4);
+  const wrongAuth = Buffer.from(response); wrongAuth.writeUInt32LE(1, 8);
+  const invalidByte = [...response]; invalidByte[12] = 256;
+  for (const bytes of [null, {}, invalidByte, [...response, ...Array(142).fill(0)],
+    [...response.subarray(0, 12)], [...wrongTag], [...wrongAuth]]) {
+    f.current().emit('rx', bytes); await flush();
+  }
+  assert.equal(ended, false); assert.equal(f.records.length, 0);
+  assert.equal(f.writes.some(write => [26, 30].includes(write.bytes[0])), false);
+  await frame(f, [...response]);
+  assert.equal(f.writes.at(-1).bytes[0], 30);
+  await frame(f, contact()); await frame(f, ack()); await frame(f, login());
+  assert.equal((await pending).status, 'completed');
+});
+
+for (const failure of ['timeout', 'malformed']) test(`trace ${failure} terminates without guest login or session authority`, async () => {
+  const f = await rig(); f.traceMode = 'hold';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  if (failure === 'timeout') await f.tick(2000);
+  else {
+    const response = telemetryTraceResponse(f.writes.at(-1).bytes); response[3] = 3;
+    await frame(f, [...response]);
+  }
+  const result = await pending;
+  assert.equal(result.status, 'failed'); assert.equal(result.reason, failure === 'timeout' ? 'trace-timeout' : 'trace-malformed');
+  assert.equal(f.writes.some(write => [26, 50].includes(write.bytes[0])), false);
+  assert.equal(f.records.length, 1); assert.equal(f.records[0].status, 'failed'); assert.equal(f.records[0].proof, undefined);
+  assert.equal((await f.coordinator.tryTelemetryRequest(request(), f.policy, f.hooks)).reason, 'guest-session-unavailable');
+  clean(f);
+});
+
+for (const kind of ['mock', 'serial', 'tcp']) test(`${kind}: two-byte routed trace completes before contact proof and guest login`, async () => {
+  const f = await rig({ kind }); f.hooks.getContactRoute = () => telemetryRoute(target, ['9905']);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f, [contact({ encodedPathLength: 0x41, path: [0x99, 0x05] })]);
+  assert.equal(f.writes.at(-1).bytes[0], 26);
+  await frame(f, ack()); await frame(f, login());
+  const result = await pending;
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.diagnostics.routeCandidatePath, ['9905']);
+  assert.deepEqual(result.diagnostics.tracePathHashes, ['9905', 'AC01', '9905']);
+  assert.equal(result.diagnostics.traceOutcome, 'response');
+  assert.deepEqual(f.writes.map(write => write.bytes[0]), [4, 36, 30, 26]);
+  clean(f);
+});
+
+for (const operation of ['status', 'telemetry', 'neighbours']) {
+  for (const { hops, estimate, ceiling, expected } of [
+    { hops: 0, estimate: 0, ceiling: 45000, expected: 4000 },
+    { hops: 2, estimate: 0, ceiling: 45000, expected: 14000 },
+    { hops: 1, estimate: 20000, ceiling: 45000, expected: 21000 },
+    { hops: 3, estimate: 0, ceiling: 12000, expected: 12000 }
+  ]) test(`routed reply allowance: ${operation}, ${hops} hops, estimate ${estimate}, ceiling ${ceiling}`, async () => {
+    const f = await rig({ policy: config({ radius: 6 }), responseTimeoutMaxMs: ceiling });
+    const path = ['9905', '7702', '6600'].slice(0, hops);
+    f.hooks.getContactRoute = () => telemetryRoute(target, path);
+    const targetContact = contact({ encodedPathLength: hops ? 0x40 | hops : 0, path: [...Buffer.from(path.join(''), 'hex')] });
+    const loginPending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+    await preflight(f, [targetContact]); await frame(f, ack()); await frame(f, login());
+    assert.equal((await loginPending).status, 'completed');
+    const pending = f.coordinator.tryTelemetryRequest(request(operation), f.policy, f.hooks);
+    let ended = false; pending.then(() => { ended = true; });
+    await flush(); await frame(f, targetContact); await frame(f, ack(42, 0, estimate));
+    await f.tick(expected - 2);
+    assert.equal(ended, false, 'a valid reply may arrive near the full route-aware deadline');
+    await frame(f, binary(42)); const result = await pending;
+    assert.equal(result.status, 'completed'); assert.equal(result.diagnostics.responseTimeoutMs, expected);
+    clean(f);
+  });
+}
 
 test('strict guest/data contracts and trusted gates reject before policy/radio effects', async () => {
   const f = await rig();
@@ -174,18 +360,25 @@ test('foreign and duplicate replies, retired prefix quarantine and expiry cannot
 
 for (const change of ['foreground', 'quiet', 'eligibility', 'reservation', 'reporter', 'generation']) test(`${change} at the physical boundary prevents login`, async () => {
   const f = await rig(); const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
-  await flush(); await frame(f, boundary(2, 1)); await frame(f, contact()); await frame(f, boundary(4));
+  await flush(); await frame(f, boundary(2, 1)); await frame(f, contact());
   if (change === 'foreground') f.foreground.value = true;
   if (change === 'quiet') f.quiet.value = false;
-  if (change === 'eligibility') f.hooks.isEligible.mockReturnValue(false);
   if (change === 'reservation') f.hooks.reserve.mockReturnValue(Promise.resolve(true));
   if (change === 'reporter' || change === 'generation') {
     const original = f.radio.getConnectionSnapshot.bind(f.radio);
     vi.spyOn(f.radio, 'getConnectionSnapshot').mockImplementation(() => ({ ...original(),
       ...(change === 'reporter' ? { observerPublicKey: other } : { generation: 99 }) }));
   }
-  await frame(f, contact()); assert.notEqual((await pending).status, 'completed');
-  assert.equal(f.writes.filter(write => write.bytes[0] === 26).length, 0); assert.equal(f.records.length, 0);
+  await frame(f, boundary(4));
+  if (change === 'eligibility') {
+    // Trace has its own durable reservation; recheck eligibility at the later
+    // guest-login send boundary rather than treating that reservation as login.
+    f.hooks.isEligible.mockReturnValue(false); await frame(f, contact());
+  }
+  assert.notEqual((await pending).status, 'completed');
+  assert.equal(f.writes.filter(write => write.bytes[0] === 26).length, 0);
+  assert.equal(f.records.length, change === 'eligibility' ? 1 : 0);
+  if (change === 'eligibility') assert.equal(f.records[0].reason, 'trace-login-not-dispatched');
 });
 
 test('complete inventory with a missing or unusable target defers without reconnecting or consuming RF budget', async () => {
@@ -195,6 +388,7 @@ test('complete inventory with a missing or unusable target defers without reconn
     { rows: [contact({ type: 3 })], reason: 'non-repeater-contact' }
   ]) {
     const f = await rig({ budget: { canAttempt: () => true, recordAttempt: vi.fn(() => true) } });
+    f.hooks.getContactRoute = () => null;
     const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks); await flush();
     await frame(f, boundary(2, scenario.rows.length));
     for (const bytes of scenario.rows) await frame(f, bytes);
@@ -243,7 +437,12 @@ for (const phase of ['inventory', 'contact', 'ack', 'response']) test(`stop duri
     if (phase === 'response') await frame(f, ack());
   }
   await f.coordinator.stop(); const result = await pending; assert.equal(result.reason, 'stopped');
-  assert.equal(f.records.length, ['ack', 'response'].includes(phase) ? 1 : 0); clean(f);
+  assert.equal(f.records.length, phase === 'inventory' ? 0 : 1);
+  if (phase === 'contact') {
+    assert.equal(f.records[0].reason, 'trace-login-not-dispatched');
+    assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  }
+  clean(f);
 });
 
 for (const broken of ['silent inventory', 'silent ACK', 'silent proof', 'flood ACK', 'wrong ACK', 'write']) test(`${broken} has bounded cleanup, safe failure and no session`, async () => {

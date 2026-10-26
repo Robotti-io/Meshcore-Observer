@@ -10,8 +10,9 @@ import { loadTelemetryPolling } from '../../src/telemetry/polling-config.js';
 import { TELEMETRY_POLL_DEFAULTS } from '../../src/telemetry/polling-schemas.js';
 import { createTelemetryFixture, TELEMETRY_OBSERVER as OBSERVER } from '../fixtures/telemetry-store.js';
 import { observe, SENSOR } from '../fixtures/telemetry-poll.js';
-import { telemetryContactFrame, telemetryInventoryBoundary, telemetryRadioTarget as TARGET } from '../fixtures/telemetry-radio-wire.js';
-import { telemetryBytes, telemetryWire } from '../fixtures/telemetry-wire.js';
+import { telemetryContactFrame, telemetryInventoryBoundary, telemetryRadioTarget as TARGET, telemetryTraceAck, telemetryTraceResponse } from '../fixtures/telemetry-radio-wire.js';
+import { Constants } from '@liamcottle/meshcore.js';
+import { telemetryBytes, telemetryWire, neighbourPage } from '../fixtures/telemetry-wire.js';
 
 const active = [];
 async function flush() { for (let n = 0; n < 150; n++) await Promise.resolve(); }
@@ -19,15 +20,16 @@ function ack(tag) { const b = Buffer.alloc(10); b[0] = 6; b.writeUInt32LE(tag, 2
 function login({ admin = 0, timestamp = 100 } = {}) { const b = Buffer.alloc(14); b[0] = 0x85; b[1] = admin;
   b.set(Buffer.from(TARGET, 'hex').subarray(0, 6), 2); b.writeUInt32LE(timestamp, 8); b[13] = 2; return [...b]; }
 function binary(tag, body) { const b = Buffer.alloc(6 + body.length); b[0] = 0x8C; b.writeUInt32LE(tag, 2); b.set(body, 6); return [...b]; }
-function rig() {
+function rig({ neighbours = false } = {}) {
   vi.useFakeTimers(); const f = createTelemetryFixture(); active.push(f);
   f.dir = mkdtempSync(join(tmpdir(), 'telemetry-producer-'));
   const policyPath = join(f.dir, 'policy.json'), secretsPath = join(f.dir, 'secrets.json');
   writeFileSync(policyPath, JSON.stringify({ version: 1, defaultCredentialRef: 'fixtureGuest',
-    components: { status: false, sensors: true, neighbours: false } }));
+    components: { status: false, sensors: !neighbours, neighbours } }));
   writeFileSync(secretsPath, JSON.stringify({ version: 1, secrets: { fixtureGuest: 'PRIVATE-ONLY7' } }));
   f.config = loadTelemetryPolling({ settings: { ...TELEMETRY_POLL_DEFAULTS, enabled: true, refreshIntervalMs: 3600000,
     startupDelayMs: 1000, tickIntervalMs: 1000 }, policyPath, secretsPath });
+  f.variant = neighbours ? { component: 'neighbours', params: f.config.neighbourParams } : SENSOR;
   f.clock = 10000; f.foreground = false; f.quiet = true; f.writes = [];
   f.logger = { warn: vi.fn(), info: vi.fn() }; f.snapshot = { ready: true, generation: 1, observerPublicKey: OBSERVER };
   f.connection = new EventEmitter(); f.radio = new EventEmitter();
@@ -36,12 +38,17 @@ function rig() {
   f.radio.invalidateConnection = async () => { f.snapshot = { ...f.snapshot, ready: false }; f.radio.emit('radio.disconnected'); return { status: 'reset' }; };
   f.connection.sendToRadioFrame = async bytes => {
     f.writes.push({ at: f.clock, code: bytes[0] });
+    if (bytes[0] === Constants.CommandCodes.SendTracePath) {
+      f.connection.emit('rx', telemetryTraceAck(bytes));
+      f.connection.emit('rx', telemetryTraceResponse(bytes));
+    }
     if (bytes[0] === 26 || bytes[0] === 50) {
-      const variant = bytes[0] === 26 ? { component: 'guest-login', params: {} } : SENSOR;
+      const variant = bytes[0] === 26 ? { component: 'guest-login', params: {} } : f.variant;
       const state = f.store.getTelemetryPollState({ observerPublicKey: OBSERVER, targetPublicKey: TARGET, variant });
       assert.equal(state.reason, 'reserved'); assert.equal(state.reservedAt, f.clock);
     }
   };
+  f.connection.addOrUpdateContact = async () => {};
   f.connection.sendCommandSendBinaryReq = async (_, bytes) => { f.binaryBytes = bytes; await f.connection.sendToRadioFrame([50]); };
   f.coordinator = new RemoteRequestCoordinator({ radio: f.radio, logger: f.logger, now: () => f.clock, wallNow: () => f.clock,
     airtimeCoordinator: { canRunWhenQuiet: () => f.quiet, tryRunWhenQuiet: cb => f.quiet ? Promise.resolve().then(cb) : null },
@@ -52,8 +59,12 @@ function rig() {
     f.coordinator[method] = async (...args) => { const result = await original(...args); f.calls.push({ method, result }); return result; };
   }
   observe(f, TARGET);
+  f.store.recordVerifiedAdvert({ publicKeyHex: TARGET, name: null, type: 'REPEATER',
+    receivedAt: 900, hopCount: 0, eventDigest: 'cd'.repeat(32), routeEvidence: {
+      hashWidth: 2, pathHashesHex: [], flags: 2, advertTimestamp: 0, lat: null, lon: null
+    } });
   const policy = Object.fromEntries(['refreshIntervalMs', 'retryBaseMs', 'retryMaxMs', 'maxAttempts', 'authCooldownMs'].map(k => [k, f.config[k]]));
-  f.store.deferTelemetryPoll({ observerPublicKey: OBSERVER, targetPublicKey: TARGET, variant: SENSOR, runId: f.run.runId,
+  f.store.deferTelemetryPoll({ observerPublicKey: OBSERVER, targetPublicKey: TARGET, variant: f.variant, runId: f.run.runId,
     observedAt: f.clock, nextDueAt: f.clock, reason: 'rate-limited', policy });
   f.scheduler = new TelemetryPollingScheduler({ config: f.config, store: f.store, runId: f.run.runId, radio: f.radio,
     coordinator: f.coordinator, logger: f.logger, wallNow: () => f.clock, monotonicNow: () => f.clock });
@@ -117,4 +128,25 @@ test('real foreground work wins admission while independent capture/local comman
   const f = rig(); f.foreground = true; f.scheduler.start(); await f.tick(10000); assert.equal(f.writes.length, 0);
   assert.equal(await f.radio.runCommand(() => 'local-work'), 'local-work');
   let captured = 0; f.radio.on('radio.packet', () => captured++); f.radio.emit('radio.packet', {}); assert.equal(captured, 1);
+});
+
+test('real owner keeps the authenticated neighbour query ahead of a dense candidate rotation while enforcing airtime spacing', async () => {
+  const f = rig({ neighbours: true });
+  for (let i = 0; i < 40; i++) observe(f, (0xD000 + i).toString(16).toUpperCase() + 'EE'.repeat(30));
+  await f.authenticate();
+  f.foreground = true; await f.tick(1000); f.foreground = false;
+  await f.tick(1000);
+  assert.deepEqual(f.writes.filter(w => [26, 50].includes(w.code)).map(w => w.code), [26]);
+  await f.tick(10000);
+  assert.equal(f.writes.at(-1).code, 30); await f.frame(telemetryContactFrame());
+  assert.equal(f.writes.at(-1).code, 50); assert.equal(f.binaryBytes[0], 6);
+  const tag = Buffer.from(f.binaryBytes).readUInt32LE(1), prefix = 'D000' + 'EE'.repeat(30);
+  await f.frame(ack(tag)); await f.frame(binary(tag, neighbourPage([{ prefix, age: 12, snr: 28 }], { prefixLength: 32 })));
+  const page = f.store.queryTelemetryObservations({ start: 0, end: 100000, component: 'neighbours' });
+  assert.equal(page.total, 1); assert.equal(page.observations[0].targetPublicKey, TARGET);
+  assert.equal(page.observations[0].quality, 'decoded');
+  assert.deepEqual(page.observations[0].data.entries[0], { order: 0, prefix, heardSecondsAgo: 12, snrQuarterDb: 28, snrDb: 7 });
+  const sent = f.writes.filter(w => [26, 50].includes(w.code));
+  assert.deepEqual(sent.map(w => w.code), [26, 50]); assert.ok(sent[1].at - sent[0].at >= 10000);
+  assert.equal(f.store.queryTelemetryAuthenticationOutcomes({ start: 0, end: 100000 }).outcomes.length, 1);
 });

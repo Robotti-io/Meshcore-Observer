@@ -9,6 +9,7 @@ import { MetricsStore } from '../../src/metrics/store.js';
 import { parseTopologyFrame } from '../../src/nodes/topology-parser.js';
 import { buildRawFrame } from '../fixtures/packet-frames.js';
 import { dropTopologySchema } from '../fixtures/topology-downgrade.js';
+import { telemetryResult, telemetryDiagnostic } from '../fixtures/telemetry-store.js';
 
 const OBSERVER = 'CD'.repeat(32); const HOUR = 3600000;
 const RANGE = { start: 0, end: Number.MAX_SAFE_INTEGER };
@@ -181,11 +182,18 @@ test('freshness excludes future/equality/stale evidence, cannot refresh on resta
 
 test('outbound route fallback ranks recent message receptions and rejects ties, ambiguity and stale evidence', () => {
   const store = open(); const run = start(store);
-  const target = node(store, 'ABD8'); node(store, '9905'); node(store, 'E85C'); node(store, '7711');
+  const target = node(store, 'ABD8'); node(store, '9905'); const anchor = node(store, 'E85C'); node(store, '7711');
   const record = (at, hops) => store.recordTopologyObservation(evidence(run, at, { hops }));
   record(1000, ['ABD8', '9905', 'E85C']); record(2000, ['ABD8', '9905', 'E85C']);
   record(3000, ['ABD8', '7711', 'E85C']);
   const query = { observerPublicKey: OBSERVER, targetPublicKey: target, now: 4000, windowMs: HOUR, radius: 3 };
+  assert.equal(store.getTopologyOutboundRoute(query).reason, 'no-fresh-direct-relay');
+  const direct = telemetryResult(run, { observer: OBSERVER, target: anchor });
+  store.recordTelemetryResult(direct);
+  store.recordTelemetryRequestDiagnostic(telemetryDiagnostic(run, { observerPublicKey: OBSERVER,
+    targetPublicKey: anchor, requestId: direct.outcome.requestId }));
+  // Even a fresh route via an unproven first hop cannot outrank the anchored route.
+  record(3500, ['ABD8', '9905']);
   const route = store.getTopologyOutboundRoute(query);
   assert.equal(route.status, 'available'); assert.equal(route.evidenceSource, 'passive-topology');
   assert.deepEqual(route.path, ['E85C', '9905']); assert.equal(route.receptionCount, 2);
@@ -195,7 +203,7 @@ test('outbound route fallback ranks recent message receptions and rejects ties, 
   node(store, '9905', '01', 'CHAT');
   const remaining = store.getTopologyOutboundRoute({ ...query, now: 5000 });
   assert.equal(remaining.status, 'available'); assert.deepEqual(remaining.path, ['E85C', '7711']);
-  assert.equal(store.getTopologyOutboundRoute({ ...query, now: HOUR + 5001 }).reason, 'no-fresh-passive-route');
+  assert.equal(store.getTopologyOutboundRoute({ ...query, now: HOUR + 5001 }).reason, 'no-fresh-direct-relay');
 });
 
 test('all reads are strict and capped, range boundaries exact, metadata avoids nested identities', () => {
@@ -235,7 +243,7 @@ test('migration 13 preserves earlier inventory/run state, creates no legacy obse
   store = open(path); assert.equal(store.getObserverRun({ runId: run.runId }).state, 'running');
   assert.equal(store.countNodesByType('REPEATER'), 1); assert.equal(store.queryTopologyPaths().total, 0);
   assert.equal(store.queryTopologyObservations(RANGE).total, 0); close(store);
-  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 19);
+  db = new DatabaseSync(path); assert.equal(db.prepare('PRAGMA user_version').get().user_version, 20);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []); db.close();
 });
 

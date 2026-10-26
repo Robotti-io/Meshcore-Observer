@@ -99,6 +99,55 @@ test('all components advance one physical request per tick without a three-query
   assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'status', 'telemetry', 'neighbours']);
   assert.equal(f.history().outcomes.length, 3); assert.equal(f.history().outcomes.filter(x => x.status === 'partial').length, 2);
 });
+
+test('successful login continues its exact neighbour query on the next tick before scanning other targets', async () => {
+  const f = rig({ all: true, seed: false });
+  const other = 'EF'.repeat(32), neighbours = { component: 'neighbours', params: f.config.neighbourParams };
+  observe(f, other); f.due(TARGET, [neighbours]); f.due(other);
+  await f.start(); assert.equal(f.sent.length, 1); assert.equal(f.sent[0].operation, 'guest-login');
+  f.due(TARGET, [{ component: 'status', params: {}, profile: f.config.statusProfile }, SENSOR]);
+  await f.tick();
+  assert.deepEqual(f.sent.map(r => [r.targetPublicKey, r.operation]), [[TARGET, 'guest-login'], [TARGET, 'neighbours']]);
+  assert.deepEqual(f.sent[1].params, f.config.neighbourParams);
+  assert.equal(f.history().outcomes[0].variant.component, 'neighbours');
+  await f.tick(); assert.equal(f.calls.at(-1).targetPublicKey, other, 'normal target fairness resumes after the follow-up');
+});
+
+for (const change of ['expiry', 'generation', 'reporter', 'eligibility', 'session revoked', 'stop']) test(`post-login continuation cannot survive ${change}`, async () => {
+  const f = rig({ all: true, seed: false, sessionTtlMs: 60000 });
+  const other = 'EF'.repeat(32), neighbours = { component: 'neighbours', params: f.config.neighbourParams };
+  observe(f, other); f.due(TARGET, [neighbours]); f.due(other);
+  await f.start();
+  if (change === 'generation') f.snapshot = { ...f.snapshot, generation: 2 };
+  if (change === 'reporter') f.snapshot = { ...f.snapshot, observerPublicKey: 'EE'.repeat(32) };
+  if (change === 'session revoked') f.session = false;
+  if (change === 'stop') f.scheduler.stop();
+  if (change === 'eligibility') {
+    const original = f.store.getTelemetryEligibility.bind(f.store);
+    f.store.getTelemetryEligibility = input => input.targetPublicKey === TARGET ? null : original(input);
+  }
+  await f.tick(change === 'expiry' ? 60001 : 1000, 1000);
+  assert.equal(f.sent.some(r => r.operation === 'neighbours'), false);
+  assert.equal(f.history().total, change === 'generation' || change === 'eligibility' ? 1 : 0);
+  if (['generation', 'eligibility', 'expiry'].includes(change)) assert.equal(f.calls.at(-1).targetPublicKey, other);
+  if (change === 'session revoked') {
+    assert.equal(f.sent.length, 1, 'a vanished session never triggers a follow-up login loop');
+    await f.tick(); assert.equal(f.calls.at(-1).targetPublicKey, other);
+  }
+});
+
+for (const reason of ['foreground', 'quiet-air', 'rate-limited', 'background-turn', 'busy']) test(`successful login continues across ${reason} without another login or RF burst`, async () => {
+  const f = rig({ all: true, seed: false });
+  const other = 'EF'.repeat(32), neighbours = { component: 'neighbours', params: f.config.neighbourParams };
+  observe(f, other); f.due(TARGET, [neighbours]); f.due(other);
+  await f.start(); f.deferral = reason;
+  await f.tick(); await f.tick();
+  assert.equal(f.sent.length, 1);
+  assert.ok(f.calls.slice(2).every(r => r.targetPublicKey === TARGET && r.operation === 'neighbours'));
+  f.deferral = null; await f.tick();
+  assert.deepEqual(f.sent.map(r => r.operation), ['guest-login', 'neighbours']);
+  assert.equal(f.sent[1].targetPublicKey, TARGET);
+});
 test('new component phases spread across cadence and saved deadlines do not slide on restart', async () => {
   const f = rig({ seed: false, all: true }); await f.start(); assert.equal(f.sent.length, 0);
   const variants = [{ component: 'status', params: {}, profile: f.config.statusProfile }, SENSOR,

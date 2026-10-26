@@ -34,6 +34,6 @@ export class ObserverPublisher {
       IATA: this.#iata,
       PUBLIC_KEY: deviceInfo.publicKey.toUpperCase()
     });
-    return this.#mqttManager.publish(topic, JSON.stringify(payload), { retain: true });
+    return this.#mqttManager.publish(topic, JSON.stringify(payload), { retain: true, timeoutMs: 5000 });
   }
 }
