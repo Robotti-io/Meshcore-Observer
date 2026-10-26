@@ -17,10 +17,11 @@ defaults and accepted units/bounds. Retry base/maximum accept whole minutes from
 out-of-range or malformed settings fail startup even when disabled. Omission
 uses the documented defaults.
 
-The physical budget remains the existing shared remote budget (default one
-request per minute). Refresh is an objective; login and data compete with
-region discovery and foreground work. Passive eligibility, sample freshness,
-refresh cadence and pruning are separate settings.
+The shared remote budget defaults to one request per minute. Bounded target
+exchanges can borrow closely spaced turns for dependent trace/login/data work,
+then repay every RF attempt in a cooldown before more remote work starts; see
+the exchange contract below. Refresh is an objective. Passive eligibility,
+sample freshness, refresh cadence and pruning are separate settings.
 
 ### Contact preflight and reconnect diagnostics
 
@@ -299,6 +300,9 @@ cutoff, no future receipt and a source run without known clock anomaly. Flood
 candidates additionally need nonrepeated traversed topology, a retained original
 receipt and unique full-key prefix resolution across every node type, within
 radius. Unknown, remaining-route and colliding evidence cannot grant eligibility.
+Fresh, fully decoded neighbour reports can also establish eligibility for the
+next outward layer under the shared route checks described below. Discovery,
+the final eligibility read and atomic reservation use the same report resolver.
 Candidate pages return eligible targets, not a ready-to-transmit queue; T5 owns
 distributed component selection and due checks. Passive evidence never proves a
 saved outbound contact route.
@@ -359,13 +363,31 @@ Marker errors use a fixed safe warning and do not interrupt capture or publicati
 
 Enabled startup constructs one scheduler on the existing store and coordinator.
 It first retires other-run reservations in pages of at most 100. Candidate pages
-hold at most 16 targets with a full-key cursor; each tick selects one due
-component. Initial reporter/target/component phases are deterministic offsets
+hold at most 16 targets ordered by minimum eligible distance, then full public
+key. An internal distance/key cursor carries scanning across ticks; each tick
+selects one due component. Initial reporter/target/component phases are
+deterministic offsets
 within the configured refresh cadence, anchored at scheduler startup. Saved
 deadlines survive restart; missing scopes discovered after their phase are due
 on that tick. Existing observations can extend that initial deadline. There is no
 catch-up batch. Clock agreement uses monotonic elapsed time and the durable
 wall-time high-water before RF permission is considered.
+
+Passive proximity and the usable outbound route have separate radius checks.
+Before admitting a due candidate to the radio owner, the scheduler reads the
+same fresh signed-advert route used by preflight. If that route exceeds the
+radius, a fresh bounded topology/neighbour alternative may still qualify the
+target. Without an available alternative, the rejection advances to the next
+candidate inside that bounded 16-target page, rather than starting a contact
+inventory and consuming a whole request turn. If the page contains only rejected/not-due candidates,
+the cursor advances and scanning resumes on the next tick; there is no
+unbounded loop or RF burst. Other route decisions still follow the existing
+owner/fallback path. The owner rereads route evidence and enforces eligibility,
+radius, session, quiet-air and shared physical budgets at admission/dispatch.
+An early skip grants no authority, deletes no node/history, and does not reset
+saved component deadlines. New shorter evidence can make the target selectable
+again. A target skipped before request admission creates no request diagnostic;
+the registry, stored route and prior diagnostics remain available.
 
 The scheduler uses guarded data admission; when a guest session is absent, it
 attempts one due guest login instead. Successful proof must be saved synchronously
@@ -542,9 +564,190 @@ used to query it. Resolve the reported target prefix to one known repeater,
 require the report and its heard-age to be within the evidence window, and reject
 ambiguous identities, loops, stale reports, unanchored reporter paths, and paths
 beyond the configured radius. The resulting candidate is traced independently
-before contact synchronization or login; a neighbor report is a route seed, not
+before contact synchronization or login; a neighbour report is a route seed, not
 proof of a working return path. Keep its support count separate from message-path
 receptions in diagnostics and the dashboard. TraceData-returned hashes and SNR
 remain diagnostic measurements; they are not resolved as normal repeater
 identities. A guest-login response never contributes to first-hop anchor or
 trace-success weights.
+
+## Neighbour-led inside-out polling — 2026-10-26
+
+The polling strategy now uses neighbour reports to grow the candidate set,
+rather than using those reports only as a route fallback for targets already
+eligible from adverts or passive paths. No new setting is required when polling
+and the `neighbours` component are enabled.
+
+1. Fresh reporter-scoped direct advert evidence bootstraps nearby candidates.
+   A successful direct telemetry exchange is still required before a repeater
+   becomes the first relay of an outward route; a login alone is insufficient.
+2. Candidate scans visit the minimum evidenced distance first and use the full
+   key as a stable tie-break. Within a target, due components are considered in
+   `neighbours → status → sensors` order. Existing phases, refresh deadlines,
+   retries and authentication cooldowns are preserved. This prioritizes a due
+   neighbour query; it does not force an early refresh.
+3. A fresh decoded neighbour response from a proven reporter can add a known,
+   uniquely resolved repeater even without an independent passive receipt of
+   that destination. Append the reporter to the exact trace-confirmed path used
+   to query it. A direct reporter needs no preceding relay path. Each report
+   extends one layer; expanding through the new repeater requires a successful
+   exchange with that repeater and its own neighbour report.
+4. The destination counts toward the radius: `[E85C]` reaches a target at
+   distance 2, and `[E85C, 9905]` reaches a target at distance 3. Reject unknown
+   or non-repeater identities, collisions (including other node types), the
+   observer itself, repeated nodes, anomalous runs, untraced reporter routes,
+   future/stale reports and entries whose reported heard-age reaches the stale
+   cutoff. Full-key neighbour identity does not waive two-byte route ambiguity.
+5. The selected route still passes the independent trace and all shared owner
+   checks before contact synchronization, guest login or data dispatch. Fresh
+   signed advert routes retain their normal preference. A long signed route can
+   now fall back to a valid shorter topology/neighbour path within the radius.
+   Independently supported alternatives remain available when a failed path is
+   temporarily suppressed. Equally supported alternatives retain the existing
+   conservative tie rejection.
+
+Scanning continues outward before wrapping to the nearest layer, so due outer
+targets and status/sensor components retain turns. A successful login continues
+its exact selected component on the next admissible tick. New or changed
+evidence behind the cursor is considered on the next sweep. Candidate pages
+remain capped at 16, and neighbour expansion reads at most the 512 newest
+qualifying saved pages per lookup. These limits and the configured bounded
+neighbour page make coverage a lower bound, rather than a complete mesh graph.
+There is no recursive graph walk or RF catch-up batch. SNR remains a diagnostic
+measurement; this pivot ranks routes using existing anchor, trace, neighbour and
+passive support counts rather than introducing an SNR quality score.
+
+The implementation reuses existing SQLite observations and diagnostics; it adds
+no migration, public HTTP/MQTT contract or dependency. The distance/key cursor is
+internal scheduler bookkeeping. Restart an already-running telemetry instance
+to load the change, preserving its database and configuration. Saved evidence
+keeps its original time, and saved deadlines are not reset. Port 3000's
+publication/bot instance does not need telemetry enabled for this change.
+
+## Timing references: repeater login state and response waits — 2026-10-26
+
+The ten-minute Observer guest-session lifetime is a local authorization-cache
+deadline. It is not a negotiated repeater expiry. The one-minute remote-request
+spacing is also Observer policy, separate from the time allowed for a reply.
+The current soak's four login-to-neighbour gaps were approximately 60, 60, 80
+and 90 seconds, explained by shared rate limits, ten-second ticks and quiet-air
+deferrals. These measurements do not establish a remote session timeout.
+
+Primary protocol/source references inspected:
+
+- [Official Companion protocol](https://github.com/meshcore-dev/MeshCore/blob/main/docs/companion_protocol.md):
+  local command handling commonly uses five-second waits. The SENT response
+  includes a separate suggested timeout as a uint32 millisecond value.
+  Local command acknowledgement is distinct from an over-the-air answer.
+- [Companion timeout calculations](https://github.com/meshcore-dev/MeshCore/blob/a366955cb2f67b8e6842d4f00d2b6a554dddd88a/examples/companion_radio/MyMesh.cpp):
+  the inspected direct-route estimate is `500 + (6 * A + 250) * (N + 1)` ms,
+  where `A` is the outgoing packet's estimated airtime in milliseconds and `N`
+  is the relay hash count. The flood estimate is `500 + 16 * A` ms. These are
+  estimates, not guarantees that a larger response or congested return path
+  will finish within them.
+- [Repeater login/request handlers](https://github.com/meshcore-dev/MeshCore/blob/a366955cb2f67b8e6842d4f00d2b6a554dddd88a/examples/simple_repeater/MyMesh.cpp)
+  and [client table](https://github.com/meshcore-dev/MeshCore/blob/a366955cb2f67b8e6842d4f00d2b6a554dddd88a/src/helpers/ClientACL.cpp):
+  no fixed sixty-second guest idle-expiry check was found in the inspected
+  stock repeater implementation. Login establishes client-table state; a full
+  table may replace its least-active non-admin entry. Guest state is not
+  persisted across reboot. The repeater sets the legacy recommended keep-alive
+  field to zero.
+- [Maintained-connection helper](https://github.com/meshcore-dev/MeshCore/blob/a366955cb2f67b8e6842d4f00d2b6a554dddd88a/src/helpers/BaseChatMesh.cpp):
+  a separately started keep-alive connection expires after 2.5 times its
+  configured keep-alive interval. This is not a universal repeater guest-login
+  deadline; the Companion starts that maintained connection only when a login
+  reply advertises a nonzero interval.
+
+In separate-request mode, Observer uses the greater of the Companion estimate plus one second
+and a routed minimum of `4000 + 5000 * relayCount` ms, capped by the configured
+response maximum. Thus the observed two-/three-relay neighbour queries waited
+14/19 seconds. Neither those waits nor the local ten-minute lifetime is a
+protocol-mandated remote timeout. Raising only the maximum does not increase
+14/19-second waits when the selected estimate/minimum remains below that cap.
+
+These source findings do not attest the exact build, client-table pressure or
+return path of each deployed repeater. A fixed sixty-second session-expiry
+explanation is unsupported by this source check. The next proposed diagnostic
+step is a bounded longer neighbour-response window, with unchanged RF send
+limits and evidence that distinguishes delayed responses from silence. No
+runtime setting, authentication policy or response window was changed by this
+documentation investigation. The subsequent authorized implementation below
+changes exchange pacing and collection waits.
+
+## Bounded trace/login/collection exchanges — 2026-10-26
+
+The operator approved moving network-settling time after the related requests.
+Previously, a successful login consumed the same one-request-per-minute budget
+as the following collection. The first restarted run showed 60–90-second gaps
+and repeated `rate-limited` deferrals before collection. The new target exchange
+keeps dependent requests together while retaining the same guest-proof,
+eligibility, trace, contact, foreground, quiet-air and persistence checks.
+
+An exchange admits one target under the ordinary shared budget, validates its
+route, traces it and sends guest login after the successful trace and short
+step/quiet-air checks. A successful proof must be saved before the next due
+collection can run. Due components use `neighbours → status → sensors` order,
+each at most once in that exchange. Successful collections advance to the next
+due component on the short exchange tick. Future refresh deadlines are never
+pulled forward. An already-valid guest session still uses the existing exact
+contact/session checks. No new credential, role or management permission is
+introduced.
+
+| Environment suffix after `PACKETCAPTURE_TELEMETRY_POLL_` | Default | Bounds / meaning |
+| --- | --- | --- |
+| `EXCHANGE_MAX_REQUESTS` | 6 | 1 restores separate-request mode; 2–6 caps physical RF attempts per exchange, including trace, login, data and failed writes |
+| `EXCHANGE_WINDOW_SECONDS` | 300 | 30–600; no new send permission after the bounded exchange window |
+| `EXCHANGE_STEP_SECONDS` | 1 | 1–10; minimum RF step spacing and scheduler continuation tick |
+| `EXCHANGE_REST_SECONDS` | 60 | 10–3,600; minimum post-exchange remote cooldown |
+| `RESPONSE_WAIT_SECONDS` | 60 | 5–120; desired minimum collection response wait, still capped by the shared response ceiling |
+
+The shared budget creates a private pacing capability tied to the exact target,
+Observer identity, connection generation and original configuration. It grants
+no authentication authority. Other remote targets/producers cannot spend its
+credit. Normal foreground traffic keeps priority; capture, local reads and bot
+replies continue. Region-discovery fairness resumes after the bounded exchange
+and its cooldown. Stop, generation/identity loss, clock disagreement, exhausted
+credit, expiry or persistence failure closes the exchange. An already-sent
+request retains its bounded response/recovery owner until termination.
+
+Every exchange RF write is charged immediately, including the trace and failed
+writes. After the exchange ends, the shared remote cooldown is at least:
+
+`max(exchangeRestMs, usedAttempts * max(minIntervalMs, ceil(60000 / maxPerMinute)))`
+
+With the default one-per-minute policy, trace + login + one query owes at least
+three minutes **after completion**. Trace + login + all three due components
+owes at least five minutes. These are repaid turns, not an additional allowance
+of six requests every minute. Quiet-air checks can add delay within the exchange.
+An exchange with no RF dispatch spends no credit. Budget credit/debt is
+process-local, like the existing shared budget; reconnect does not reset it.
+A process restart creates a fresh initial budget delay and restores no exchange
+or guest authority. Durable component deadlines/attempts remain in SQLite.
+
+Collection response wait is now the maximum of the requested response floor,
+the Companion estimate plus one second and the existing hop-aware allowance,
+capped by `PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS`. Login and
+trace retain their own existing wait calculations. The checked-in shared
+ceiling remains 45,000 ms, so the 60-second requested floor is capped at
+45 seconds unless the operator raises that ceiling. Port 3003's local setting
+was changed from 45,000 to **90,000 ms for its next startup**, allowing the full
+60-second collection floor and larger estimates up to 90 seconds. Its running
+process was not restarted or changed by the agent.
+
+Retry behavior remains bounded and durable. A failed collection ends the
+exchange, applies the shared cooldown and preserves its failed outcome. It is
+eligible for another separately identified attempt only after its saved
+exponential backoff (default 15 minutes, capped at 360), with at most three
+attempts per component cycle by default. Exhaustion waits for refresh; unsafe
+authentication retains the longer target cooldown. There is no immediate RF
+retry loop, deadline reset or replay of an old tagged request. The retry test
+demonstrates a later successful attempt with a new request identity while
+retaining the failed attempt.
+
+This follow-up changes pacing and scheduling through the existing owner/store
+seams. It introduces no migration, dependency or public HTTP/MQTT change. Existing
+separate-request regression cases explicitly select `EXCHANGE_MAX_REQUESTS=1`;
+new default-mode real-startup and real-owner scenarios cover prompt collection,
+all three components, delayed replies, cooldown repayment, retained retries,
+foreground priority, unsafe proof, failed persistence and generation loss.
+The agent performed no live RF test or process restart for this implementation.

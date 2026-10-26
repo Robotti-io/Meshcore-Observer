@@ -1,5 +1,7 @@
 # Feature: Repeater Region Discovery for CoreScope
 
+**2026-10-26 closeout:** Implementation remains complete. The operator enabled region publication on `okimesh1` and restarted port 3000 at 10:05:37 EDT. Broker acceptance of saved answer #2 is verified at 10:05:47 EDT; `okimesh2` remains opted out. Exact CoreScope reporter/target/original-time ingestion correlation is still pending. E85C audit agreement remains separate evidence of declared/observed scope behavior. [Current closeout](../pillar-1-closeout.md).
+
 - **Status:** Included in v2.5.0; #30/#31 delivered/user-pushed through 54a920d; #32 T1–T5 complete locally/completed/project Done; 1,010 tests/CI coverage/lint pass under 2026-10-10 authorization. Publication is default-off; live RF-to-CoreScope verification remains #37.
 - **Backlog ID:** OBS-02
 - **Requested:** 2026-10-06

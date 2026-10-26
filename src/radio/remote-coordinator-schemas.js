@@ -31,6 +31,16 @@ export const remoteRequestBudgetSchema = {
   }
 };
 
+export const remoteExchangeBudgetSchema = {
+  type: 'object', additionalProperties: false,
+  required: ['maxRequests', 'windowMs', 'stepMs', 'restMs'], properties: {
+    maxRequests: { type: 'integer', minimum: 2, maximum: 6 },
+    windowMs: { type: 'integer', minimum: 30000, maximum: 600000 },
+    stepMs: { type: 'integer', minimum: 1000, maximum: 10000 },
+    restMs: { type: 'integer', minimum: 10000, maximum: 3600000 }
+  }
+};
+
 export const remoteCoordinatorLimitsSchema = {
   type: 'object', additionalProperties: false,
   required: ['ackTimeoutMs', 'responseTimeoutMaxMs', 'minIntervalMs', 'maxPerMinute'],

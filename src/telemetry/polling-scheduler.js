@@ -27,6 +27,7 @@ export class TelemetryPollingScheduler {
   #unsaved = null; #unconfirmed = false; #fault = null; #pausedGeneration = null;
   #invalidRoutes = new Map();
   #afterLogin = null;
+  #exchange = null;
 
   constructor({ config, store, runId, radio, coordinator, logger, wallNow = Date.now,
     monotonicNow = () => performance.now(), createId = randomUUID }) {
@@ -42,7 +43,7 @@ export class TelemetryPollingScheduler {
     try { this.#clock(); } catch { this.#warn('selection'); }
     this.#arm(this.#config.startupDelayMs);
   }
-  stop() { this.#stopped = true; clearTimeout(this.#timer); this.#timer = null; this.#cursor = null; this.#afterLogin = null; }
+  stop() { this.#stopped = true; clearTimeout(this.#timer); this.#timer = null; this.#cursor = null; this.#afterLogin = null; this.#endExchange(); }
   async drain() {
     await this.#pending;
     this.#persist();
@@ -52,8 +53,10 @@ export class TelemetryPollingScheduler {
     if (this.#stopped) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
-      this.#pending = this.#pass().catch(() => this.#warn(this.#unconfirmed ? 'completion' : 'selection')).finally(() => {
-        this.#pending = null; this.#arm(this.#config.tickIntervalMs);
+      this.#pending = this.#pass().catch(() => {
+        this.#endExchange(); this.#warn(this.#unconfirmed ? 'completion' : 'selection');
+      }).finally(() => {
+        this.#pending = null; this.#arm(this.#exchange ? this.#config.exchangeStepMs : this.#config.tickIntervalMs);
       });
     }, delay);
     this.#timer.unref();
@@ -92,11 +95,16 @@ export class TelemetryPollingScheduler {
   }
   #variants(target) {
     const profile = this.#config.targetProfiles.find(p => p.targetPublicKey === target);
-    return ['status', 'sensors', 'neighbours'].filter(c => this.#config.components[c]).map(component => ({ component,
+    return ['neighbours', 'status', 'sensors'].filter(c => this.#config.components[c]).map(component => ({ component,
       params: component === 'status' ? {} : component === 'sensors' ? { permissionMask: 0 } : { ...this.#config.neighbourParams },
       ...(component === 'status' ? { profile: { ...(profile?.statusProfile ?? this.#config.statusProfile) } } : {}) }));
   }
   #scope(target, variant) { return { observerPublicKey: this.#observer, targetPublicKey: target, variant }; }
+  #verifiedAdvertRoute(target, snapshot, now) {
+    return this.#store.getVerifiedAdvertRoute({ publicKeyHex: target,
+      observerPublicKey: snapshot.observerPublicKey, now,
+      windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius });
+  }
   #due(scope, now, requestId) {
     const state = this.#store.getTelemetryPollState(scope);
     if (!state) return true;
@@ -148,11 +156,51 @@ export class TelemetryPollingScheduler {
     if (response.dispatchedAt !== undefined || !TRANSIENT.has(response.reason)) this.#afterLogin = null;
     return true;
   }
+
+  #endExchange() {
+    if (!this.#exchange) return;
+    this.#coordinator.endTelemetryExchange(this.#exchange.token); this.#exchange = null;
+  }
+
+  async #runExchange(snapshot) {
+    const exchange = this.#exchange;
+    if (!exchange) return false;
+    const { admitted } = exchange;
+    if (this.#stopped || this.#unsaved || this.#unconfirmed || this.#lastMono >= exchange.expiresAt
+      || snapshot.generation !== admitted.generation || snapshot.observerPublicKey !== admitted.observerPublicKey
+      || !snapshot.ready || !this.#coordinator.hasTelemetryExchangeCapacity(exchange.token)) {
+      this.#endExchange(); return true;
+    }
+    const clock = this.#clock();
+    if (clock.paused) { this.#endExchange(); return true; }
+    const selected = exchange.selected;
+    if (!this.#eligible({ targetPublicKey: selected.target }, snapshot, admitted, selected.variant, null)) {
+      this.#endExchange(); return true;
+    }
+    const response = await this.#request(selected, admitted, false);
+    if (response.reason === 'guest-session-unavailable' && response.dispatchedAt === undefined) {
+      if (!this.#due(this.#scope(selected.target, AUTH), this.#clock().wall)) { this.#endExchange(); return true; }
+      const login = await this.#request(selected, admitted, true);
+      if (login.status !== 'completed' && (!TRANSIENT.has(login.reason) || login.dispatchedAt !== undefined)) this.#endExchange();
+      return true;
+    }
+    if (response.dispatchedAt === undefined && TRANSIENT.has(response.reason)) return true;
+    if (response.status !== 'completed' || this.#unsaved || this.#unconfirmed
+      || this.#store.getTelemetryPollState(this.#scope(selected.target, selected.variant))?.reason !== 'answered') {
+      this.#endExchange(); return true;
+    }
+    exchange.completed.add(selected.variant.component);
+    const next = this.#variants(selected.target).find(variant => !exchange.completed.has(variant.component)
+      && this.#due(this.#scope(selected.target, variant), this.#clock().wall));
+    if (!next) this.#endExchange();
+    else exchange.selected = { target: selected.target, variant: next };
+    return true;
+  }
   async #pass() {
     this.#persist();
-    if (this.#stopped || this.#unsaved || this.#unconfirmed) return;
+    if (this.#stopped || this.#unsaved || this.#unconfirmed) { this.#endExchange(); return; }
     const clock = this.#clock();
-    if (clock.paused) { this.#afterLogin = null; return; }
+    if (clock.paused) { this.#afterLogin = null; this.#endExchange(); return; }
     if (!this.#recovered) {
       const page = this.#store.recoverTelemetryPollReservations({ runId: this.#runId, observedAt: clock.wall,
         policy: this.#policy, limit: 100, ...(this.#recoveryCursor ? { afterRequestId: this.#recoveryCursor } : {}) });
@@ -161,27 +209,45 @@ export class TelemetryPollingScheduler {
     }
     const snapshot = this.#snapshot();
     if (!snapshot.ready || snapshot.generation === null || !snapshot.observerPublicKey
-      || this.#pausedGeneration === snapshot.generation) { this.#afterLogin = null; return; }
+      || this.#pausedGeneration === snapshot.generation) { this.#afterLogin = null; this.#endExchange(); return; }
     if (this.#observer !== snapshot.observerPublicKey) {
-      this.#observer = snapshot.observerPublicKey; this.#cursor = null; this.#afterLogin = null;
+      this.#endExchange(); this.#observer = snapshot.observerPublicKey; this.#cursor = null; this.#afterLogin = null;
     }
+    if (await this.#runExchange(snapshot)) return;
     if (await this.#resumeAfterLogin(snapshot)) return;
+    const previousCursor = this.#cursor;
     const page = this.#store.queryTelemetryPollCandidates({ observerPublicKey: this.#observer, now: clock.wall,
       windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius, limit: 16,
-      ...(this.#cursor ? { afterPublicKey: this.#cursor } : {}) });
+      ...(this.#cursor ? { afterPublicKey: this.#cursor.targetPublicKey, afterDistance: this.#cursor.distance } : {}) });
     if (page.clockRollback) return;
     let selected = null;
     for (const candidate of page.candidates) {
-      this.#cursor = candidate.targetPublicKey;
+      this.#cursor = { targetPublicKey: candidate.targetPublicKey, distance: candidate.distance };
       if (this.#excluded.has(candidate.targetPublicKey)) continue;
       for (const variant of this.#variants(candidate.targetPublicKey)) {
         const scope = this.#scope(candidate.targetPublicKey, variant);
         if (!this.#store.getTelemetryPollState(scope)) this.#initialize(scope, clock.wall);
         if (!selected && this.#due(scope, clock.wall)) selected = { target: candidate.targetPublicKey, variant };
       }
+      if (selected) {
+        const route = this.#verifiedAdvertRoute(selected.target, snapshot, clock.wall);
+        // Passive proximity is not an outbound-route proof. This rejection
+        // cannot consume an inventory/login turn unless a fresh, bounded
+        // alternative survives the same route exclusions used by the owner.
+        if (route.status === 'unavailable' && route.reason === 'route-exceeds-radius'
+          && this.#topologyRoute(selected.target, snapshot, clock.wall,
+            this.#invalidRoutePaths(selected.target, clock.wall)).status !== 'available') selected = null;
+      }
       if (selected) break;
     }
     if (!selected) { if (page.exhausted) this.#cursor = null; return; }
+    if (this.#config.exchangeMaxRequests > 1 && typeof this.#coordinator.beginTelemetryExchange === 'function') {
+      const token = this.#coordinator.beginTelemetryExchange({ requestId: this.#createId(), targetPublicKey: selected.target }, this.#config);
+      if (!token) { this.#cursor = previousCursor; return; }
+      this.#exchange = { token, selected, admitted: snapshot, completed: new Set(),
+        expiresAt: add(this.#lastMono, this.#config.exchangeWindowMs) };
+      await this.#runExchange(snapshot); return;
+    }
     const response = await this.#request(selected, snapshot, false);
     if (response.reason === 'guest-session-unavailable' && response.dispatchedAt === undefined && !this.#stopped) {
       if (this.#due(this.#scope(selected.target, AUTH), this.#clock().wall)) {
@@ -191,6 +257,11 @@ export class TelemetryPollingScheduler {
         }
       }
     }
+  }
+  #topologyRoute(target, snapshot, now, excludedPaths = []) {
+    return this.#store.getTopologyOutboundRoute({ observerPublicKey: snapshot.observerPublicKey,
+      targetPublicKey: target, now, windowMs: this.#config.evidenceWindowMs,
+      radius: this.#config.radius, excludedPaths });
   }
   async #request(selected, admitted, login) {
     const variant = login ? AUTH : selected.variant;
@@ -223,18 +294,15 @@ export class TelemetryPollingScheduler {
           throw new Error('Invalid telemetry contact route ownership');
         const now = this.#clock();
         if (now.paused) return null;
-        const route = this.#store.getVerifiedAdvertRoute({ publicKeyHex: selected.target,
-          observerPublicKey: admitted.observerPublicKey, now: now.wall,
-          windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius });
+        const route = this.#verifiedAdvertRoute(selected.target, admitted, now.wall);
         const excludedPaths = this.#invalidRoutePaths(selected.target, now.wall);
         if (route.status === 'available' && !excludedPaths.some(path => JSON.stringify(path) === JSON.stringify(route.path))) {
           routeCandidate = { path: route.path, evidenceSource: 'verified-advert' };
           return { ...route, evidenceSource: 'verified-advert' };
         }
-        if (route.status !== 'available' && !['no-fresh-verified-route', 'no-observer-adjacent-route'].includes(route.reason)) return route;
-        const topologyRoute = this.#store.getTopologyOutboundRoute({ observerPublicKey: admitted.observerPublicKey,
-          targetPublicKey: selected.target, now: now.wall, windowMs: this.#config.evidenceWindowMs,
-          radius: this.#config.radius, excludedPaths });
+        if (route.status !== 'available' && !['no-fresh-verified-route', 'no-observer-adjacent-route', 'route-exceeds-radius'].includes(route.reason)) return route;
+        const topologyRoute = this.#topologyRoute(selected.target, admitted, now.wall, excludedPaths);
+        if (route.reason === 'route-exceeds-radius' && topologyRoute.status !== 'available') return route;
         // Preserve unavailable decisions so preflight logs explain why no
         // route was chosen; the contact manager still accepts only `available`.
         if (topologyRoute.status === 'available') routeCandidate = { path: topologyRoute.path,

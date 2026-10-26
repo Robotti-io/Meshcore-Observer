@@ -75,7 +75,7 @@ test('bounded keyset evidence pages deduplicate direct/flood candidates and reje
   const f = fixture(); for (const byte of ['AC', 'AD', 'AE']) observe(f, byte.repeat(32));
   const first = f.store.queryTelemetryPollCandidates(query(1000, { limit: 2 }));
   assert.equal(first.candidates.length, 2); assert.equal(first.exhausted, false);
-  const next = f.store.queryTelemetryPollCandidates(query(1000, { afterPublicKey: first.nextCursor, limit: 2 }));
+  const next = f.store.queryTelemetryPollCandidates(query(1000, { afterPublicKey: first.nextCursor, afterDistance: first.nextDistance, limit: 2 }));
   assert.equal(next.candidates.length, 1); assert.equal(next.exhausted, true);
   for (const extra of [{ limit: 201 }, { afterPublicKey: ' OR 1=1' }, { radius: 64 }, { windowMs: 0 }, { password: 'SENTINEL' }])
     assert.throws(() => f.store.queryTelemetryPollCandidates(query(1000, extra)), /^Error: Invalid telemetry polling data$/);

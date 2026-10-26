@@ -24,7 +24,8 @@ test('20k scoped direct markers plus 10k flood paths preserve indexed keyset/exa
       for (let i = 0; i < 10000; i++) { const id = Number(path.run(randomUUID(), 'synthetic', SCOPE.observerPublicKey).lastInsertRowid);
         hop.run(id, '000000'); receipt.run(id, f.run.runId); }
       db.exec('COMMIT');
-      const args = { observer: SCOPE.observerPublicKey, now: 1000, cutoff: 1000 - WINDOW, radius: 2, after: '', limit: 200 };
+      const args = { observer: SCOPE.observerPublicKey, now: 1000, cutoff: 1000 - WINDOW, radius: 2,
+        after: '', afterDistance: 0, frontier: '[]', limit: 200 };
       const plan = db.prepare('EXPLAIN QUERY PLAN '+TELEMETRY_CANDIDATE_SQL).all(args).map(row => row.detail).join('\n');
       assert.match(plan, /idx_telemetry_direct_fresh/); assert.match(plan, /idx_topology_paths_observer_kind_at/);
       for (const width of [1, 2, 3]) assert.match(plan, new RegExp('idx_nodes_prefix_'+width));

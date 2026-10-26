@@ -1,6 +1,6 @@
 # v2.5.0 epic register
 
-Created: 2026-10-07. Current stage: all four epics and all child-issue breakdowns are captured; #35's focused reporting API slice is complete/closed, #36 T1–T5 dashboard integration is complete and issue #36 is closed, and #37 retains the remaining browser/device/load/RF validation.
+Created: 2026-10-07. Updated: 2026-10-26. Pillar 1 has fifteen completed children and active closeout #37; its epic #18 remains open pending the recorded gates. See [current evidence and next-pillar handoff](../../pillar-1-closeout.md). The next main pillar is Enhanced Bots (#20), starting with research #52 and decisions #53.
 
 **Issue labels:** [v2.5.0 conventions and verified mapping](issue-label-guide.md) for all four epics and 62 children.
 

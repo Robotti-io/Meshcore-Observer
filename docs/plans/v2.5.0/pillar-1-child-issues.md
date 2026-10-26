@@ -1,6 +1,20 @@
 # Pillar 1 child-issue register
 
-Captured: 2026-10-07. Parent: [epic #18](https://github.com/Robotti-io/Meshcore-Observer/issues/18). Updated: 2026-10-12. #33 remains complete/user-pushed at 5e5c372; #34 T1–T5 are reviewed/user-pushed through f7527e4. Approved T6 is complete locally: 46 new real-entrypoint offline scenarios cover all three components, guest/route failures, capture/bot compatibility, stop/crash/unclean recovery, both terminal-save failures and closed-backup restore. All five #34 code/fixture criteria are met; 104 files / 1,373 tests pass in both full functional and CI coverage runs, with lint/diff and unchanged coverage/latency gates passing. The initial sandbox transform-file failure is disclosed in the issue evidence. #34 is completed/project Done with its progress label removed; T6 changes await human review/push. #35 reporting APIs were pushed in `43d912d` and the issue is closed after 104 files / 1,386 tests passed. Polling stays default-off and no real credential/device/deployment is activated. #18 remains OPEN/In progress; #23 stays completed/Done. #36 T1–T5 are complete and issue #36 is closed, with dashboard integration and handoff evidence recorded; #37 retains manual browser, representative-load, and separately authorized device/RF/soak gates.
+**Latest follow-up — target exchanges:** Bounded trace/login/collection pacing,
+longer collection waits and post-exchange budget repayment are implemented
+locally under #34 follow-up evidence. Port 3003's next-start response ceiling is
+90 seconds. The exchange rollout/restart and new full soak remain #37; #34 stays
+closed and #18 stays open. See the [current exchange contract](../../telemetry-polling.md#bounded-tracelogincollection-exchanges--2026-10-26).
+
+**Latest follow-up — 2026-10-26:** The operator's neighbour-led inside-out
+polling pivot is implemented locally under #34's follow-up evidence. #37 now
+also requires rollout and a complete soak of the new distance/key ordering,
+due neighbour priority and neighbour-derived eligibility. Existing runtime
+snapshots predate this pivot. See the [current contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26).
+
+**Current closeout — 2026-10-26:** Fifteen of sixteen Pillar 1 children are complete (#22–#36). #37 is now active final validation; #18 remains open. The live telemetry and publishing/bot soaks are stable, and the all-time diagnostics defect has a focused repair. The operator enabled region publication on `okimesh1` and restarted port 3000 at 10:05:37 EDT. Broker acceptance of saved answer #2 is verified at 10:05:47 EDT; `okimesh2` remains opted out. Exact CoreScope reporter/target/original-time ingestion correlation is still pending. Final comparison/fault/browser evidence remains explicit. See the [current closeout report](../../pillar-1-closeout.md). Earlier dated notes below describe their original delivery point, not the present runtime.
+
+Captured: 2026-10-07. Updated: 2026-10-26. Parent #18 remains open; #22–#36 are closed and #37 is in progress. Current acceptance evidence is maintained in the closeout report rather than older per-phase totals.
 
 Progress on 2026-10-07: bot-reporting requirements, backend/history inclusion, identity limitations, and shared runtime-configurable retention have been resolved under #23 for #28. Node-advert recommendations are also agreed; #26 is in requirement resolution for direct-heard freshness and node-history retention, with implementation pending. P1-15 is now complete and closed; #37 remains the final integrated validation child. See [decision record](pillar-1-decisions.md) and the issue acceptance/progress checklists.
 

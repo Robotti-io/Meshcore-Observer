@@ -39,10 +39,10 @@ const direct = exact => `SELECT d.target_public_key AS targetPublicKey,1 AS dist
   JOIN observer_runs r ON r.id=d.run_id WHERE d.observer_public_key=:observer AND d.eligible=1
     AND r.wall_time_anomaly=0 AND n.type='REPEATER' AND d.target_public_key!=:observer
     AND d.received_at>:cutoff AND d.received_at<=:now
-    AND ${exact ? 'd.target_public_key=:target' : 'd.target_public_key>:after'}`;
+    ${exact ? 'AND d.target_public_key=:target' : ''}`;
 const candidateFlood = width => `SELECT n.public_key_hex AS targetPublicKey,h.distance,h.receivedAt
   FROM resolved h CROSS JOIN nodes n ON upper(substr(n.public_key_hex,1,${width * 2}))=+h.prefix
-  WHERE h.hashWidth=${width} AND n.type='REPEATER' AND n.public_key_hex!=:observer AND n.public_key_hex>:after
+  WHERE h.hashWidth=${width} AND n.type='REPEATER' AND n.public_key_hex!=:observer
     AND length(n.public_key_hex)=64 AND n.public_key_hex NOT GLOB '*[^0-9A-F]*'`;
 export const TELEMETRY_CANDIDATE_SQL = `WITH hops AS MATERIALIZED (
   SELECT h.hash_width AS hashWidth,h.prefix,min(h.distance) AS distance,max(p.last_received_at) AS receivedAt
@@ -51,13 +51,17 @@ export const TELEMETRY_CANDIDATE_SQL = `WITH hops AS MATERIALIZED (
 ), resolved AS MATERIALIZED (SELECT * FROM hops h WHERE CASE h.hashWidth
   ${[1, 2, 3].map(w => `WHEN ${w} THEN (SELECT count(*) FROM nodes WHERE upper(substr(public_key_hex,1,${w * 2}))=+h.prefix)`).join(' ')} END=1)
   SELECT targetPublicKey,min(distance) AS distance,max(receivedAt) AS receivedAt
-  FROM (${[direct(false), ...[1, 2, 3].map(candidateFlood)].join(' UNION ALL ')})
-  GROUP BY targetPublicKey ORDER BY targetPublicKey LIMIT :limit`;
+  FROM (${[direct(false), ...[1, 2, 3].map(candidateFlood), `SELECT json_extract(value,'$.targetPublicKey') AS targetPublicKey,
+    json_extract(value,'$.distance') AS distance,json_extract(value,'$.receivedAt') AS receivedAt FROM json_each(:frontier)`].join(' UNION ALL ')})
+  GROUP BY targetPublicKey
+  HAVING (:afterDistance=0 AND targetPublicKey>:after) OR (:afterDistance>0 AND
+    (min(distance)>:afterDistance OR (min(distance)=:afterDistance AND targetPublicKey>:after)))
+  ORDER BY distance,targetPublicKey LIMIT :limit`;
 export const TELEMETRY_ELIGIBILITY_SQL = `SELECT targetPublicKey,min(distance) AS distance,max(receivedAt) AS receivedAt
   FROM (${[direct(true), ...[1, 2, 3].map(flood)].join(' UNION ALL ')}) GROUP BY targetPublicKey`;
 
 /** Durable metadata on the one owned connection. No live grant, timer or RF queue. */
-export function createTelemetryPollState(db, requireRun, recordWithinTransaction) {
+export function createTelemetryPollState(db, requireRun, recordWithinTransaction, neighbourCandidates) {
   let highWater = 0;
   const durableClock = db.prepare(`SELECT max(coalesce((SELECT max(last_known_alive_at) FROM observer_runs),0),
     coalesce((SELECT max(last_policy_at) FROM telemetry_poll_state),0)) AS value`);
@@ -132,9 +136,17 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
       serverTimestamp: null, replayRunId: null, replayRequestId: null };
   }
   function eligible(input) {
-    return evidence.get({ observer: input.observerPublicKey, target: input.targetPublicKey,
+    const passive = evidence.get({ observer: input.observerPublicKey, target: input.targetPublicKey,
       now: input.now, cutoff: input.now - input.windowMs, radius: input.radius });
+    // Direct evidence is already the innermost layer; avoid hydrating reports
+    // on the ordinary direct reservation path.
+    if (passive?.distance === 1) return passive;
+    const frontier = neighbourCandidates({ observerPublicKey: input.observerPublicKey, now: input.now,
+      windowMs: input.windowMs, radius: input.radius }).filter(row => row.targetPublicKey === input.targetPublicKey);
+    const best = [passive, ...frontier].filter(Boolean).sort(compareCandidates)[0];
+    return best ? { targetPublicKey: best.targetPublicKey, distance: best.distance, receivedAt: best.receivedAt } : undefined;
   }
+  function compareCandidates(a, b) { return a.distance - b.distance || a.targetPublicKey.localeCompare(b.targetPublicKey); }
   function finish(state, end, policy, successful, unsupported = false, authFailure = false) {
     state.policy = conservative(state.policy, policy);
     state.lastPolicyAt = Math.max(state.lastPolicyAt, end);
@@ -170,10 +182,15 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
     candidates(input) {
       assertTelemetryState(telemetryCandidateQuerySchema, input);
       const limit = input.limit ?? 100, rollback = clock(input.now);
+      const frontier = rollback ? [] : neighbourCandidates({ observerPublicKey: input.observerPublicKey, now: input.now,
+        windowMs: input.windowMs, radius: input.radius });
       const rows = rollback ? [] : candidates.all({ observer: input.observerPublicKey, now: input.now,
-        cutoff: input.now - input.windowMs, radius: input.radius, after: input.afterPublicKey ?? '', limit });
+        cutoff: input.now - input.windowMs, radius: input.radius, after: input.afterPublicKey ?? '',
+        afterDistance: input.afterDistance ?? 0, frontier: JSON.stringify(frontier.map(({ targetPublicKey, distance, receivedAt }) =>
+          ({ targetPublicKey, distance, receivedAt }))), limit });
       return { candidates: rows.map(row => ({ ...row, outboundRouteVerified: false })), limit,
-        nextCursor: rows.at(-1)?.targetPublicKey ?? null, exhausted: rows.length < limit, clockRollback: rollback, effectiveNow: highWater };
+        nextCursor: rows.at(-1)?.targetPublicKey ?? null, nextDistance: rows.at(-1)?.distance ?? null,
+        exhausted: rows.length < limit, clockRollback: rollback, effectiveNow: highWater };
     },
     reserve(input) {
       assertTelemetryState(telemetryReservationSchema, input); const run = requireRun(input.runId);

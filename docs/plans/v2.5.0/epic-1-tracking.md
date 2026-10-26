@@ -1,8 +1,25 @@
 # [Epic][v2.5.0] Pillar 1: Improved Telemetry & Reporting
 
+**Latest follow-up — target exchanges:** Prompt trace/login/collection and
+post-exchange network cooldown are implemented locally at the operator's
+request. Collection waits are longer, while saved retry limits and guest proof
+remain authoritative. Port 3003's next-start response ceiling is 90 seconds.
+The earlier 14:25 neighbour-pivot restart predates this implementation; another
+operator restart and full soak are pending under #37. See the
+[exchange contract](../../telemetry-polling.md#bounded-tracelogincollection-exchanges--2026-10-26).
+
+**Latest strategy follow-up — 2026-10-26:** Neighbour-led inside-out polling is
+implemented locally at the operator's request: distance/key scans, due
+neighbour-first component selection, neighbour-only next-layer eligibility and
+shared validated route evidence. The radius counts the destination. This pivot
+awaits rollout and a complete new soak; #37/#18 remain open. See the
+[runtime contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26).
+
+**Current closeout — 2026-10-26:** Fifteen of sixteen Pillar 1 children are complete (#22–#36). #37 is now active final validation; #18 remains open. Final pivot CI passes 110 files / 1,530 tests with coverage above unchanged thresholds; lint passes. The live telemetry and publishing/bot processes are stable. The all-time diagnostics repair is deployed; the radius prefilter has run since the 13:36 restart, and the newer neighbour-led pivot awaits rollout and a complete new soak. The operator enabled region publication on `okimesh1` and restarted port 3000 at 10:05:37 EDT. Broker acceptance of saved answer #2 is verified at 10:05:47 EDT; `okimesh2` remains opted out. Exact CoreScope reporter/target/original-time ingestion correlation is still pending. Final comparison/fault/browser evidence remains explicit. See the [current closeout report](../../pillar-1-closeout.md). Earlier dated notes below describe their original delivery point, not the present runtime.
+
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Stage:** In progress — first-wave backend/coordination features and research are complete. #33 remains complete/user-pushed at 5e5c372; #34 T1–T5 are reviewed/user-pushed through f7527e4. Approved T6 is complete locally: 46 new real-entrypoint offline scenarios cover all three components, guest/route failures, capture/bot compatibility, stop/crash/unclean recovery, both terminal-save failures and closed-backup restore. All five #34 code/fixture criteria are met; 104 files / 1,373 tests pass in both full functional and CI coverage runs, with lint/diff and unchanged coverage/latency gates passing. The initial sandbox transform-file failure is disclosed in the issue evidence. #34 is completed/project Done with its progress label removed; T6 changes await human review/push. #35 reporting APIs were pushed in `43d912d`, validated with 104 files / 1,386 tests, and #35 is closed. #36 T1–T5 are complete and issue #36 is closed: the dashboard integration, accessibility pass, request-cost evidence, and operator guidance are recorded; #37 retains the manual browser, representative device/load, and RF/soak gates. Polling stays default-off and no real credential/device/deployment is activated. #18 remains OPEN/In progress; #23 stays completed/Done.
+**Stage:** Feature implementation complete; final validation #37 in progress. Fifteen children are closed. See the [2026-10-26 closeout report](../../pillar-1-closeout.md) for current tests, live evidence and remaining gates.
 Research records versioned capabilities and deployment limits. #29 delivers the validated shared internal seam with configurable limits, bounded ACK recovery, priority and idle lifecycle; the coordinator itself schedules no polls. #31 supplies the opt-in discovery producer; public reporting/dashboard, publication and telemetry remain in their owning issues.
 
 ## Operator outcome
@@ -42,7 +59,7 @@ Captured on 2026-10-07. All 16 children have scoped outcomes, dependencies, acce
 
 Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime and aggregate reporting need not wait for discovery-specific upstream availability. OBS-02 is split into P1-09 durable answers, P1-10 direct-heard querying, and P1-11 CoreScope publication; shared observations/scheduling have their own owning issues.
 
-## Dependencies and unresolved decisions
+## Historical implementation notes and decisions
 
 - Update 2026-10-10: #30/#31 remain complete/user-pushed through 54a920d (migration 15). #32 PUBLICATION-PLAN-01–05 and T1–T5 are complete locally under explicit 2026-10-10 planning/implementation authorization: 82 files / 1,010 tests, CI coverage and lint pass with unchanged gates. Strict default-off per-broker publication, atomic successful-answer staging, safe latest backfill, independent bounded QoS 1 delivery and durable retry/restart are delivered. #32 is completed/project Done; classification labels are preserved and its progress label is removed. Changes remain uncommitted for user review; no broker/ACL/CoreScope deployment or live RF is activated. #18/#23 remain open/In progress for remaining telemetry/reporting work; #37 retains separately authorized live/soak validation.
 
@@ -60,15 +77,15 @@ Start with P1-01 protocol research and P1-02 reporting/data decisions. Runtime a
 
 ## Epic acceptance
 
-- [ ] Supported telemetry is collected only for eligible repeaters with bounded scheduling and secure credential handling.
+- [x] Supported telemetry is collected only for eligible repeaters with bounded scheduling and secure credential handling.
 - [x] Passive path evidence is persisted without treating observed paths as guaranteed outbound routes.
 - [x] Aggregate bot reporting distinguishes usage and delivery, follows reporting ranges, and exposes approved sender-level information.
 - [x] Historical advert events and unique-node/current-inventory counts retain distinct meanings.
 - [x] Run history and resource samples survive restart; abrupt shutdown reporting does not invent an exact stop time.
 - [ ] OBS-02 satisfies its documented acceptance criteria: verified direct-heard eligibility, direct request/zero-hop reply, matched tags, durable successful answers, and validated CoreScope publication.
 - [x] Empty successful region answers remain distinct from unknown/failure; failures preserve prior successful answers and possibly incomplete declarations do not imply completeness.
-- [ ] Discovery and telemetry failures, full/missing contacts, disconnects, and broker failures do not disrupt packet capture or silently broaden routing.
-- [ ] Existing persisted metrics, pending replies, registry, and advert state survive migrations.
+- [x] Discovery and telemetry failures, full/missing contacts, disconnects, and broker failures do not disrupt packet capture or silently broaden routing.
+- [x] Existing persisted metrics, pending replies, registry, and advert state survive migrations.
 - [ ] Automated checks, authorized hardware/RF validation, retention/query-performance measurements, and operator documentation are complete.
 
 ## Delivery priority
@@ -83,7 +100,7 @@ Recommended first main delivery pillar. Establish runtime measurements and obser
 
 ## Planning status and approval boundaries
 
-This v2.5.0 epic has 16 children; #28/#26/#24/#25/#27 and #22/#29/#30 are complete. #30/#31 remain complete/user-pushed through 54a920d (migration 15). #32 PUBLICATION-PLAN-01–05 and T1–T5 are complete locally under explicit 2026-10-10 planning/implementation authorization: 82 files / 1,010 tests, CI coverage and lint pass with unchanged gates. Strict default-off per-broker publication, atomic successful-answer staging, safe latest backfill, independent bounded QoS 1 delivery and durable retry/restart are delivered. #32 is completed/project Done; classification labels are preserved and its progress label is removed. #36 is closed after T1–T5 completion with 104 files / 1,393 tests passing in both standard and CI runs, lint passing, dashboard reporting connected, and handoff evidence recorded. The implementation changes have been pushed; no broker/ACL/CoreScope deployment or live RF is activated. #18/#23 remain open/In progress for remaining telemetry/reporting work; #37 retains manual browser, representative-load, and live/soak validation. Presentation/offline assets/release validation remain in their owning issues.
+All feature/research/decision children #22–#36 are closed. #37 owns the remaining release acceptance. The current closeout report records automated recovery/migration proof, the two separate live instances, CoreScope scope evidence, disabled region publication, baseline limits and browser/fault follow-ups. No acceptance gate is silently waived and no native project status is claimed without readback.
 
 Set active work to `In progress` in the [release project's Status field](https://github.com/orgs/Robotti-io/projects/1), alongside the supplemental `status:in-progress` issue label. Project #1 statuses for #18, #22, #23, and #26 were updated and verified on 2026-10-07. Check off completed decision/research acceptance items as evidence is recorded, and close each issue as completed only when its full deliverable and validation are satisfied. Verify project Status is `Done`, remove the progress label on closure, and synchronize this epic's child checklist and local register. Epic completion requires completion of its required children and epic acceptance outcomes.
 

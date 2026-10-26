@@ -1,5 +1,7 @@
 # Pillar 3 child-issue register
 
+**2026-10-26 handoff:** Pillar 3 is next in the agreed Pillar 1 → Pillar 3 → Pillar 2 → Pillar 4 sequence. #52 is the first ready research task (#22 is complete), then #53 decisions, followed by #54/#55 identity/targeting and #56 lifecycle foundations. Pillar 1 final validation #37 remains open; no bot implementation or live scoped send is claimed by this handoff. [Closeout evidence](../../pillar-1-closeout.md).
+
 Captured: 2026-10-07. Parent: [epic #20](https://github.com/Robotti-io/Meshcore-Observer/issues/20). Status: 14 child issues captured and linked; implementation planning pending.
 
 Each issue includes scope, explicit dependencies, acceptance criteria, validation expectations, existing seams, source requirements, and approval decisions. All carry the release/owning-pillar labels and appropriate work-type/configuration/security/documentation labels from the [label guide](issue-label-guide.md).

@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path';
 import { MetricsServer } from '../../src/web/metrics-server.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
+import { startTelemetryRun, telemetryDiagnostic } from '../fixtures/telemetry-store.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web');
 
@@ -161,6 +162,31 @@ test('GET /api/metrics returns the current ServiceHealth snapshot as JSON', asyn
     const body = await res.json();
     assert.equal(body.packetsReceived, 3);
     assert.equal(body.packetsDecoded, 2);
+  });
+});
+
+for (const populated of [false, true]) test(`all-time telemetry diagnostics returns a bounded ${populated ? 'populated' : 'empty'} report`, async () => {
+  const metricsStore = new MetricsStore({ dbPath: ':memory:' });
+  if (populated) {
+    const run = startTelemetryRun(metricsStore);
+    metricsStore.recordTelemetryRequestDiagnostic(telemetryDiagnostic(run));
+    metricsStore.recordTelemetryRequestDiagnostic(telemetryDiagnostic(run, { completedAt: 2001 }));
+  }
+  await withServer({ metricsStore }, async baseUrl => {
+    const response = await fetch(`${baseUrl}/api/metrics/telemetry/diagnostics?range=all&limit=1`);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.total, populated ? 2 : 0);
+    assert.equal(body.diagnostics.length, populated ? 1 : 0);
+    assert.equal(body.limit, 1);
+    assert.equal(body.coverage.historyCompleteness, 'unknown');
+    if (populated) {
+      assert.equal(body.start, 1001);
+      assert.equal(body.diagnostics[0].completedAt, 2001);
+      const next = await (await fetch(`${baseUrl}/api/metrics/telemetry/diagnostics?range=all&limit=1&offset=1`)).json();
+      assert.equal(next.total, 2);
+      assert.equal(next.diagnostics[0].completedAt, 1001);
+    }
   });
 });
 

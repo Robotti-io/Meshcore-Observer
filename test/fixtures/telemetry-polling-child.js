@@ -98,7 +98,9 @@ TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
   const write = { at: Date.now(), generation: connections.indexOf(this) + 1, code, component };
   if (component) {
     const reservation = store.getTelemetryPollState({ observerPublicKey: identity, targetPublicKey, variant: variants().find(v => v.component === component) });
-    if (reservation?.reason !== 'reserved' || reservation.reservedAt !== Date.now()) throw Error('Physical send lacks durable reservation');
+    const reservedAt = component === 'guest-login'
+      ? writes.findLast(write => write.code === Constants.CommandCodes.SendTracePath)?.at ?? Date.now() : Date.now();
+    if (reservation?.reason !== 'reserved' || reservation.reservedAt !== reservedAt) throw Error('Physical send lacks durable reservation');
     write.requestId = reservation.requestId;
   }
   writes.push(write); record(write);

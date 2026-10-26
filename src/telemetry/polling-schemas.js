@@ -14,7 +14,9 @@ export const TELEMETRY_POLL_DEFAULTS = Object.freeze({
   refreshIntervalMs: 24 * 3600000, startupDelayMs: 75000, tickIntervalMs: 10000,
   preflightTimeoutMs: 5000, inventoryTimeoutMs: 30000, sessionTtlMs: 10 * 60000,
   retryBaseMs: 15 * 60000, retryMaxMs: 360 * 60000, maxAttempts: 3,
-  authCooldownMs: 24 * 3600000
+  authCooldownMs: 24 * 3600000,
+  exchangeMaxRequests: 6, exchangeWindowMs: 5 * 60000, exchangeStepMs: 1000,
+  exchangeRestMs: 60000, responseWaitMs: 60000
 });
 export const TELEMETRY_POLL_NUMERIC_SETTINGS = Object.freeze([
   ['radius', 'RADIUS', 1, 1, 63],
@@ -28,7 +30,12 @@ export const TELEMETRY_POLL_NUMERIC_SETTINGS = Object.freeze([
   ['retryBaseMs', 'RETRY_BASE_MINUTES', 60000, 1, 10080],
   ['retryMaxMs', 'RETRY_MAX_MINUTES', 60000, 1, 10080],
   ['maxAttempts', 'MAX_ATTEMPTS', 1, 1, 10],
-  ['authCooldownMs', 'AUTH_COOLDOWN_HOURS', 3600000, 1, 8760]
+  ['authCooldownMs', 'AUTH_COOLDOWN_HOURS', 3600000, 1, 8760],
+  ['exchangeMaxRequests', 'EXCHANGE_MAX_REQUESTS', 1, 1, 6],
+  ['exchangeWindowMs', 'EXCHANGE_WINDOW_SECONDS', 1000, 30, 600],
+  ['exchangeStepMs', 'EXCHANGE_STEP_SECONDS', 1000, 1, 10],
+  ['exchangeRestMs', 'EXCHANGE_REST_SECONDS', 1000, 10, 3600],
+  ['responseWaitMs', 'RESPONSE_WAIT_SECONDS', 1000, 5, 120]
 ].map(([field, suffix, scale, min, max]) => Object.freeze({
   field, key: `PACKETCAPTURE_TELEMETRY_POLL_${suffix}`, scale, min, max
 })));

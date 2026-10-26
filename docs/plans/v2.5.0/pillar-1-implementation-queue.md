@@ -1,5 +1,23 @@
 # Pillar 1 implementation planning queue
 
+**Latest follow-up — target exchanges:** The approved trace/login/collection
+exchange is implemented locally. Roll out this newer source and the 90-second
+local response ceiling to port 3003, then validate prompt collection and
+post-exchange settling. The earlier neighbour-pivot restart is already evidenced;
+it does not deploy this follow-up. Existing retry deadlines and databases are
+preserved. #37/#18 remain open.
+
+**Latest follow-up — 2026-10-26:** Neighbour-led inside-out polling is implemented
+locally at the operator's request. Roll out the pivot to port 3003 without
+resetting its database, then collect a complete soak cycle before closing #37.
+The [runtime contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26)
+describes distance/key scans, due neighbour priority, next-layer eligibility and
+unchanged owner checks. Earlier baseline and startup evidence predates the pivot.
+
+**Current closeout — 2026-10-26:** Fifteen of sixteen Pillar 1 children are complete (#22–#36). #37 is now active final validation; #18 remains open. The live telemetry and publishing/bot soaks are stable, and the all-time diagnostics defect has a focused repair. The operator enabled region publication on `okimesh1` and restarted port 3000 at 10:05:37 EDT. Broker acceptance of saved answer #2 is verified at 10:05:47 EDT; `okimesh2` remains opted out. Exact CoreScope reporter/target/original-time ingestion correlation is still pending. Final comparison/fault/browser evidence remains explicit. See the [current closeout report](../../pillar-1-closeout.md). Earlier dated notes below describe their original delivery point, not the present runtime.
+
+**Next closeout actions:** roll out neighbour-led polling to port 3003 and record a complete new soak cycle; correlate the broker-accepted region publication with downstream ingestion; finish comparable operational/fault/browser evidence; then close #37/#18. Pillar 3 begins with #52 research, followed by #53 decisions.
+
 Updated: 2026-10-12. Parent: [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18).
 
 The first backend wave and passive topology are complete. There are **zero prerequisite questions before drafting the next plan**. Run/resource/topology semantics are settled; the remaining high-level #23 discussions concern telemetry/region behavior. Concrete storage/configuration/API decisions are recorded in their owning plan and reviewed when picked up.

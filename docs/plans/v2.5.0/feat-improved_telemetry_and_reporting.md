@@ -1,8 +1,24 @@
 # Feature: Improved Telemetry & Reporting
 
+**Target-exchange follow-up — 2026-10-26:** The operator approved keeping
+successful trace/login and due collections together, then waiting for the
+network afterward. The local implementation caps and accounts for every RF
+attempt, extends collection waits and preserves persisted bounded retries.
+The [exchange contract](../../telemetry-polling.md#bounded-tracelogincollection-exchanges--2026-10-26)
+records pacing, timeout ceilings, fairness and rollback mode. A new operator
+restart and full soak are pending under #37.
+
+**Telemetry strategy pivot — 2026-10-26:** The operator requested neighbour-led
+inside-out polling. The local implementation now visits nearer evidenced
+layers first, prioritizes due neighbour collection and uses fresh decoded
+reports from proven reporters to grow eligible paths within the configured
+radius. The [runtime contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26)
+records the safeguards and limits. Deployment and a complete soak of this
+strategy remain part of #37; previous soak data describes the earlier strategy.
+
 **GitHub epic:** [#18](https://github.com/Robotti-io/Meshcore-Observer/issues/18)
 
-**Child issue register:** [Pillar 1 breakdown — 16 issues](pillar-1-child-issues.md), updated 2026-10-11. #32 is complete/user-pushed at bbe05f6. #33 T1–T4 are user-pushed through 13536b7; approved T5 and all four code/fixture acceptance criteria are complete locally on 2026-10-10. Twenty-one new real-entrypoint offline scenarios verify schema 13/14/15 upgrades, clean/abrupt restart, closed-backup restore, shared configured retention/source-run protection, startup failures and passive capture compatibility. Full single-worker functional/coverage runs pass 93 files / 1,122 tests; coverage, lint, diff and unchanged cost gates pass. Telemetry coverage p95 is 4.629ms saves and 47.169ms slowest bounded read. Schema stays 16 and collection is not activated. #33 is completed/native project Done with its progress label removed; #18/#23 remain OPEN/In progress for polling/reporting choices. #34 remains the polling owner; #35 reporting APIs were pushed in `43d912d` and the issue is closed after 104 files / 1,386 tests passed; #36 T1–T5 are complete and issue #36 is closed, with dashboard integration and handoff evidence recorded; #37 retains manual browser, representative-load, and deployed-device/RF validation. See the [implementation queue](pillar-1-implementation-queue.md).
+**Child issue register:** [Pillar 1 — 16 issues](pillar-1-child-issues.md). Updated 2026-10-26: #22–#36 are complete/closed; #37 final validation and #18 remain open. Implementation, regression tests and two live soaks provide evidence; remaining publication provenance, comparison/fault/browser gates are recorded in the [closeout report](../../pillar-1-closeout.md).
 
 **Offline/reliability direction — 2026-10-08:** Core local observation, durable lookup and insight must work without internet/cloud forwarding. Retain learned data by default; deliberate operator cleanup preserves identity/discovery and documents reporting limits. Favor transactional migration/writes, fail-fast configuration, observable failures and meaningful recovery/outage/storage tests. Existing chart asset dependence remains #42/#83; integrated local backend outage/recovery validation belongs to #37. This direction guides the remaining reviewed implementation plans without claiming queued features complete.
 

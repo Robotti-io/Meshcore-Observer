@@ -50,7 +50,8 @@ function environment({ enabled = true, components, profiles = false, bots = fals
     PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS: '1000', PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: '0',
     PACKETCAPTURE_BOT_REPLY_QUIET_MS: '0', PACKETCAPTURE_CONNECTION_RETRY_DELAY: '10', PACKETCAPTURE_CONNECTION_RETRY_DELAY_MAX: '10',
     PACKETCAPTURE_TELEMETRY_POLL_STARTUP_DELAY_SECONDS: '10', PACKETCAPTURE_TELEMETRY_POLL_TICK_SECONDS: '1',
-    PACKETCAPTURE_TELEMETRY_POLL_PREFLIGHT_SECONDS: '1', PACKETCAPTURE_TELEMETRY_POLL_INTERVAL_HOURS: '1' });
+    PACKETCAPTURE_TELEMETRY_POLL_PREFLIGHT_SECONDS: '1', PACKETCAPTURE_TELEMETRY_POLL_INTERVAL_HOURS: '1',
+    PACKETCAPTURE_TELEMETRY_POLL_EXCHANGE_MAX_REQUESTS: '1' });
   if (enabled) Object.assign(env, { PACKETCAPTURE_TELEMETRY_POLL_ENABLED: 'true',
     PACKETCAPTURE_TELEMETRY_POLL_CONFIG_FILE: policy, PACKETCAPTURE_TELEMETRY_POLL_SECRETS_FILE: secrets });
   return { dir, env, targetPublicKey, signer, advertRaw: signedAdvertPacket(signer.payload({ name: null })).raw };
@@ -78,6 +79,27 @@ async function launch(f, options = {}) {
 const physical = s => s.writes.filter(w => [26, 50].includes(w.code));
 const onlySensors = { status: false, sensors: true, neighbours: false };
 async function due(child) { await child.ask({ action: 'advert' }); await child.ask({ action: 'due' }); }
+
+test('default target exchange collects all due components promptly after trace/login with one-minute inter-target pacing', async () => {
+  const f = environment({ profiles: true });
+  delete f.env.PACKETCAPTURE_TELEMETRY_POLL_EXCHANGE_MAX_REQUESTS; // exercise the real startup default
+  f.env.PACKETCAPTURE_REMOTE_REQUEST_MIN_INTERVAL_MS = '60000';
+  f.env.PACKETCAPTURE_REMOTE_REQUEST_MAX_PER_MINUTE = '1';
+  f.env.PACKETCAPTURE_REMOTE_REQUEST_RESPONSE_TIMEOUT_MAX_MS = '120000';
+  const child = await launch(f); await due(child);
+  const saved = await child.ask({ action: 'tick', ms: 65000 });
+  const sent = saved.writes.filter(w => [36, 26, 50].includes(w.code));
+  assert.deepEqual(sent.map(w => w.code), [36, 26, 50, 50, 50], JSON.stringify(saved.diagnostics));
+  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors']);
+  for (let i = 1; i < sent.length; i++) {
+    assert.ok(sent[i].at - sent[i - 1].at >= 1000);
+    assert.ok(sent[i].at - sent[i - 1].at < 10000, 'dependent exchange steps must not wait for the sixty-second rate limit');
+  }
+  assert.equal(saved.observations.total, 3); assert.equal(saved.outcomes.total, 3);
+  assert.ok(saved.diagnostics.diagnostics.filter(d => d.operation !== 'guest-login' && d.status === 'completed')
+    .every(d => d.responseTimeoutMs === 60000));
+  const ended = await child.stop(); assert.doesNotMatch(ended.output + JSON.stringify(saved), /PRIVATE-ONLY7|fixtureGuest/);
+});
 function read(f, callback) {
   const store = new MetricsStore({ dbPath: f.env.PACKETCAPTURE_METRICS_UI_DB_PATH });
   try { return callback(store); } finally { store.close(); }
@@ -117,7 +139,7 @@ for (const profiles of [false, true]) test(`real opt-in entrypoint stores all th
   const f = environment({ profiles }), child = await launch(f); await due(child);
   let saved;
   for (let n = 0; n < 4; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
-  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'status', 'sensors', 'neighbours'],
+  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors'],
     JSON.stringify({ writes: saved.writes, diagnostics: saved.diagnostics }));
   assert.equal(saved.auth.outcomes[0].record.status, 'completed'); assert.equal(saved.observations.total, 3); assert.equal(saved.outcomes.total, 3);
   const loginDiagnostic = saved.diagnostics.diagnostics.find(row => row.operation === 'guest-login');
@@ -160,7 +182,10 @@ for (const contact of ['flood', 'out-of-radius', 'collision', 'unsupported']) te
 });
 test('stale and relayed-only adverts cannot create direct eligibility or blind probing through the real entrypoint', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f);
-  await child.ask({ action: 'advert', raw: signedAdvertPacket(f.signer.payload(), { hops: ['AA', 'BB', 'CC'] }).raw });
+  // A randomly generated target must not accidentally appear as an eligible
+  // relay in this scenario's one-byte path evidence.
+  const hops = ['AA', 'BB', 'CC', 'DD'].filter(prefix => prefix !== f.targetPublicKey.slice(0, 2)).slice(0, 3);
+  await child.ask({ action: 'advert', raw: signedAdvertPacket(f.signer.payload(), { hops }).raw });
   const relayed = await child.ask({ action: 'tick', ms: 10000 }); assert.equal(relayed.candidates.candidates.length, 0); assert.equal(physical(relayed).length, 0);
   await child.ask({ action: 'advert' }); await child.ask({ action: 'due' });
   const stale = await child.ask({ action: 'jump', ms: 73 * 3600000 });

@@ -8,6 +8,7 @@ import { createTelemetryFixture, startTelemetryRun, TELEMETRY_OBSERVER as OBSERV
 import { observe, authRecord, AUTH, SENSOR } from '../fixtures/telemetry-poll.js';
 import { telemetryBytes, telemetryWire } from '../fixtures/telemetry-wire.js';
 import { createRunShutdown } from '../../src/metrics/run-history.js';
+import { frontierNode, neighbourReport } from '../fixtures/neighbour-frontier.js';
 
 const HOUR = 3600000, DAY = 24 * HOUR, active = [];
 function rig({ enabled = true, all = false, seed = true, ...settings } = {}) {
@@ -71,6 +72,13 @@ function rig({ enabled = true, all = false, seed = true, ...settings } = {}) {
   f.history = () => f.store.queryTelemetryOutcomes({ start: 0, end: Number.MAX_SAFE_INTEGER });
   return f;
 }
+
+function signedRoute(f, target, path, receivedAt = f.clock.wall) {
+  f.store.recordVerifiedAdvert({ publicKeyHex: target, name: null, type: 'REPEATER', receivedAt,
+    hopCount: path.length, eventDigest: randomUUID().replaceAll('-', '').repeat(2), routeEvidence: {
+      hashWidth: 2, pathHashesHex: path, flags: 2, advertTimestamp: 0, lat: null, lon: null
+    } });
+}
 afterEach(async () => {
   for (const f of active.splice(0)) { f.scheduler.stop(); f.release?.();
     try { await f.scheduler.drain(); } catch { /* Explicitly asserted failure fixtures. */ }
@@ -81,6 +89,40 @@ afterEach(async () => {
 test('default-off performs no scheduling, recovery, login or query', async () => {
   const f = rig({ enabled: false }); const query = vi.spyOn(f.store, 'queryTelemetryPollCandidates');
   await f.start(); await f.tick(DAY, 10000); assert.deepEqual(f.calls, []); assert.equal(query.mock.calls.length, 0);
+});
+
+test('a passively nearby target with an over-radius signed route does not take the next reachable target\'s request turn', async () => {
+  const f = rig(), other = 'EF'.repeat(32);
+  observe(f, other); f.due(other); signedRoute(f, TARGET, ['1100', '2200']);
+  assert.equal(f.store.getTelemetryEligibility({ observerPublicKey: OBSERVER, targetPublicKey: TARGET,
+    now: f.clock.wall, windowMs: f.config.evidenceWindowMs, radius: f.config.radius }).distance, 1);
+  await f.start();
+  assert.deepEqual(f.sent.map(x => [x.targetPublicKey, x.operation]), [[other, 'guest-login']]);
+  assert.ok(f.calls.every(x => x.targetPublicKey === other));
+});
+
+test('forty over-radius routes take bounded scan pages instead of forty full request turns', async () => {
+  const f = rig();
+  for (let i = 0; i < 40; i++) {
+    const target = (0x1000 + i).toString(16).toUpperCase() + 'A0'.repeat(30);
+    observe(f, target); f.due(target); signedRoute(f, target, ['1100', '2200']);
+  }
+  const scan = vi.spyOn(f.store, 'queryTelemetryPollCandidates');
+  await f.start(); assert.equal(f.calls.length, 0);
+  await f.tick(); assert.equal(f.calls.length, 0);
+  await f.tick();
+  assert.deepEqual(f.sent.map(x => [x.targetPublicKey, x.operation]), [[TARGET, 'guest-login']]);
+  assert.equal(scan.mock.calls.length, 3);
+  assert.ok(scan.mock.calls.every(([query]) => query.limit === 16));
+  await f.tick(); assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'telemetry']);
+});
+
+test('a newly shorter signed route restores scheduling without discarding saved component deadlines', async () => {
+  const f = rig(); signedRoute(f, TARGET, ['1100', '2200']); const before = f.state();
+  await f.start(); assert.equal(f.calls.length, 0); assert.deepEqual(f.state(), before);
+  signedRoute(f, TARGET, [], f.clock.wall + 1); await f.tick();
+  assert.deepEqual(f.sent.map(x => x.operation), ['guest-login']);
+  await f.tick(); assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'telemetry']);
 });
 test('one incremental login then guest sensor reply persists original owned context without brokers or dashboard', async () => {
   const f = rig(); await f.start(); assert.equal(f.sent[0].operation, 'guest-login');
@@ -96,8 +138,45 @@ test('all components advance one physical request per tick without a three-query
   const status = { component: 'status', params: {}, profile: f.config.statusProfile };
   const neighbours = { component: 'neighbours', params: f.config.neighbourParams };
   f.due(TARGET, [status, neighbours]); await f.start(); await f.tick(6000, 6000);
-  assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'status', 'telemetry', 'neighbours']);
+  assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'neighbours', 'status', 'telemetry']);
   assert.equal(f.history().outcomes.length, 3); assert.equal(f.history().outcomes.filter(x => x.status === 'partial').length, 2);
+});
+
+test('a nearer layer precedes a lower-key outer target, and due neighbours precede other components without starving them', async () => {
+  const f = rig({ all: true }), far = frontierNode(f, '1100');
+  f.store.recordTopologyObservation({ runId: f.run.runId, observerPublicKey: OBSERVER, receivedAt: 900,
+    route: 1, kind: 'flood-traversed', payloadVersion: 0, hashWidth: 2, prefixes: ['1100', TARGET.slice(0, 4)],
+    transportCodes: null, containsRepeatedPrefix: false });
+  const variants = [{ component: 'neighbours', params: f.config.neighbourParams },
+    { component: 'status', params: {}, profile: f.config.statusProfile }, SENSOR];
+  f.due(TARGET, variants); f.due(far, variants);
+  await f.start(); await f.tick();
+  assert.deepEqual(f.sent.slice(0, 2).map(r => [r.targetPublicKey, r.operation]), [[TARGET, 'guest-login'], [TARGET, 'neighbours']]);
+  await f.tick(12000, 12000);
+  assert.deepEqual(f.sent.filter(r => r.targetPublicKey === TARGET).map(r => r.operation), ['guest-login', 'neighbours', 'status', 'telemetry']);
+  assert.ok(f.sent.some(r => r.targetPublicKey === far), 'outward layers get turns before the cursor wraps');
+});
+
+test('a neighbour-only target is polled over a bounded alternative despite its longer signed advert route', async () => {
+  const f = rig(), anchor = frontierNode(f, 'E85C'), target = frontierNode(f, '1100');
+  neighbourReport(f, anchor, [target]); f.due(target);
+  signedRoute(f, target, ['2200', '3300']);
+  const providerResults = [];
+  for (const method of ['tryTelemetryRequest', 'tryGuestLogin']) {
+    const original = f.coordinator[method];
+    f.coordinator[method] = async (request, config, hooks) => {
+      providerResults.push(hooks.getContactRoute({ ...request, operation: method === 'tryGuestLogin' ? 'guest-login' : request.operation,
+        params: request.params ?? {}, observerPublicKey: OBSERVER, generation: 1 }));
+      return original(request, config, hooks);
+    };
+  }
+  // Keep the pre-existing direct target out of this turn without removing its saved deadlines.
+  f.config.excludedTargets = [TARGET]; f.scheduler = f.make();
+  await f.start(); await f.tick();
+  assert.deepEqual(f.sent.map(r => [r.targetPublicKey, r.operation]), [[target, 'guest-login'], [target, 'telemetry']]);
+  assert.ok(providerResults.length >= 2);
+  assert.ok(providerResults.every(r => r.status === 'available' && r.evidenceSource === 'telemetry-neighbours'));
+  assert.deepEqual(providerResults[0].path, ['E85C']);
 });
 
 test('successful login continues its exact neighbour query on the next tick before scanning other targets', async () => {

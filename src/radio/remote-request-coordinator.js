@@ -69,6 +69,7 @@ export class RemoteRequestCoordinator {
   #guestSessions;
   #guestScope = null;
   #sessionOnChange = null;
+  #exchange = null;
 
   #responseTimeout(current, estimatedTimeoutMs) {
     const routed = Boolean(current.telemetry);
@@ -77,7 +78,8 @@ export class RemoteRequestCoordinator {
     // request/response exchange. Leave a hop-scaled window for both directions.
     const hopAllowanceMs = routed ? 4000 + hopCount * 5000 : 1000;
     const timeoutMs = Math.min(this.#limits.responseTimeoutMaxMs,
-      Math.max(estimatedTimeoutMs + 1000, hopAllowanceMs));
+      Math.max(estimatedTimeoutMs + 1000, hopAllowanceMs,
+        current.exchange && !current.telemetry.login ? current.telemetry.config.responseWaitMs : 0));
     current.responseTimeoutMs = timeoutMs;
     return timeoutMs;
   }
@@ -116,6 +118,45 @@ export class RemoteRequestCoordinator {
 
   /** Internal producer demand, coalesced into two expiring slots. */
   noteBackgroundDemand(input) { this.#background.note(input); }
+
+  /** A private target/generation-scoped pacing capability, never guest authority. */
+  beginTelemetryExchange(request, config) {
+    assertOwner(ownerSchemas.telemetryGuestRequestSchema, request);
+    if (!pollingValid(config) || !config.enabled) throw new Error('Invalid telemetry exchange configuration');
+    if (this.#stopped || this.#current || this.#commandPending || this.#exchange
+      || config.exchangeMaxRequests < 2 || typeof this.#budget.beginExchange !== 'function') return null;
+    const snapshot = this.#radio.getConnectionSnapshot();
+    if (!ownerValid(ownerSchemas.telemetryOwnerSnapshotSchema, snapshot) || !snapshot.ready
+      || snapshot.generation === null || !snapshot.observerPublicKey) return null;
+    if (this.#recoveryFailed && !this.#clearRecovery()) return null;
+    this.#background.note({ source: 'telemetry' });
+    if (!this.#background.allowed('telemetry')) return null;
+    if (this.#admissionReason()) return null;
+    const token = this.#budget.beginExchange({ maxRequests: config.exchangeMaxRequests,
+      windowMs: config.exchangeWindowMs, stepMs: config.exchangeStepMs, restMs: config.exchangeRestMs });
+    if (!token) return null;
+    this.#exchange = { token, config, target: request.targetPublicKey, generation: snapshot.generation,
+      observer: snapshot.observerPublicKey.toUpperCase() };
+    this.#watchGuestSessions({ ...snapshot, observerPublicKey: snapshot.observerPublicKey.toUpperCase() });
+    return token;
+  }
+
+  endTelemetryExchange(token) {
+    if (this.#exchange?.token !== token) return;
+    this.#budget.endExchange(token); this.#exchange = null;
+  }
+
+  hasTelemetryExchangeCapacity(token) {
+    return Boolean(this.#exchange && this.#exchange.token === token && this.#budget.hasExchangeCapacity(token));
+  }
+
+  #matchingExchange(telemetry, request, snapshot) {
+    const e = this.#exchange;
+    return telemetry && e && e.config === telemetry.config && e.target === request.targetPublicKey
+      && e.generation === snapshot.generation && e.observer === snapshot.observerPublicKey?.toUpperCase() ? e : null;
+  }
+
+  #backgroundAllowed(current) { return Boolean(current.exchange) || this.#background.allowed(current.source); }
 
   async tryGuestLogin(request, config, hooks) {
     assertOwner(ownerSchemas.telemetryGuestRequestSchema, request);
@@ -240,12 +281,14 @@ export class RemoteRequestCoordinator {
         if (this.#current !== current || current.signal?.aborted || !this.#currentScope(current)) {
           return { status: 'failed', reason: 'trace-disconnected' };
         }
-        if (this.#admissionReason()) return { status: 'deferred', reason: 'foreground' };
-        if (current.source && !this.#background.allowed(current.source))
+        if (this.#admissionReason(current)) return { status: 'deferred', reason: 'foreground' };
+        if (current.source && !this.#backgroundAllowed(current))
           return { status: 'deferred', reason: 'background-turn' };
         if (!synchronousPermission(current.reserve, current.context))
           return { status: 'deferred', reason: 'reservation-unavailable' };
         current.traceReserved = true;
+        if (current.exchange && !this.#budget.recordAttempt(current.exchange.token))
+          return { status: 'deferred', reason: 'rate-limited' };
         current.traceDispatchedAt = this.#wallNow();
         timer = setTimeout(() => finish({ status: 'failed', reason: 'ack-timeout' }), this.#limits.ackTimeoutMs);
         await connection.sendToRadioFrame(frame);
@@ -280,6 +323,7 @@ export class RemoteRequestCoordinator {
   }
 
   #clearGuestSessions() {
+    if (this.#exchange) this.endTelemetryExchange(this.#exchange.token);
     this.#guestSessions.clear(); this.#guestScope = null;
     if (this.#sessionOnChange) {
       this.#radio.off('radio.connected', this.#sessionOnChange);
@@ -345,7 +389,8 @@ export class RemoteRequestCoordinator {
     if (!snapshot.ready) return this.#defer('not-ready');
     if ((anonymous || telemetry) && this.#pausedGeneration === snapshot.generation) return this.#defer('preflight-paused');
     if (anonymous && !targetValid({ targetPublicKey: snapshot.observerPublicKey?.toUpperCase() })) return this.#defer('not-ready');
-    const admission = this.#admissionReason();
+    const exchange = this.#matchingExchange(telemetry, descriptor, snapshot);
+    const admission = this.#admissionReason({ exchange });
     if (admission) return this.#defer(admission);
     if (!this.#airtime.canRunWhenQuiet()) return this.#defer('quiet-air');
     try { if (!synchronousPermission(isEligible, descriptor, snapshot)) {
@@ -370,7 +415,7 @@ export class RemoteRequestCoordinator {
     const context = Object.freeze({ requestId: descriptor.requestId, targetPublicKey: descriptor.targetPublicKey,
       operation: descriptor.operation, params: descriptor.params,
       generation: snapshot.generation, observerPublicKey: anonymous || telemetry ? snapshot.observerPublicKey.toUpperCase() : snapshot.observerPublicKey });
-    const current = { descriptor, expectedRoute, isEligible, reserve, anonymous, telemetry, source, prepared, context,
+    const current = { descriptor, expectedRoute, isEligible, reserve, anonymous, telemetry, source, prepared, context, exchange,
       phase: 'queued', tag: null, route: null, timer: null, deadline: null, expire: null,
       connection: null, signal: null, onAbort: null, onFrame: null, resolveCompletion,
       releaseCommand, acknowledgement, completion, onChange: null,
@@ -437,10 +482,10 @@ export class RemoteRequestCoordinator {
     return true;
   }
 
-  #admissionReason() {
+  #admissionReason(current) {
     try { if (this.#hasForegroundWork() !== false) return 'foreground'; }
     catch { return 'foreground'; } // Unknown priority state defers without RF/log storms.
-    return this.#budget.canAttempt() ? null : 'rate-limited';
+    return this.#budget.canAttempt(current?.exchange?.token) ? null : 'rate-limited';
   }
 
   #time() {
@@ -485,9 +530,9 @@ export class RemoteRequestCoordinator {
       this.#finish(current, 'failed', 'disconnected');
       return;
     }
-    const admission = this.#admissionReason();
+    const admission = this.#admissionReason(current);
     if (admission) { this.#finish(current, 'deferred', admission); return; }
-    if (current.source && !this.#background.allowed(current.source)) {
+    if (current.source && !this.#backgroundAllowed(current)) {
       this.#finish(current, 'deferred', 'background-turn'); return;
     }
     if (current.telemetry) {
@@ -522,7 +567,7 @@ export class RemoteRequestCoordinator {
       if (this.#current !== current) return;
       current.phase = 'ready';
       this.#arm(current, this.#limits.ackTimeoutMs, () => this.#finish(current, 'deferred', 'queue-timeout'));
-      const afterPreflight = this.#admissionReason();
+      const afterPreflight = this.#admissionReason(current);
       if (afterPreflight) { this.#finish(current, 'deferred', afterPreflight); return; }
     }
     const attempt = this.#airtime.tryRunWhenQuiet(() => this.#send(current, connection, transaction));
@@ -547,7 +592,7 @@ export class RemoteRequestCoordinator {
     if (transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected'); return;
     }
-    const admission = this.#admissionReason();
+    const admission = this.#admissionReason(current);
     if (admission) { this.#finish(current, 'deferred', admission); return; }
     try {
       if (!synchronousPermission(current.isEligible, current.descriptor, this.#radio.getConnectionSnapshot())) {
@@ -560,7 +605,7 @@ export class RemoteRequestCoordinator {
       return;
     }
     // Eligibility is trusted executable policy; recheck priority after it.
-    const finalAdmission = this.#admissionReason();
+    const finalAdmission = this.#admissionReason(current);
     if (finalAdmission) { this.#finish(current, 'deferred', finalAdmission); return; }
     if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) {
       this.#finish(current, 'failed', 'disconnected'); return;
@@ -574,7 +619,7 @@ export class RemoteRequestCoordinator {
         this.#finish(current, 'deferred', 'guest-session-unavailable'); return;
       }
     }
-    if (current.source && !this.#background.allowed(current.source)) { this.#finish(current, 'deferred', 'background-turn'); return; }
+    if (current.source && !this.#backgroundAllowed(current)) { this.#finish(current, 'deferred', 'background-turn'); return; }
     if (current.anonymous || current.telemetry) {
       try {
         // Only literal synchronous permission allows RF. Promises and failed
@@ -584,7 +629,7 @@ export class RemoteRequestCoordinator {
         }
       } catch { this.#finish(current, 'failed', 'eligibility-error'); return; }
       if (this.#current !== current || transaction.signal.aborted || !this.#currentScope(current)) return;
-      const afterReservation = this.#admissionReason();
+      const afterReservation = this.#admissionReason(current);
       if (afterReservation) { this.#finish(current, 'deferred', afterReservation); return; }
       if (this.#expired(current)) return;
       if (current.telemetry) {
@@ -613,7 +658,7 @@ export class RemoteRequestCoordinator {
         current.routeEvidence = null;
       }
     }
-    if (!this.#budget.recordAttempt()) { this.#finish(current, 'deferred', 'rate-limited'); return; }
+    if (!this.#budget.recordAttempt(current.exchange?.token)) { this.#finish(current, 'deferred', 'rate-limited'); return; }
     if (current.source) this.#background.sent(current.source);
     current.phase = 'ack';
     if (!current.onFrame) this.#listen(current, connection, transaction);
@@ -662,9 +707,12 @@ export class RemoteRequestCoordinator {
       if (current.signal?.aborted || !this.#currentScope(current)) {
         this.#finish(current, 'failed', 'disconnected'); return false;
       }
-      const admission = this.#admissionReason();
+      const admission = this.#admissionReason(current);
+      if (admission === 'rate-limited' && current.exchange) {
+        await new Promise(resolve => setTimeout(resolve, 100)); continue;
+      }
       if (admission) { this.#finish(current, 'deferred', admission); return false; }
-      if (current.source && !this.#background.allowed(current.source)) {
+      if (current.source && !this.#backgroundAllowed(current)) {
         this.#finish(current, 'deferred', 'background-turn'); return false;
       }
       if (this.#airtime.canRunWhenQuiet()) return true;

@@ -25,7 +25,9 @@ export const telemetryEvidenceQuerySchema = object({ ...scope, now: time,
   windowMs: { type: 'integer', minimum: 3600000, maximum: 8760 * 3600000, multipleOf: 3600000 },
   radius: { type: 'integer', minimum: 1, maximum: 63 } });
 export const telemetryCandidateQuerySchema = object({ ...telemetryEvidenceQuerySchema.properties,
-  afterPublicKey: key, limit: { type: 'integer', minimum: 1, maximum: 200 } }, ['observerPublicKey', 'now', 'windowMs', 'radius']);
+  afterPublicKey: key, afterDistance: { type: 'integer', minimum: 1, maximum: 63 },
+  limit: { type: 'integer', minimum: 1, maximum: 200 } }, ['observerPublicKey', 'now', 'windowMs', 'radius']);
+telemetryCandidateQuerySchema.dependencies = { afterPublicKey: ['afterDistance'], afterDistance: ['afterPublicKey'] };
 export const telemetryDirectEvidenceSchema = object({ ...scope, runId: uuid, receivedAt: time,
   eventDigest: { type: 'string', pattern: '^[0-9a-f]{64}$' }, hopCount: { const: 0 }, provenance: { const: 'verified-advert' } });
 export const telemetryReservationSchema = object({ ...scope, variant: telemetryPollVariantSchema,

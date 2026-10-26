@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { assertTopologyEvidence } from '../nodes/topology-parser.js';
-import { assertTelemetryInput } from '../telemetry/telemetry-validation.js';
-import { telemetryObservationSchema, telemetryRequestDiagnosticSchema } from '../telemetry/telemetry-schemas.js';
+import { createTelemetryNeighbourFrontier } from './telemetry-neighbour-frontier.js';
 import { topologyCoverageSchema, topologyPathPageSchema, topologyPathIdentitySchema, topologyDetailPageSchema,
   topologyPrefixPageSchema, topologyProximitySchema, topologyOutboundRouteQuerySchema, topologyPruneSchema } from '../nodes/topology-schemas.js';
 
@@ -61,22 +60,7 @@ export function createTopologyHistory(db, requireRun) {
     FROM nodes n LEFT JOIN verified_advert_paths advert ON advert.id=(
       SELECT id FROM verified_advert_paths WHERE public_key_hex=n.public_key_hex ORDER BY received_at DESC,id DESC LIMIT 1)
     WHERE n.public_key_hex=? AND n.type='REPEATER'`);
-  // A flood path is useful for choosing an outbound route only when its first
-  // relay is independently known to be directly reachable by this observer.
-  // Fresh zero-hop signed adverts are the persisted proof of that adjacency.
-  // Only repeaters proven by a successful direct telemetry exchange anchor
-  // an outward route. A zero-hop advert helps discovery but cannot establish
-  // that this observer can exchange routed traffic through that repeater.
-  const directRelays = db.prepare(`SELECT o.target_public_key AS publicKeyHex,count(*) AS anchorSuccessCount
-    FROM telemetry_query_outcomes o JOIN observer_runs r ON r.id=o.run_id
-    JOIN telemetry_request_diagnostics d ON d.request_id=o.request_id
-    JOIN nodes n ON n.public_key_hex=o.target_public_key
-    WHERE o.observer_public_key=? AND o.status IN ('answered','partial') AND o.route='direct'
-      AND o.clock_anomaly=0 AND o.received_at>? AND o.received_at<=?
-      AND d.operation IN ('status','telemetry','neighbours')
-      AND json_array_length(json_extract(d.diagnostic_json,'$.routeCandidatePath'))=0
-      AND r.wall_time_anomaly=0 AND n.type='REPEATER'
-    GROUP BY o.target_public_key ORDER BY o.target_public_key`);
+  const neighbours = createTelemetryNeighbourFrontier(db);
   // Attribute trace success to the exact requested contact-path token and
   // position. TraceData hashes are retained for display, but are not treated
   // as normal repeater identities or resolved against advert prefixes.
@@ -86,24 +70,6 @@ export function createTopologyHistory(db, requireRun) {
     WHERE d.observer_public_key=? AND d.completed_at>? AND d.completed_at<=? AND d.clock_anomaly=0
       AND json_extract(d.diagnostic_json,'$.traceOutcome')='response'
     GROUP BY CAST(hop.key AS INTEGER),upper(hop.value)`);
-  // A decoded, recent neighbour report can seed the next outward route only
-  // when the reporting repeater was reached over a trace-confirmed path. The
-  // target candidate is still traced by the request coordinator before any
-  // contact edit or login. Cap the source page so a noisy mesh cannot make a
-  // single route lookup unbounded.
-  const neighbourRows = db.prepare(`SELECT upper(o.target_public_key) AS reporterPublicKey,
-      a.observed_at AS observedAt,a.normalized_json AS normalizedJson,d.diagnostic_json AS diagnosticJson
-    FROM telemetry_observations a
-    JOIN telemetry_query_outcomes o ON o.request_id=a.request_id
-    JOIN telemetry_request_diagnostics d ON d.request_id=o.request_id
-    JOIN observer_runs r ON r.id=o.run_id
-    WHERE a.observer_public_key=? AND a.component='neighbours'
-      AND a.outcome_status='answered' AND o.status='answered' AND o.clock_anomaly=0
-      AND a.quality='decoded' AND a.latest_eligible=1 AND a.observation_time_conflict=0
-      AND a.observed_at>? AND a.observed_at<=? AND r.wall_time_anomaly=0
-      AND d.operation='neighbours' AND d.status='completed' AND d.clock_anomaly=0
-      AND d.completed_at>? AND d.completed_at<=?
-    ORDER BY a.observed_at DESC,o.request_id DESC LIMIT 512`);
   const outboundRows = Object.fromEntries([1, 2, 3].map((width) => [width, db.prepare(`SELECT p.path_hex AS pathHex,
       h.position,count(*) AS receptionCount,max(o.received_at) AS receivedAt
     FROM topology_path_hops h INDEXED BY idx_topology_hops_prefix
@@ -277,6 +243,7 @@ export function createTopologyHistory(db, requireRun) {
       return { total, candidates, now: query.now, effectiveNow: queryHighWater, windowMs: query.windowMs,
         radius: query.radius, clockRollback, ...POLICY };
     },
+    neighbourCandidates(query) { return neighbours.frontier(query).routes; },
     outboundRoute(query) {
       if (!validRouteQuery(query)) throw new Error('Invalid topology outbound-route query');
       const durableNow = topologyHighWater.get().value ?? 0;
@@ -287,8 +254,9 @@ export function createTopologyHistory(db, requireRun) {
       const target = targetMetadata.get(query.targetPublicKey);
       if (!target) return { status: 'unavailable', reason: 'target-not-known-repeater' };
       const cutoff = effectiveNow - query.windowMs;
-      const anchors = new Map(directRelays.all(query.observerPublicKey, cutoff, effectiveNow)
-        .map(row => [row.publicKeyHex.toUpperCase(), row.anchorSuccessCount]));
+      const neighbourQuery = { observerPublicKey: query.observerPublicKey, now: effectiveNow,
+        windowMs: query.windowMs, radius: query.radius };
+      const anchors = neighbours.anchors(neighbourQuery);
       const adjacent = new Set(anchors.keys());
       if (!adjacent.size) return { status: 'unavailable', reason: 'no-fresh-direct-relay' };
       const traceSupport = new Map(tracedHops.all(query.observerPublicKey, cutoff, effectiveNow)
@@ -347,58 +315,14 @@ export function createTopologyHistory(db, requireRun) {
           candidate.receivedAt = Math.max(candidate.receivedAt, row.receivedAt);
         }
       }
-      let rejectedNeighbourEvidence = false;
-      for (const row of neighbourRows.all(query.observerPublicKey, cutoff, effectiveNow, cutoff, effectiveNow)) {
-        let observation;
-        let diagnostic;
-        try {
-          observation = JSON.parse(row.normalizedJson);
-          diagnostic = JSON.parse(row.diagnosticJson);
-          assertTelemetryInput(telemetryObservationSchema, observation);
-          assertTelemetryInput(telemetryRequestDiagnosticSchema, diagnostic);
-        } catch { continue; }
-        if (observation.variant.component !== 'neighbours' || diagnostic.operation !== 'neighbours'
-          || diagnostic.status !== 'completed' || diagnostic.observerPublicKey !== query.observerPublicKey
-          || diagnostic.targetPublicKey !== row.reporterPublicKey || diagnostic.clockAnomaly
-          || !Array.isArray(diagnostic.routeCandidatePath)) continue;
-        const basePath = diagnostic.routeCandidatePath;
-        if (basePath.length > 31 || basePath.some(token => !/^[0-9A-F]{4}$/.test(token))) continue;
-        if (basePath.length && diagnostic.traceOutcome !== 'response') continue;
-        const reporter = targetMetadata.get(row.reporterPublicKey);
-        if (!reporter || !validKey(reporter.publicKeyHex) || reporter.publicKeyHex.toUpperCase() === query.targetPublicKey) continue;
-        const reporterPrefix = reporter.publicKeyHex.slice(0, 4).toUpperCase();
-        const reporterPrefixMatches = resolvePrefix.all(4, reporterPrefix);
-        if (reporterPrefixMatches.length !== 1 || reporterPrefixMatches[0].publicKeyHex.toUpperCase() !== reporter.publicKeyHex.toUpperCase()) continue;
-        const baseKeys = [];
-        let safeBase = true;
-        for (const token of basePath) {
-          const matches = resolvePrefix.all(4, token);
-          if (matches.length !== 1 || matches[0].type !== 'REPEATER') { safeBase = false; break; }
-          const key = matches[0].publicKeyHex.toUpperCase();
-          if (key === query.targetPublicKey || key === row.reporterPublicKey || baseKeys.includes(key)) {
-            safeBase = false; break;
-          }
-          baseKeys.push(key);
-        }
-        if (!safeBase || (baseKeys.length ? !adjacent.has(baseKeys[0]) : !adjacent.has(row.reporterPublicKey))) {
-          rejectedNeighbourEvidence = true;
-          continue;
-        }
-        if (baseKeys.includes(reporter.publicKeyHex.toUpperCase()) || basePath.length + 1 > query.radius
-          || basePath.length + 1 > 31) continue;
-        const ageMs = effectiveNow - observation.observedAt;
-        for (const entry of observation.data.entries) {
-          if (entry.prefix.length < 4 || entry.prefix.length > 64 || entry.prefix.length % 2 !== 0
-            || entry.heardSecondsAgo * 1000 > query.windowMs - ageMs) continue;
-          const matches = resolvePrefix.all(entry.prefix.length, entry.prefix);
-          if (matches.length !== 1 || matches[0].type !== 'REPEATER'
-            || matches[0].publicKeyHex.toUpperCase() !== query.targetPublicKey) continue;
-          const path = [...basePath, reporterPrefix];
-          const candidate = routeFor(path);
-          candidate.neighbourSupportCount++;
-          candidate.receivedAt = Math.max(candidate.receivedAt, observation.observedAt);
-          if (candidate.passiveReceptionCount === 0) candidate.receptionCount = candidate.neighbourSupportCount;
-        }
+      const frontier = neighbours.frontier(neighbourQuery, anchors);
+      const rejectedNeighbourEvidence = frontier.rejected;
+      for (const route of frontier.routes) {
+        if (route.targetPublicKey !== query.targetPublicKey) continue;
+        const candidate = routeFor(route.path);
+        candidate.neighbourSupportCount++;
+        candidate.receivedAt = Math.max(candidate.receivedAt, route.receivedAt);
+        if (candidate.passiveReceptionCount === 0) candidate.receptionCount = candidate.neighbourSupportCount;
       }
       const candidates = [...byRoute.values()];
       const positionSupport = new Map();

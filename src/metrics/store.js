@@ -734,7 +734,8 @@ export class MetricsStore {
         return run;
       };
       this.#telemetry = createTelemetryHistory(this.#db, requireTelemetryRun);
-      this.#telemetryPoll = createTelemetryPollState(this.#db, requireTelemetryRun, this.#telemetry.recordWithinTransaction);
+      this.#telemetryPoll = createTelemetryPollState(this.#db, requireTelemetryRun, this.#telemetry.recordWithinTransaction,
+        query => this.#topology.neighbourCandidates(query));
       this.#telemetryDiagnostics = createTelemetryDiagnostics(this.#db, requireTelemetryRun);
     } catch (error) {
       this.#db?.close();
@@ -1109,6 +1110,7 @@ export class MetricsStore {
       runtimeEvents: 'SELECT MIN(observed_at) AS earliest FROM runtime_events',
       telemetryObservations: 'SELECT MIN(observed_at) AS earliest FROM telemetry_observations',
       telemetryOutcomes: 'SELECT MIN(completed_at) AS earliest FROM telemetry_query_outcomes',
+      telemetryDiagnostics: 'SELECT MIN(completed_at) AS earliest FROM telemetry_request_diagnostics',
       topologyObservations: 'SELECT MIN(received_at) AS earliest FROM topology_observations',
       topologyCoverage: 'SELECT MIN(sample_at) AS earliest FROM topology_capture_samples'
     };
