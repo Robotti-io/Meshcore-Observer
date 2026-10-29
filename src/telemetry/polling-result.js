@@ -5,9 +5,11 @@ import { assertTelemetryResult } from './telemetry-validation.js';
 import { parseStatusResponseBody } from './status-parser.js';
 import { parseSensorResponseBody } from './sensor-parser.js';
 import { parseNeighbourResponseBody } from './neighbour-parser.js';
+import { parseOwnerInfoResponseBody } from './owner-info-parser.js';
 
 export const validateTelemetryCompletion = compileSchema(telemetryOwnerCompletionSchema);
-const parsers = { status: parseStatusResponseBody, sensors: parseSensorResponseBody, neighbours: parseNeighbourResponseBody };
+const parsers = { 'owner-info': parseOwnerInfoResponseBody, status: parseStatusResponseBody,
+  sensors: parseSensorResponseBody, neighbours: parseNeighbourResponseBody };
 
 /** A dispatched, owned binary result only. Authentication never creates data. */
 export function telemetryPollingResult({ response, reservation, variant, emitterProfile, completedAt, clockAnomaly }) {

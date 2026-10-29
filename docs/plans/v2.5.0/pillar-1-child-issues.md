@@ -12,9 +12,20 @@ also requires rollout and a complete soak of the new distance/key ordering,
 due neighbour priority and neighbour-derived eligibility. Existing runtime
 snapshots predate this pivot. See the [current contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26).
 
+**Latest follow-up — 2026-10-29:** #34 now includes directional strong/weak
+neighbour prioritization, authenticated owner-info collection, and a bounded
+contact string available through the existing telemetry reads. #36's Repeaters
+view presents step-by-step progress and clickable response history, with a
+live reporting status line and no separate path table. The v21 database
+migration fix and full live validation remain pending under #37; the failed
+version-20 migration attempt rolled back, and no live migration is claimed.
+See the updated [#34](pillar-1-issues/p1-13.md),
+[#35](pillar-1-issues/p1-14.md), [#36](pillar-1-issues/p1-15.md), and
+[#37](pillar-1-issues/p1-16.md) records.
+
 **Current closeout — 2026-10-26:** Fifteen of sixteen Pillar 1 children are complete (#22–#36). #37 is now active final validation; #18 remains open. The live telemetry and publishing/bot soaks are stable, and the all-time diagnostics defect has a focused repair. The operator enabled region publication on `okimesh1` and restarted port 3000 at 10:05:37 EDT. Broker acceptance of saved answer #2 is verified at 10:05:47 EDT; `okimesh2` remains opted out. Exact CoreScope reporter/target/original-time ingestion correlation is still pending. Final comparison/fault/browser evidence remains explicit. See the [current closeout report](../../pillar-1-closeout.md). Earlier dated notes below describe their original delivery point, not the present runtime.
 
-Captured: 2026-10-07. Updated: 2026-10-26. Parent #18 remains open; #22–#36 are closed and #37 is in progress. Current acceptance evidence is maintained in the closeout report rather than older per-phase totals.
+Captured: 2026-10-07. Updated: 2026-10-29. Parent #18 remains open; #22–#36 are closed and #37 is in progress. Current acceptance evidence is maintained in the closeout report rather than older per-phase totals.
 
 Progress on 2026-10-07: bot-reporting requirements, backend/history inclusion, identity limitations, and shared runtime-configurable retention have been resolved under #23 for #28. Node-advert recommendations are also agreed; #26 is in requirement resolution for direct-heard freshness and node-history retention, with implementation pending. P1-15 is now complete and closed; #37 remains the final integrated validation child. See [decision record](pillar-1-decisions.md) and the issue acceptance/progress checklists.
 

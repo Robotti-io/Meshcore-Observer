@@ -69,16 +69,16 @@ export const runtimeEventsQuerySchema = reportingQuerySchema('runtime-events-que
 });
 export const telemetryObservationsQuerySchema = reportingQuerySchema('telemetry-observations-query', {
   ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY,
-  runId: RUN_ID, component: { enum: ['status', 'sensors', 'neighbours'] }
+  runId: RUN_ID, component: { enum: ['owner-info', 'status', 'sensors', 'neighbours'] }
 });
 export const telemetryOutcomesQuerySchema = reportingQuerySchema('telemetry-outcomes-query', {
   ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY,
-  runId: RUN_ID, component: { enum: ['status', 'sensors', 'neighbours'] },
+  runId: RUN_ID, component: { enum: ['owner-info', 'status', 'sensors', 'neighbours'] },
   status: { enum: ['answered', 'partial', 'failed', 'unsupported'] }
 });
 export const telemetryDiagnosticsQuerySchema = reportingQuerySchema('telemetry-diagnostics-query', {
   ...REPORTING_PAGE, observerPublicKey: PUBLIC_KEY, targetPublicKey: PUBLIC_KEY, runId: RUN_ID,
-  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  operation: { enum: ['guest-login', 'owner-info', 'status', 'telemetry', 'neighbours'] },
   status: { enum: ['deferred', 'failed', 'unsupported', 'completed'] }
 });
 export const topologyPathsQuerySchema = {

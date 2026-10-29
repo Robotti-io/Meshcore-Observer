@@ -171,7 +171,8 @@ export class RemoteRequestCoordinator {
   tryTelemetryRequest(request, config, hooks) {
     assertOwner(ownerSchemas.telemetryOwnedRequestSchema, request);
     this.#assertTelemetry(config, hooks, false);
-    const component = request.operation === 'telemetry' ? 'sensors' : request.operation;
+    const component = request.operation === 'telemetry' ? 'sensors'
+      : request.operation === 'owner-info' ? 'ownerInfo' : request.operation;
     if (!config.components[component] || (component === 'neighbours'
       && Object.keys(config.neighbourParams).some(key => request.params[key] !== config.neighbourParams[key]))) {
       return this.#defer('ineligible');

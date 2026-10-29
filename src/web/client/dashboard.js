@@ -91,6 +91,10 @@ const rangeSectionStateByView = new Map();
 const reportingSectionStateByKey = new Map();
 const reportingDataByKey = new Map();
 let lastNodesSuccessAt = null;
+let repeaterProgressGeneration = 0;
+let repeaterHistoryTarget = null;
+let repeaterHistoryOffset = 0;
+let repeaterHistoryGeneration = 0;
 // Per-bot operational status (enabled/ready) - live, not range-aware, so
 // it's kept separately from the range-queried command data and folded
 // into each bot's card by applyBotStatusBadges().
@@ -451,8 +455,6 @@ function renderRepeaterReporting(advertResponse, topologyResponse, coverageRespo
   const adverts = summarizeAdvertReporting(advertResponse);
   const topology = summarizeTopologyReporting(topologyResponse, coverageResponse);
   const telemetry = summarizeTelemetryReporting(observationsResponse, outcomesResponse);
-  const telemetryRows = Array.isArray(outcomesResponse?.outcomes) ? outcomesResponse.outcomes : [];
-  const diagnosticRows = Array.isArray(diagnosticsResponse?.diagnostics) ? diagnosticsResponse.diagnostics : [];
   for (const [id, value] of [
     ['repeater-advert-events', adverts.events],
     ['repeater-advert-nodes', adverts.distinctNodes],
@@ -462,48 +464,30 @@ function renderRepeaterReporting(advertResponse, topologyResponse, coverageRespo
     ['repeater-telemetry-outcomes', telemetry.outcomes],
     ['repeater-telemetry-latest', telemetry.latestObservation ? formatTimestamp(telemetry.latestObservation.observedAt) : null],
     ['repeater-telemetry-latest-outcome', telemetry.latestOutcome?.status ?? null],
-    ['repeater-telemetry-failed', telemetryRows.filter(row => row.status === 'failed').length],
-    ['repeater-telemetry-attempts', diagnosticsResponse?.total ?? null],
-    ['repeater-telemetry-attempt-failed', diagnosticRows.filter(row => row.status !== 'completed').length]
+    ['repeater-telemetry-attempts', diagnosticsResponse?.total ?? null]
   ]) document.getElementById(id).textContent = formatReportingValue(value);
+  const telemetryEvents = [
+    ...(diagnosticsResponse?.diagnostics ?? []).map(row => ({
+      at: row.completedAt, operation: row.operation, status: row.status, reason: row.reason,
+      targetName: row.targetName, targetPublicKey: row.targetPublicKey
+    })),
+    ...(outcomesResponse?.outcomes ?? []).map(row => ({
+      at: row.completedAt, operation: row.variant?.component ?? 'telemetry', status: row.status, reason: row.reason,
+      targetName: row.targetName, targetPublicKey: row.targetPublicKey
+    }))
+  ].filter(event => Number.isFinite(event.at)).sort((left, right) => right.at - left.at);
+  const latestTelemetryEvent = telemetryEvents[0];
+  const targetLabel = latestTelemetryEvent?.targetName
+    || (latestTelemetryEvent?.targetPublicKey ? latestTelemetryEvent.targetPublicKey.slice(0, 12) + '…' : 'Unknown repeater');
+  document.getElementById('repeater-telemetry-live-status').textContent = latestTelemetryEvent
+    ? `Telemetry status: Auto-updating · latest ${latestTelemetryEvent.operation} for ${targetLabel}: ${statusText(latestTelemetryEvent.status, latestTelemetryEvent.reason)} · ${formatTimestamp(latestTelemetryEvent.at)}. In-flight requests appear after completion.`
+    : 'Telemetry status: Auto-updating · no requests recorded in the selected range.';
   renderBoundedRows('repeater-adverts-table', adverts.byType, [
     (row) => row.type,
     (row) => row.events,
     (row) => row.newDiscoveries,
     (row) => row.rehears
   ], 'No advert events in this range.');
-  renderBoundedRows('repeater-topology-table', topology.rows.slice(0, 25), [
-    (row) => row.pathHex ?? ('#' + row.pathId),
-    (row) => row.kind ?? 'Unknown',
-    (row) => row.receptionCount,
-    (row) => formatTimestamp(row.lastReceivedAt)
-  ], 'No retained topology paths.');
-  renderBoundedRows('repeater-telemetry-outcomes-table', diagnosticRows.slice(0, 25), [
-    (row) => formatTimestamp(row.completedAt),
-    (row) => row.targetName || (row.targetPublicKey ? row.targetPublicKey.slice(0, 8) : 'Unknown repeater'),
-    (row) => row.operation ?? 'Unknown',
-    (row) => row.phase ?? 'Unknown',
-    (row) => row.routeCandidatePath?.length ? row.routeCandidatePath.join(' → ') : row.routeEvidenceSource ? 'Direct' : '—',
-    (row) => row.traceOutcome ? row.traceOutcome + (row.tracePathHashes?.length ? ' · ' + row.tracePathHashes.join(' → ') : '')
-      + (row.traceSnrQuarterDb?.length ? ' · SNR ' + row.traceSnrQuarterDb.map(value => (value / 4).toFixed(2)).join('/') + ' dB' : '') : '—',
-    (row) => row.routeEvidenceSource ? row.routeEvidenceSource + (row.routeSupportCount === null ? ''
-      : ' · ' + row.routeSupportCount + (row.routeEvidenceSource === 'telemetry-neighbours' ? ' neighbour reports' : ' receptions'))
-      + (row.routeEvidenceAt === null ? '' : ' · ' + formatTimestamp(row.routeEvidenceAt))
-      + (row.routeHopWeights?.length ? ' · ' + row.routeHopWeights.map(hop => 'H' + hop.position + ' ' + hop.repeaterId
-        + (hop.anchorSuccessCount ? ' anchor ' + hop.anchorSuccessCount : '')
-        + (hop.traceSuccessCount ? ' traces ' + hop.traceSuccessCount : '')
-        + (hop.neighbourSupportCount ? ' neighbours ' + hop.neighbourSupportCount : '')
-        + (hop.pathReceptionCount ? ' path ' + hop.pathReceptionCount : '')).join('; ') : '')
-      : row.routeFailureReason || 'No validated path',
-    (row) => row.contactSyncOutcome ?? '—',
-    (row) => [row.inventoryOutcome, row.targetContactOutcome].filter(Boolean).join(' / ') || '—',
-    (row) => Number.isSafeInteger(row.responseTimeoutMs) ? (row.responseTimeoutMs / 1000) + ' s' : '—',
-    (row) => row.dispatchMode ?? 'Not dispatched',
-    (row) => row.operation === 'guest-login' && row.status === 'completed'
-      ? 'Guest login completed; telemetry not yet collected'
-      : row.status ?? 'Unknown',
-    (row) => row.reason ?? '—'
-  ], 'No telemetry request attempts in this range.');
 }
 
 function reportingRequestDefinitions(view, params) {
@@ -727,18 +711,217 @@ function renderNodesList(nodesResponse) {
     body.innerHTML = '';
     for (const node of nodesResponse.nodes) {
       const row = body.insertRow();
-      row.insertCell().textContent = node.name || 'Unnamed';
-      const keyCell = row.insertCell();
-      keyCell.textContent = formatPublicKeyCell(node.publicKeyHex);
-      keyCell.title = node.publicKeyHex;
-      row.insertCell().textContent = formatTimestamp(node.firstHeardAt);
-      row.insertCell().textContent = formatTimestamp(node.lastHeardAt);
+      const nameCell = row.insertCell();
+      const nameButton = document.createElement('button');
+      nameButton.type = 'button';
+      nameButton.className = 'repeater-history-link';
+      nameButton.dataset.targetPublicKey = node.publicKeyHex;
+      nameButton.textContent = node.name || 'Unnamed';
+      nameButton.title = 'Open response history for ' + (node.name || formatPublicKeyCell(node.publicKeyHex));
+      nameCell.append(nameButton);
+      for (const step of ['route', 'guest-login', 'neighbours', 'status', 'sensors', 'owner-info']) {
+        const cell = row.insertCell();
+        cell.dataset.progressStep = step;
+        cell.dataset.targetPublicKey = node.publicKeyHex;
+        cell.textContent = 'Loading…';
+      }
+      const activityCell = row.insertCell();
+      activityCell.dataset.progressActivity = node.publicKeyHex;
+      activityCell.textContent = 'Loading…';
     }
   }
 
   document.getElementById('nodes-page-note').textContent = formatNodePageRange(nodesOffset, NODES_PAGE_SIZE, nodesResponse.total);
   document.getElementById('nodes-prev').disabled = nodesOffset === 0;
   document.getElementById('nodes-next').disabled = nodesOffset + NODES_PAGE_SIZE >= nodesResponse.total;
+}
+
+function latestBy(rows, predicate, timestampField) {
+  return rows.filter(predicate).sort((left, right) => right[timestampField] - left[timestampField])[0] ?? null;
+}
+
+function statusText(status, reason) {
+  const label = status === 'answered' ? 'Completed' : status === 'completed' ? 'Completed'
+    : status === 'partial' ? 'Partial' : status === 'failed' ? 'Failed'
+      : status === 'unsupported' ? 'Unsupported' : status === 'deferred' ? 'Deferred' : 'Not attempted';
+  return reason && ['failed', 'deferred', 'unsupported'].includes(status) ? label + ' · ' + reason : label;
+}
+
+function telemetryProgressText(component, outcome, observation) {
+  if (outcome?.status === 'partial' && observation) {
+    if (component === 'status' && observation.quality === 'prefix-only') return 'Data received · profile unverified';
+    if (component === 'sensors' && observation.diagnostic?.code === 'sensor-profile-unknown'
+      && observation.data?.readings?.length) return 'Data received · profile unverified';
+  }
+  return statusText(outcome?.status, outcome?.reason);
+}
+
+function formatTraceProgress(diagnostic) {
+  if (!diagnostic) return 'Not attempted';
+  const trace = diagnostic.traceOutcome;
+  const result = trace ? trace.replaceAll('-', ' ') : statusText(diagnostic.status, diagnostic.reason);
+  const path = diagnostic.routeCandidatePath?.length ? diagnostic.routeCandidatePath.join(' → ') : null;
+  return [result, path].filter(Boolean).join(' · ');
+}
+
+function setProgressCell(cell, label, timestamp, kind = 'neutral', detail = null) {
+  cell.replaceChildren();
+  const badge = document.createElement('span');
+  badge.className = 'status-badge repeater-progress ' + kind;
+  badge.textContent = label;
+  cell.append(badge);
+  if (timestamp !== null && timestamp !== undefined) {
+    const time = document.createElement('small');
+    time.className = 'repeater-progress-time';
+    time.textContent = formatTimestamp(timestamp);
+    cell.append(document.createElement('br'), time);
+  }
+  if (typeof detail === 'string' && detail.length) {
+    const text = document.createElement('small');
+    text.className = 'repeater-progress-detail';
+    text.textContent = detail;
+    cell.append(document.createElement('br'), text);
+  }
+}
+
+function progressKind(status) {
+  return status === 'answered' || status === 'completed' ? 'ok'
+    : status === 'partial' || status === 'deferred' ? 'pending'
+      : status === 'failed' || status === 'unsupported' ? 'bad' : 'neutral';
+}
+
+async function refreshVisibleRepeaterProgress(nodes) {
+  const generation = ++repeaterProgressGeneration;
+  const rangeParams = resolveRangeQuery({ range: currentRange, customStartMs, customEndMs });
+  if (!rangeParams) {
+    for (const cell of document.querySelectorAll('#nodes-table [data-progress-step]')) cell.textContent = 'Apply range';
+    for (const cell of document.querySelectorAll('#nodes-table [data-progress-activity]')) cell.textContent = 'Apply custom range';
+    return;
+  }
+  await Promise.all(nodes.map(async (node) => {
+    const filter = { ...rangeParams, targetPublicKey: node.publicKeyHex, limit: 200 };
+    try {
+      const [diagnosticResponse, outcomeResponse, observationResponse] = await Promise.all([
+        fetchJson('/api/metrics/telemetry/diagnostics?' + buildQueryString(filter)),
+        fetchJson('/api/metrics/telemetry/outcomes?' + buildQueryString(filter)),
+        fetchJson('/api/metrics/telemetry/observations?' + buildQueryString(filter))
+      ]);
+      if (generation !== repeaterProgressGeneration) return;
+      const diagnostics = diagnosticResponse.diagnostics ?? [];
+      const outcomes = outcomeResponse.outcomes ?? [];
+      const observations = new Map((observationResponse.observations ?? []).map(row => [row.requestId, row]));
+      const operations = {
+        'guest-login': latestBy(diagnostics, row => row.operation === 'guest-login', 'completedAt'),
+        neighbours: latestBy(diagnostics, row => row.operation === 'neighbours', 'completedAt'),
+        status: latestBy(diagnostics, row => row.operation === 'status', 'completedAt'),
+        sensors: latestBy(diagnostics, row => row.operation === 'telemetry', 'completedAt'),
+        'owner-info': latestBy(diagnostics, row => row.operation === 'owner-info', 'completedAt')
+      };
+      const latestRoute = latestBy(diagnostics, row => typeof row.traceOutcome === 'string', 'completedAt');
+      const componentOutcomes = Object.fromEntries(['neighbours', 'status', 'sensors', 'owner-info'].map(component => [component,
+        latestBy(outcomes, row => row.variant?.component === component, 'completedAt')]));
+      const routeCell = document.querySelector(`[data-progress-step="route"][data-target-public-key="${node.publicKeyHex}"]`);
+      if (routeCell) setProgressCell(routeCell, formatTraceProgress(latestRoute), latestRoute?.completedAt,
+        progressKind(latestRoute?.traceOutcome === 'response' ? 'completed' : latestRoute?.status));
+      for (const step of ['guest-login', 'neighbours', 'status', 'sensors', 'owner-info']) {
+        const cell = document.querySelector(`[data-progress-step="${step}"][data-target-public-key="${node.publicKeyHex}"]`);
+        if (!cell) continue;
+        const outcome = componentOutcomes[step] ?? null;
+        const diagnostic = operations[step];
+        const latest = outcome && (!diagnostic || outcome.completedAt >= diagnostic.completedAt) ? outcome : diagnostic;
+        const status = latest?.status ?? 'unknown';
+        const at = latest?.completedAt ?? null;
+        const observation = latest?.requestId ? observations.get(latest.requestId) : null;
+        const componentName = step === 'sensors' ? 'sensors' : step;
+        const ownerInfo = step === 'owner-info' && observation
+          ? observation.data?.contactInfo || 'No contact info provided' : null;
+        setProgressCell(cell, telemetryProgressText(componentName, latest, observation), at, progressKind(status), ownerInfo);
+      }
+      const times = [...diagnostics.map(row => row.completedAt), ...outcomes.map(row => row.completedAt)].filter(Number.isFinite);
+      const activity = document.querySelector(`[data-progress-activity="${node.publicKeyHex}"]`);
+      if (activity) activity.textContent = times.length ? formatTimestamp(Math.max(...times)) : 'No activity in range';
+    } catch {
+      if (generation !== repeaterProgressGeneration) return;
+      for (const cell of document.querySelectorAll(`[data-target-public-key="${node.publicKeyHex}"][data-progress-step]`)) {
+        cell.textContent = 'Unavailable';
+      }
+      const activity = document.querySelector(`[data-progress-activity="${node.publicKeyHex}"]`);
+      if (activity) activity.textContent = 'Unavailable';
+    }
+  }));
+}
+
+function appendHistoryRow(body, time, step, result, details) {
+  const row = body.insertRow();
+  row.insertCell().textContent = formatTimestamp(time);
+  row.insertCell().textContent = step;
+  row.insertCell().textContent = result;
+  const detailCell = row.insertCell();
+  const pre = document.createElement('pre');
+  pre.textContent = typeof details === 'string' ? details : JSON.stringify(details ?? {}, null, 2);
+  detailCell.append(pre);
+}
+
+async function loadRepeaterHistory(offset = 0) {
+  if (!repeaterHistoryTarget) return;
+  const generation = ++repeaterHistoryGeneration;
+  repeaterHistoryOffset = offset;
+  const status = document.getElementById('repeater-history-status');
+  const body = document.querySelector('#repeater-history-table tbody');
+  const older = document.getElementById('repeater-history-older');
+  status.textContent = 'Loading response history…';
+  body.replaceChildren();
+  older.hidden = true;
+  const rangeParams = resolveRangeQuery({ range: currentRange, customStartMs, customEndMs });
+  if (!rangeParams) {
+    status.textContent = 'Apply the custom range to view response history.';
+    return;
+  }
+  const params = { ...rangeParams, targetPublicKey: repeaterHistoryTarget.publicKeyHex, limit: 50, offset };
+  try {
+    const [diagnosticResponse, outcomeResponse, observationResponse] = await Promise.all([
+      fetchJson('/api/metrics/telemetry/diagnostics?' + buildQueryString(params)),
+      fetchJson('/api/metrics/telemetry/outcomes?' + buildQueryString(params)),
+      fetchJson('/api/metrics/telemetry/observations?' + buildQueryString(params))
+    ]);
+    if (generation !== repeaterHistoryGeneration) return;
+    const events = [
+      ...(diagnosticResponse.diagnostics ?? []).map(row => ({ at: row.completedAt, step: row.operation, result: statusText(row.status, row.reason), details: {
+        phase: row.phase, routeCandidatePath: row.routeCandidatePath, traceOutcome: row.traceOutcome,
+        tracePathHashes: row.tracePathHashes, dispatchMode: row.dispatchMode, reason: row.reason
+      } })),
+      ...(outcomeResponse.outcomes ?? []).map(row => ({ at: row.completedAt, step: row.variant?.component ?? 'telemetry', result: statusText(row.status, row.reason), details: {
+        reason: row.reason, route: row.route, responseTimeMs: row.responseTimeMs
+      } })),
+      ...(observationResponse.observations ?? []).map(row => ({ at: row.observedAt, step: (row.variant?.component ?? 'telemetry') + ' response',
+        result: row.outcome?.status === 'partial' ? 'Partial data' : 'Collected', details: row.data }))
+    ].sort((left, right) => right.at - left.at);
+    for (const event of events) appendHistoryRow(body, event.at, event.step, event.result, event.details);
+    const hasOlder = [diagnosticResponse, outcomeResponse, observationResponse]
+      .some(response => response.total > offset + 50);
+    older.hidden = !hasOlder;
+    status.textContent = events.length ? `${events.length} retained events in the selected range. History completeness is unknown.`
+      : 'No telemetry history for this repeater in the selected range.';
+  } catch {
+    if (generation === repeaterHistoryGeneration) status.textContent = 'Unable to load response history.';
+  }
+}
+
+function initRepeaterHistory() {
+  const dialog = document.getElementById('repeater-history-dialog');
+  document.querySelector('#nodes-table tbody').addEventListener('click', event => {
+    const button = event.target.closest('.repeater-history-link');
+    if (!button) return;
+    repeaterHistoryTarget = { publicKeyHex: button.dataset.targetPublicKey, name: button.textContent };
+    document.getElementById('repeater-history-title').textContent = repeaterHistoryTarget.name + ' response history';
+    document.getElementById('repeater-history-key').textContent = repeaterHistoryTarget.publicKeyHex;
+    document.getElementById('repeater-history-table').querySelector('tbody').replaceChildren();
+    dialog.showModal();
+    void loadRepeaterHistory(0);
+  });
+  document.getElementById('repeater-history-close').addEventListener('click', () => dialog.close());
+  document.getElementById('repeater-history-older').addEventListener('click', () => void loadRepeaterHistory(repeaterHistoryOffset + 50));
+  dialog.addEventListener('close', () => { repeaterHistoryGeneration += 1; });
 }
 
 // Fetches the current node-table page (search/type-filtered, paginated) -
@@ -761,7 +944,9 @@ async function refreshNodesList() {
     if (!res.ok) {
       throw new Error('nodes query failed (' + res.status + ')');
     }
-    renderNodesList(await res.json());
+    const nodesResponse = await res.json();
+    renderNodesList(nodesResponse);
+    void refreshVisibleRepeaterProgress(nodesResponse.nodes);
     lastNodesSuccessAt = Date.now();
     setDataStatus('nodes-data-status', 'ready', 'Updated: ' + formatTimestamp(lastNodesSuccessAt));
   } catch (err) {
@@ -1096,6 +1281,8 @@ function selectPresetRange(value) {
   document.getElementById('range-error').textContent = '';
   setActiveRangeButton();
   refreshRangeData({ supersede: true });
+  if (currentView === 'repeaters') void refreshVisibleRepeaterProgress(
+    [...document.querySelectorAll('.repeater-history-link')].map(button => ({ publicKeyHex: button.dataset.targetPublicKey })));
 }
 
 function applyCustomRange() {
@@ -1115,6 +1302,8 @@ function applyCustomRange() {
   currentRange = 'custom';
   setActiveRangeButton();
   refreshRangeData({ supersede: true });
+  if (currentView === 'repeaters') void refreshVisibleRepeaterProgress(
+    [...document.querySelectorAll('.repeater-history-link')].map(button => ({ publicKeyHex: button.dataset.targetPublicKey })));
 }
 
 function viewFromLocation() {
@@ -1198,6 +1387,7 @@ function initRangeSelector() {
 function bootstrap() {
   initRangeSelector();
   initNodesSearch();
+  initRepeaterHistory();
   initDashboardNavigation();
 
   const source = new EventSource('/api/metrics/stream');

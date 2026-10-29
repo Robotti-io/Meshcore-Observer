@@ -9,6 +9,15 @@ All schemas live in `src/telemetry/telemetry-schemas.js`; use
 so strict shared AJV validation always precedes semantic checks. Errors contain
 only `Invalid telemetry data`, never supplied fields or values.
 
+**Approved implementation follow-up — 2026-10-29:** The statements above
+describe the original #33 T1–T5 baseline. The subsequent #34 implementation
+adds the authenticated `owner-info` variant. Its normalized observation has a
+bounded nullable `contactInfo` string (maximum 160 characters); the raw owner
+response is not retained and contact data is not logged. Existing generic
+telemetry reads provide read-only access. Migration v21 expands the existing
+component, poll-state and diagnostic constraints. Its live database upgrade
+and preservation check remain pending under #37.
+
 ## Request, response and identity
 
 A raw decoder input contains a validated typed `variant` and a byte array of

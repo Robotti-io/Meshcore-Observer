@@ -95,8 +95,9 @@ export class TelemetryPollingScheduler {
   }
   #variants(target) {
     const profile = this.#config.targetProfiles.find(p => p.targetPublicKey === target);
-    return ['neighbours', 'status', 'sensors'].filter(c => this.#config.components[c]).map(component => ({ component,
-      params: component === 'status' ? {} : component === 'sensors' ? { permissionMask: 0 } : { ...this.#config.neighbourParams },
+    return ['neighbours', 'status', 'sensors', ...(this.#config.components.ownerInfo ? ['owner-info'] : [])]
+      .filter(c => c === 'owner-info' || this.#config.components[c]).map(component => ({ component,
+      params: ['status', 'owner-info'].includes(component) ? {} : component === 'sensors' ? { permissionMask: 0 } : { ...this.#config.neighbourParams },
       ...(component === 'status' ? { profile: { ...(profile?.statusProfile ?? this.#config.statusProfile) } } : {}) }));
   }
   #scope(target, variant) { return { observerPublicKey: this.#observer, targetPublicKey: target, variant }; }
@@ -218,11 +219,13 @@ export class TelemetryPollingScheduler {
     const previousCursor = this.#cursor;
     const page = this.#store.queryTelemetryPollCandidates({ observerPublicKey: this.#observer, now: clock.wall,
       windowMs: this.#config.evidenceWindowMs, radius: this.#config.radius, limit: 16,
-      ...(this.#cursor ? { afterPublicKey: this.#cursor.targetPublicKey, afterDistance: this.#cursor.distance } : {}) });
+      ...(this.#cursor ? { afterPublicKey: this.#cursor.targetPublicKey, afterDistance: this.#cursor.distance,
+        afterPriority: this.#cursor.priority } : {}) });
     if (page.clockRollback) return;
     let selected = null;
     for (const candidate of page.candidates) {
-      this.#cursor = { targetPublicKey: candidate.targetPublicKey, distance: candidate.distance };
+      this.#cursor = { targetPublicKey: candidate.targetPublicKey, distance: candidate.distance,
+        priority: candidate.priority };
       if (this.#excluded.has(candidate.targetPublicKey)) continue;
       for (const variant of this.#variants(candidate.targetPublicKey)) {
         const scope = this.#scope(candidate.targetPublicKey, variant);

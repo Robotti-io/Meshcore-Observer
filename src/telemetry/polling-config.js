@@ -19,7 +19,7 @@ const MESSAGES = Object.freeze({
   read: 'Cannot read telemetry polling files: supply readable regular UTF-8 JSON files of at most 65536 bytes',
   assignments: 'Invalid telemetry polling assignments: target and group IDs must be unique, group membership unambiguous, excluded targets not also assigned and total distinct targets <= 256',
   references: 'Invalid telemetry polling credential references: every non-default group and target reference must exist in the secret file',
-  components: 'Invalid telemetry polling components: enable at least one of status, sensors or neighbours'
+  components: 'Invalid telemetry polling components: enable at least one of status, sensors, neighbours or owner info'
 });
 
 export class TelemetryPollingConfigError extends Error {

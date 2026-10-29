@@ -68,6 +68,7 @@ const sensorProfile = { enum: ['positive-channels', 'unknown'] };
 const neighbourParams = object({ version: { const: 0 }, count: integer(1, 255), offset: uint16,
   orderBy: { enum: [0, 1, 2, 3] }, prefixLength: integer(1, 32) });
 const variants = {
+  'owner-info': object({ component: { const: 'owner-info' }, params: object({}) }),
   status: object({ component: { const: 'status' }, params: object({}), profile }),
   sensors: object({ component: { const: 'sensors' }, params: object({ permissionMask: byte }) }),
   neighbours: object({ component: { const: 'neighbours' }, params: neighbourParams })
@@ -125,7 +126,8 @@ const observationProperties = {
   bodyBytes: integer(1, TELEMETRY_BODY_MAX_BYTES), decodedBytes: integer(0, TELEMETRY_BODY_MAX_BYTES),
   paddingBytes: integer(0, 15), uninterpretedBytes: integer(0, TELEMETRY_BODY_MAX_BYTES), diagnostic
 };
-export const telemetryObservationSchema = { oneOf: Object.entries({ status: statusData, sensors: sensorData,
+const ownerInfoData = object({ contactInfo: { anyOf: [{ type: 'string', maxLength: 160 }, { type: 'null' }] } });
+export const telemetryObservationSchema = { oneOf: Object.entries({ 'owner-info': ownerInfoData, status: statusData, sensors: sensorData,
   neighbours: neighbourData }).map(([component, data]) => object({ ...observationProperties, variant: variants[component], data })) };
 
 const outcome = {
@@ -152,14 +154,14 @@ export const telemetryEnvSchema = object({ [TELEMETRY_FRESHNESS_ENV_KEY]: {
 export const telemetryLatestQuerySchema = object({ observerPublicKey: key, targetPublicKey: key,
   variant: telemetryVariantSchema, now: epoch, windowMs });
 const range = { start: epoch, end: epoch, observerPublicKey: key, targetPublicKey: key, runId: uuid,
-  component: { enum: ['status', 'sensors', 'neighbours'] }, variant: telemetryVariantSchema,
+  component: { enum: ['owner-info', 'status', 'sensors', 'neighbours'] }, variant: telemetryVariantSchema,
   limit: integer(1, 200), offset: integer(0, 0x7FFFFFFF) };
 export const telemetryObservationPageSchema = object(range, ['start', 'end']);
 export const telemetryOutcomePageSchema = object({ ...range, status: { enum: ['answered', 'partial', 'failed', 'unsupported'] } }, ['start', 'end']);
 const telemetryRequestDiagnosticProperties = {
   requestId: uuid, runId: uuid, observerPublicKey: key, targetPublicKey: key,
   targetName: { anyOf: [{ type: 'string', maxLength: 32 }, { type: 'null' }] },
-  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  operation: { enum: ['guest-login', 'owner-info', 'status', 'telemetry', 'neighbours'] },
   startedAt: epoch, completedAt: epoch, dispatchedAt: { anyOf: [epoch, { type: 'null' }] },
   clockAnomaly: { type: 'boolean' },
   phase: { enum: ['queued', 'admission', 'preflight', 'ready', 'ack', 'response', 'recovery'] },
@@ -194,6 +196,6 @@ export const telemetryRequestDiagnosticSchema = object(telemetryRequestDiagnosti
     'tracePathHashes', 'traceSnrQuarterDb', 'traceTimeoutMs'].includes(key)));
 export const telemetryRequestDiagnosticPageSchema = object({
   start: epoch, end: epoch, observerPublicKey: key, targetPublicKey: key, runId: uuid,
-  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] },
+  operation: { enum: ['guest-login', 'owner-info', 'status', 'telemetry', 'neighbours'] },
   status: { enum: ['deferred', 'failed', 'unsupported', 'completed'] }, limit: integer(1, 200), offset: integer(0, 0x7FFFFFFF)
 }, ['start', 'end']);

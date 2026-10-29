@@ -61,6 +61,7 @@ section { margin-bottom: 1.75rem; }
 section h2 { font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 0 0 0.6rem; }
 .section-note { font-size: 0.8rem; opacity: 0.7; margin: -0.4rem 0 0.6rem; }
 .data-status { font-size: 0.8rem; opacity: 0.7; margin: -0.35rem 0 0.6rem; min-height: 1.2em; }
+.telemetry-live-status { margin: 0 0 0.75rem; padding: 0.55rem 0.75rem; border: 1px solid color-mix(in srgb, canvastext 20%, transparent); border-radius: 6px; font-size: 0.85rem; }
 .data-status.error { color: #c4432b; opacity: 1; }
 .data-status.loading { opacity: 0.7; }
 .scope-label { font-size: 0.65rem; font-weight: 500; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.65; }
@@ -129,6 +130,17 @@ td.count { text-align: right; font-variant-numeric: tabular-nums; }
 .bot-command-block .total-replies { font-size: 0.8rem; opacity: 0.75; margin: 0.5rem 0 0; }
 .bot-command-block .empty-note { font-size: 0.8rem; opacity: 0.7; }
 .status-badge { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
+.status-badge.pending { color: #9a6700; }
+.repeater-progress { display: inline-block; max-width: 16rem; white-space: normal; text-align: left; }
+.repeater-progress-time { display: inline-block; margin-top: 0.2rem; font-size: 0.7rem; opacity: 0.7; white-space: nowrap; }
+.repeater-progress-detail { display: inline-block; max-width: 16rem; font-size: 0.75rem; overflow-wrap: anywhere; }
+.repeater-history-link { border: 0; padding: 0; background: transparent; color: LinkText; font: inherit; text-decoration: underline; text-underline-offset: 0.15em; cursor: pointer; text-align: left; }
+#repeater-history-dialog { width: min(72rem, calc(100vw - 2rem)); max-height: min(85vh, 60rem); overflow: auto; color: canvastext; background: canvas; border: 1px solid var(--control-border); border-radius: 10px; padding: 1rem; }
+#repeater-history-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.dialog-heading h2 { margin: 0 0 0.4rem; }
+.dialog-heading button { flex: 0 0 auto; font: inherit; padding: 0.3rem 0.7rem; border: 1px solid var(--control-border); border-radius: 6px; color: canvastext; background: transparent; cursor: pointer; }
+#repeater-history-table pre { max-width: 34rem; max-height: 14rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; }
 .search-bar { margin-bottom: 0.6rem; }
 .search-bar input[type="search"] { font: inherit; font-size: 0.9rem; padding: 0.35rem 0.6rem; border-radius: 6px; border: 1px solid var(--control-border); background: canvas; color: canvastext; width: 100%; max-width: 320px; box-sizing: border-box; }
 .pagination { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.6rem; font-size: 0.85rem; }

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "defaultCredentialRef": "default",
-  "components": { "status": true, "sensors": true, "neighbours": true },
+  "components": { "status": true, "sensors": true, "neighbours": true, "ownerInfo": true },
   "neighbours": { "version": 0, "count": 3, "offset": 0, "orderBy": 0, "prefixLength": 32 },
   "groups": [
     {

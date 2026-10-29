@@ -10,6 +10,7 @@ const invalid = () => new Error('Invalid telemetry data'); // Never disclose inb
 
 function variantKey(variant) {
   const { component, params, profile } = variant;
+  if (component === 'owner-info') return 'owner-info';
   if (component === 'status') return `status:${profile.layout}:${profile.evidence}`;
   if (component === 'sensors') return `sensors:${params.permissionMask}`;
   return `neighbours:${params.version}:${params.count}:${params.offset}:${params.orderBy}:${params.prefixLength}`;
@@ -32,7 +33,10 @@ function assertObservation(value) {
     || (quality === 'decoded' && (diagnostic !== null || uninterpretedBytes !== 0))
     || (quality !== 'decoded' && diagnostic === null)
     || (paddingBytes > 0 && uninterpretedBytes > 0)) throw invalid();
-  if (variant.component === 'status') {
+  if (variant.component === 'owner-info') {
+    if (quality !== 'decoded' || diagnostic !== null || decodedBytes !== bodyBytes || paddingBytes !== 0
+      || uninterpretedBytes !== 0 || (typeof data.contactInfo === 'string' && Buffer.byteLength(data.contactInfo, 'utf8') > 160)) throw invalid();
+  } else if (variant.component === 'status') {
     const established = variant.profile.evidence === 'established';
     const width = established && variant.profile.layout === 'current56' ? 56 : 48;
     if (decodedBytes !== width || bodyBytes > (established ? width + 15 : 71)

@@ -28,19 +28,19 @@ const validPath = `p.kind='flood-traversed' AND p.repeated_prefix=0 AND p.last_r
     WHERE o.path_id=p.id AND o.received_at=p.last_received_at AND r.wall_time_anomaly=0 AND o.received_at>=r.started_at)`;
 // Prefix association counts ALL node types, using the existing expression indexes.
 // It is passive positional evidence, never an assertion of an outbound route.
-const flood = width => `SELECT :target AS targetPublicKey,h.distance,p.last_received_at AS receivedAt
+const flood = width => `SELECT :target AS targetPublicKey,h.distance,p.last_received_at AS receivedAt,2 AS priority
   FROM topology_path_hops h INDEXED BY idx_topology_hops_prefix CROSS JOIN topology_paths p ON p.id=h.path_id
   WHERE h.hash_width=${width} AND h.prefix=substr(:target,1,${width * 2})
     AND p.observer_public_key=:observer AND ${validPath} AND :target!=:observer
     AND EXISTS(SELECT 1 FROM nodes WHERE public_key_hex=:target AND type='REPEATER')
     AND (SELECT count(*) FROM nodes WHERE upper(substr(public_key_hex,1,${width * 2}))=substr(:target,1,${width * 2}))=1`;
-const direct = exact => `SELECT d.target_public_key AS targetPublicKey,1 AS distance,d.received_at AS receivedAt
+const direct = exact => `SELECT d.target_public_key AS targetPublicKey,1 AS distance,d.received_at AS receivedAt,0 AS priority
   FROM telemetry_direct_evidence d ${exact ? '' : 'INDEXED BY idx_telemetry_direct_fresh'} JOIN nodes n ON n.public_key_hex=d.target_public_key
   JOIN observer_runs r ON r.id=d.run_id WHERE d.observer_public_key=:observer AND d.eligible=1
     AND r.wall_time_anomaly=0 AND n.type='REPEATER' AND d.target_public_key!=:observer
     AND d.received_at>:cutoff AND d.received_at<=:now
     ${exact ? 'AND d.target_public_key=:target' : ''}`;
-const candidateFlood = width => `SELECT n.public_key_hex AS targetPublicKey,h.distance,h.receivedAt
+const candidateFlood = width => `SELECT n.public_key_hex AS targetPublicKey,h.distance,h.receivedAt,2 AS priority
   FROM resolved h CROSS JOIN nodes n ON upper(substr(n.public_key_hex,1,${width * 2}))=+h.prefix
   WHERE h.hashWidth=${width} AND n.type='REPEATER' AND n.public_key_hex!=:observer
     AND length(n.public_key_hex)=64 AND n.public_key_hex NOT GLOB '*[^0-9A-F]*'`;
@@ -50,13 +50,15 @@ export const TELEMETRY_CANDIDATE_SQL = `WITH hops AS MATERIALIZED (
   WHERE p.observer_public_key=:observer AND ${validPath} GROUP BY h.hash_width,h.prefix
 ), resolved AS MATERIALIZED (SELECT * FROM hops h WHERE CASE h.hashWidth
   ${[1, 2, 3].map(w => `WHEN ${w} THEN (SELECT count(*) FROM nodes WHERE upper(substr(public_key_hex,1,${w * 2}))=+h.prefix)`).join(' ')} END=1)
-  SELECT targetPublicKey,min(distance) AS distance,max(receivedAt) AS receivedAt
+  SELECT targetPublicKey,min(distance) AS distance,max(receivedAt) AS receivedAt,min(priority) AS priority
   FROM (${[direct(false), ...[1, 2, 3].map(candidateFlood), `SELECT json_extract(value,'$.targetPublicKey') AS targetPublicKey,
-    json_extract(value,'$.distance') AS distance,json_extract(value,'$.receivedAt') AS receivedAt FROM json_each(:frontier)`].join(' UNION ALL ')})
+    json_extract(value,'$.distance') AS distance,json_extract(value,'$.receivedAt') AS receivedAt,
+    json_extract(value,'$.priority') AS priority FROM json_each(:frontier)`].join(' UNION ALL ')})
   GROUP BY targetPublicKey
-  HAVING (:afterDistance=0 AND targetPublicKey>:after) OR (:afterDistance>0 AND
-    (min(distance)>:afterDistance OR (min(distance)=:afterDistance AND targetPublicKey>:after)))
-  ORDER BY distance,targetPublicKey LIMIT :limit`;
+  HAVING :afterDistance=0 OR min(distance)>:afterDistance OR (min(distance)=:afterDistance AND
+    ((:afterPriority<0 AND targetPublicKey>:after) OR min(priority)>:afterPriority
+      OR (min(priority)=:afterPriority AND targetPublicKey>:after)))
+  ORDER BY distance,priority,targetPublicKey LIMIT :limit`;
 export const TELEMETRY_ELIGIBILITY_SQL = `SELECT targetPublicKey,min(distance) AS distance,max(receivedAt) AS receivedAt
   FROM (${[direct(true), ...[1, 2, 3].map(flood)].join(' UNION ALL ')}) GROUP BY targetPublicKey`;
 
@@ -146,7 +148,8 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
     const best = [passive, ...frontier].filter(Boolean).sort(compareCandidates)[0];
     return best ? { targetPublicKey: best.targetPublicKey, distance: best.distance, receivedAt: best.receivedAt } : undefined;
   }
-  function compareCandidates(a, b) { return a.distance - b.distance || a.targetPublicKey.localeCompare(b.targetPublicKey); }
+  function compareCandidates(a, b) { return a.distance - b.distance || (a.priority ?? 3) - (b.priority ?? 3)
+    || a.targetPublicKey.localeCompare(b.targetPublicKey); }
   function finish(state, end, policy, successful, unsupported = false, authFailure = false) {
     state.policy = conservative(state.policy, policy);
     state.lastPolicyAt = Math.max(state.lastPolicyAt, end);
@@ -186,10 +189,12 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
         windowMs: input.windowMs, radius: input.radius });
       const rows = rollback ? [] : candidates.all({ observer: input.observerPublicKey, now: input.now,
         cutoff: input.now - input.windowMs, radius: input.radius, after: input.afterPublicKey ?? '',
-        afterDistance: input.afterDistance ?? 0, frontier: JSON.stringify(frontier.map(({ targetPublicKey, distance, receivedAt }) =>
-          ({ targetPublicKey, distance, receivedAt }))), limit });
+        afterDistance: input.afterDistance ?? 0, afterPriority: input.afterPriority ?? -1,
+        frontier: JSON.stringify(frontier.map(({ targetPublicKey, distance, receivedAt, priority }) =>
+          ({ targetPublicKey, distance, receivedAt, priority: priority ?? 3 }))), limit });
       return { candidates: rows.map(row => ({ ...row, outboundRouteVerified: false })), limit,
         nextCursor: rows.at(-1)?.targetPublicKey ?? null, nextDistance: rows.at(-1)?.distance ?? null,
+        nextPriority: rows.at(-1)?.priority ?? null,
         exhausted: rows.length < limit, clockRollback: rollback, effectiveNow: highWater };
     },
     reserve(input) {

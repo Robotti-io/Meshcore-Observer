@@ -23,6 +23,7 @@ import { createTelemetryReads } from './telemetry-reads.js';
 import { telemetryPollMigration } from './telemetry-poll-migration.js';
 import { createTelemetryPollState } from './telemetry-poll-state.js';
 import { createTelemetryDiagnostics } from './telemetry-diagnostics.js';
+import { telemetryOwnerInfoMigration } from './telemetry-owner-info-migration.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -600,7 +601,8 @@ const MIGRATIONS = [
     )`,
     'CREATE INDEX idx_telemetry_diagnostics_time ON telemetry_request_diagnostics(completed_at DESC,request_id DESC)',
     'CREATE INDEX idx_telemetry_diagnostics_target_time ON telemetry_request_diagnostics(target_public_key,completed_at DESC,request_id DESC)'
-  ] }
+  ] },
+  telemetryOwnerInfoMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -832,18 +834,24 @@ export class MetricsStore {
       if (migration.version <= currentVersion) {
         continue;
       }
-      this.#db.exec('BEGIN');
+      if (migration.disableForeignKeysForRebuild) this.#db.exec('PRAGMA foreign_keys=OFF');
       try {
-        for (const statement of migration.statements) {
-          this.#db.exec(statement);
+        this.#db.exec('BEGIN');
+        try {
+          for (const statement of migration.statements) this.#db.exec(statement);
+          if (migration.disableForeignKeysForRebuild && this.#db.prepare('PRAGMA foreign_key_check').all().length) {
+            throw new Error('Database migration produced foreign key violations');
+          }
+          // PRAGMA doesn't accept bound parameters; migration.version is our
+          // own fixed integer literal, never external input.
+          this.#db.exec(`PRAGMA user_version = ${migration.version}`);
+          this.#db.exec('COMMIT');
+        } catch (err) {
+          this.#db.exec('ROLLBACK');
+          throw err;
         }
-        // PRAGMA doesn't accept bound parameters; migration.version is our
-        // own fixed integer literal, never external input.
-        this.#db.exec(`PRAGMA user_version = ${migration.version}`);
-        this.#db.exec('COMMIT');
-      } catch (err) {
-        this.#db.exec('ROLLBACK');
-        throw err;
+      } finally {
+        if (migration.disableForeignKeysForRebuild) this.#db.exec('PRAGMA foreign_keys=ON');
       }
     }
   }

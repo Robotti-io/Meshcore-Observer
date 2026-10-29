@@ -1,5 +1,23 @@
 # Feature: Improved Telemetry & Reporting
 
+**Implementation follow-up — 2026-10-29:** The telemetry plan now uses
+directional neighbour evidence for inside-out trace prioritization. Fresh,
+complete reports classify listed strong neighbours as primary candidates,
+listed weaker neighbours as secondary candidates, and omitted neighbours as
+likely unreachable candidates; omission is not proof of impossibility. The
+destination is queried first, and outward expansion proceeds only after the
+current layer has been collected. Inbound message paths remain evidence of the
+opposite direction only. See #34 and the
+[runtime contract](../../telemetry-polling.md#neighbour-led-inside-out-polling--2026-10-26).
+
+Authenticated collection now includes the repeater's bounded owner/contact
+string, surfaced through the existing read-only telemetry APIs and dashboard.
+The Repeaters dashboard shows per-repeater progress by collection step, opens
+response history from the repeater name, omits the separate path detail table,
+and shows active telemetry status without requiring a manual refresh. Useful
+status/sensor observations remain visible when a profile is unverified. The
+v21 schema migration and a fresh live soak remain validation work under #37.
+
 **Target-exchange follow-up — 2026-10-26:** The operator approved keeping
 successful trace/login and due collections together, then waiting for the
 network afterward. The local implementation caps and accounts for every RF
@@ -149,15 +167,33 @@ A single `path` field on the existing node record is not sufficient because:
 
 The Observer should determine telemetry eligibility using an operator-configured maximum hop distance.
 
-A repeater should become eligible only when sufficient path evidence shows that it has appeared within the configured radius.
+A repeater becomes eligible within the configured radius from fresh,
+reporter-scoped direct or neighbour evidence, subject to a valid saved outbound
+contact route. A message path is directional: a path observed arriving at the
+Observer does not prove that its reverse direction works.
 
-The exact path-selection and eligibility algorithm should be finalized during implementation planning after reviewing protocol behavior.
+For neighbour-led expansion, collect the destination's neighbour report first.
+Only after completing collection for the current layer should strong listed
+neighbours become primary next-hop candidates, weaker listed neighbours become
+secondary candidates, and neighbours omitted from a fresh complete report be
+treated as likely-impossible/last-resort candidates. An omission is not
+authoritative proof of impossibility, and incomplete or stale reports cannot
+demote a candidate. Each outward hop still requires fresh evidence and a
+validated outbound route; tracing verifies the selected candidate before
+telemetry collection.
 
 #### 1.3.3 Route selection
 
-When multiple paths have been observed for an eligible repeater, the Observer should select a reasonable route using persisted observations.
+When multiple candidates exist, prioritize fresh directional neighbour
+evidence: strong neighbours first, weaker neighbours second, then candidates
+omitted from fresh complete reports as last resort. Within these classes, use
+distance and stable identity ordering. Keep trace success/failure, route
+freshness, and current contact validity as separate evidence; never infer
+outbound reliability by reversing an inbound path.
 
-Potential factors may include:
+Historical path observations remain useful for radius and context, but do not
+override the directional neighbour evidence above. Retain these factors for
+future policy refinement:
 
 - Hop count.
 - Observation frequency.

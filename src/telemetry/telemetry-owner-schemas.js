@@ -6,7 +6,7 @@ const object = (properties, required = Object.keys(properties)) =>
 const integer = (minimum, maximum = Number.MAX_SAFE_INTEGER) => ({ type: 'integer', minimum, maximum });
 const base = remoteRequestSchema.oneOf[0].properties;
 export const telemetryGuestRequestSchema = object({ requestId: base.requestId, targetPublicKey: base.targetPublicKey });
-export const telemetryOwnedRequestSchema = { oneOf: remoteRequestSchema.oneOf.slice(0, 3).map(schema => ({
+export const telemetryOwnedRequestSchema = { oneOf: remoteRequestSchema.oneOf.filter(schema => schema.properties.operation.const !== 'anonymous-regions').map(schema => ({
   ...schema, properties: { ...schema.properties, params: schema.properties.operation.const === 'telemetry'
     ? object({ permissionMask: { const: 0 } }) : schema.properties.operation.const === 'neighbours'
       ? object({ ...schema.properties.params.properties, count: integer(1, 3), prefixLength: { const: 32 } })
@@ -24,7 +24,7 @@ export const telemetryTraceFrameSchema = object({ bytes: { type: 'array', minIte
   items: integer(0, 255) } });
 export const telemetryOwnerClockSchema = object({ wall: integer(0), monotonic: { type: 'number', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } });
 export const telemetryOwnerContextSchema = object({ requestId: base.requestId, targetPublicKey: base.targetPublicKey,
-  operation: { enum: ['guest-login', 'status', 'telemetry', 'neighbours'] }, params: { oneOf: [
+  operation: { enum: ['guest-login', 'owner-info', 'status', 'telemetry', 'neighbours'] }, params: { oneOf: [
     object({}), object({ permissionMask: { const: 0 } }), telemetryOwnedRequestSchema.oneOf[2].properties.params
   ] }, generation: integer(1), observerPublicKey: base.targetPublicKey });
 export const TELEMETRY_OWNER_REASONS = Object.freeze([...new Set([

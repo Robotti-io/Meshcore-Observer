@@ -196,7 +196,7 @@ export function renderDashboardHtml() {
   </div>
   <section class="reporting-panel" aria-labelledby="repeater-reporting-heading">
     <h3 id="repeater-reporting-heading">Repeater evidence</h3>
-    <p class="section-note">Advert events, topology paths, and telemetry history are retained-range evidence; the inventory below is current state.</p>
+    <p class="section-note">Each progress column shows its latest retained event in the selected range; timestamps may come from different attempts. Guest login is an authentication step, separate from telemetry collection. Owner info is the contact string shared by the repeater. The repeater inventory is current state.</p>
     <div id="repeater-reporting-tiles" class="tile-grid">
       <div class="tile"><h4>Advert events</h4><p id="repeater-advert-events">Unavailable</p></div>
       <div class="tile"><h4>Advert nodes</h4><p id="repeater-advert-nodes">Unavailable</p></div>
@@ -206,19 +206,12 @@ export function renderDashboardHtml() {
       <div class="tile"><h4>Telemetry outcomes</h4><p id="repeater-telemetry-outcomes">Unavailable</p></div>
       <div class="tile"><h4>Latest observation</h4><p id="repeater-telemetry-latest">Unavailable</p></div>
       <div class="tile"><h4>Latest outcome</h4><p id="repeater-telemetry-latest-outcome">Unavailable</p></div>
-      <div class="tile"><h4>Failures in latest 25</h4><p id="repeater-telemetry-failed">Unavailable</p></div>
       <div class="tile"><h4>Request attempts in range</h4><p id="repeater-telemetry-attempts">Unavailable</p></div>
-      <div class="tile"><h4>Failed or deferred in latest 25</h4><p id="repeater-telemetry-attempt-failed">Unavailable</p></div>
     </div>
     <p class="data-status" id="repeater-reporting-status">Loading repeater evidence…</p>
+    <p class="telemetry-live-status" id="repeater-telemetry-live-status" role="status" aria-live="polite" aria-atomic="true">Telemetry status: waiting for the latest report…</p>
     <div class="table-scroll" role="region" aria-label="Advert totals by type" tabindex="0">
       <table id="repeater-adverts-table"><caption class="sr-only">Advert totals by type in the selected reporting range</caption><thead><tr><th>Type</th><th>Events</th><th>New</th><th>Rehearsals</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="table-scroll" role="region" aria-label="Bounded topology paths" tabindex="0">
-      <table id="repeater-topology-table"><caption class="sr-only">Bounded topology paths retained in the database</caption><thead><tr><th>Path</th><th>Kind</th><th>Receptions</th><th>Last received</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="table-scroll" role="region" aria-label="Recent telemetry requests" tabindex="0">
-      <table id="repeater-telemetry-outcomes-table"><caption class="sr-only">Recent telemetry attempts with selected route, trace evidence, contact synchronization, response timeout, dispatch mode and outcome</caption><thead><tr><th>Attempt ended</th><th>Repeater</th><th>Operation</th><th>Phase</th><th>Selected path</th><th>Trace</th><th>Route evidence</th><th>Contact sync</th><th>Preflight</th><th>Response wait</th><th>Dispatch mode</th><th>Result</th><th>Reason</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
   <div class="search-bar">
@@ -226,9 +219,9 @@ export function renderDashboardHtml() {
   </div>
     <p class="data-status" id="nodes-data-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading current repeater list…</p>
   <div class="table-scroll" role="region" aria-label="Current repeater inventory" tabindex="0">
-    <table id="nodes-table">
-      <caption class="sr-only">Current repeater inventory</caption>
-      <thead><tr><th>Name</th><th>Public key</th><th>First heard</th><th>Last heard</th></tr></thead>
+      <table id="nodes-table">
+      <caption class="sr-only">Current repeaters and latest telemetry collection progress</caption>
+      <thead><tr><th>Repeater</th><th>Latest trace</th><th>Guest login</th><th>Neighbours</th><th>Status</th><th>Sensors</th><th>Owner info</th><th>Latest activity</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -238,6 +231,14 @@ export function renderDashboardHtml() {
     <button type="button" id="nodes-next">Next</button>
   </div>
 </section>
+<dialog id="repeater-history-dialog" aria-labelledby="repeater-history-title">
+  <div class="dialog-heading"><div><h2 id="repeater-history-title">Repeater response history</h2><p id="repeater-history-key" class="section-note"></p></div><button type="button" id="repeater-history-close" aria-label="Close response history">Close</button></div>
+  <p id="repeater-history-status" class="data-status" role="status" aria-live="polite">Loading response history…</p>
+  <div class="table-scroll" role="region" aria-label="Repeater response history" tabindex="0">
+    <table id="repeater-history-table"><caption class="sr-only">Telemetry requests and responses for this repeater</caption><thead><tr><th>Time</th><th>Step</th><th>Result</th><th>Details</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="pagination"><button type="button" id="repeater-history-older" hidden>Load older events</button></div>
+</dialog>
 </main>
 
 <script src="${CHARTJS_URL}" integrity="${CHARTJS_INTEGRITY}" crossorigin="anonymous"></script>

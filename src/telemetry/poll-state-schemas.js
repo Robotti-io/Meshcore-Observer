@@ -26,6 +26,7 @@ export const telemetryEvidenceQuerySchema = object({ ...scope, now: time,
   radius: { type: 'integer', minimum: 1, maximum: 63 } });
 export const telemetryCandidateQuerySchema = object({ ...telemetryEvidenceQuerySchema.properties,
   afterPublicKey: key, afterDistance: { type: 'integer', minimum: 1, maximum: 63 },
+  afterPriority: { type: 'integer', minimum: -1, maximum: 3 },
   limit: { type: 'integer', minimum: 1, maximum: 200 } }, ['observerPublicKey', 'now', 'windowMs', 'radius']);
 telemetryCandidateQuerySchema.dependencies = { afterPublicKey: ['afterDistance'], afterDistance: ['afterPublicKey'] };
 export const telemetryDirectEvidenceSchema = object({ ...scope, runId: uuid, receivedAt: time,

@@ -1,5 +1,9 @@
 # Telemetry polling configuration
 
+Owner info is collected as a separate authenticated telemetry step and stored
+with the other normalized observations. The stored contact string is available
+in repeater response history and is never copied to application logs.
+
 Delivered phases: **#34 T1–T6 startup, protocol, guarded owner, durable state, opt-in runtime producer and offline acceptance**.
 Polling remains disabled by default. Explicitly enabling it with a valid policy
 and optional guest-secret file now activates guarded collection after the
@@ -117,7 +121,7 @@ Required fields are `version: 1` and `defaultCredentialRef`. Optional fields are
 `components`, `neighbours`, `groups` and `targets`. Unknown fields are rejected
 at every object boundary.
 
-- `components` permits `status`, `sensors`, `neighbours` booleans; omissions
+- `components` permits `status`, `sensors`, `neighbours`, `ownerInfo` booleans; omissions
   default to true and at least one must be enabled.
 - `neighbours` permits version 0, count 1–3, offset 0–65,535, orderBy 0–3 and
   prefixLength 32. Defaults are 0/3/0/0/32. This is one page with full-key
@@ -462,9 +466,9 @@ Disabled collection still records verified reporter-scoped direct markers.
 
 Refresh cadence describes an objective. With the default shared budget of one
 physical remote request per minute there are at most **1,440 request slots/day**
-before quiet-air, foreground work and errors. A fresh guest login plus three
-components costs at least **four slots per target**, so an isolated first sweep
-of 100 targets requires at least **400 minutes (6h 40m)**. This is a lower bound,
+before quiet-air, foreground work and errors. A fresh guest login plus four
+enabled data components costs at least **five slots per target**, so an isolated
+first sweep of 100 targets requires at least **500 minutes (8h 20m)**. This is a lower bound,
 not a capacity guarantee: distributed component phases, the ten-minute session
 lifetime, additional logins, retries and region discovery can increase it. Both
 background producers share the same cap and fair admissions; foreground work
@@ -485,7 +489,7 @@ retried locally with new collection paused; it never schedules an RF replay.
 The T6 fixture runs the real entrypoint, SDK frame dispatch, radio manager,
 packet decoder, guest owner, scheduler and SQLite lifecycle with synthetic
 transport and controlled clocks. It checks actual reserve-before-send boundaries,
-all three components, default-off capture/bot behavior, busy air, rejection paths,
+the original status/sensors/neighbours components, default-off capture/bot behavior, busy air, rejection paths,
 timeouts, both auth/data save failures, stop at ACK/reply waits, ten crash
 boundaries, clean/abrupt restart, and closed-backup restore. No operator secret,
 real socket, radio login, physical device contact edit or deployment is exercised.
@@ -583,7 +587,7 @@ and the `neighbours` component are enabled.
    becomes the first relay of an outward route; a login alone is insufficient.
 2. Candidate scans visit the minimum evidenced distance first and use the full
    key as a stable tie-break. Within a target, due components are considered in
-   `neighbours → status → sensors` order. Existing phases, refresh deadlines,
+   `neighbours → status → sensors → owner-info` order. Existing phases, refresh deadlines,
    retries and authentication cooldowns are preserved. This prioritizes a due
    neighbour query; it does not force an early refresh.
 3. A fresh decoded neighbour response from a proven reporter can add a known,
@@ -613,13 +617,26 @@ evidence behind the cursor is considered on the next sweep. Candidate pages
 remain capped at 16, and neighbour expansion reads at most the 512 newest
 qualifying saved pages per lookup. These limits and the configured bounded
 neighbour page make coverage a lower bound, rather than a complete mesh graph.
-There is no recursive graph walk or RF catch-up batch. SNR remains a diagnostic
-measurement; this pivot ranks routes using existing anchor, trace, neighbour and
-passive support counts rather than introducing an SNR quality score.
+The scheduler expands one collected layer at a time; it does not issue an
+unbounded recursive walk or RF catch-up batch.
 
-The implementation reuses existing SQLite observations and diagnostics; it adds
-no migration, public HTTP/MQTT contract or dependency. The distance/key cursor is
-internal scheduler bookkeeping. Restart an already-running telemetry instance
+Fresh decoded neighbour entries now guide both target and route priority. An
+entry with SNR at or above 0 dB is a strong candidate; a lower SNR is a weak
+fallback. At equal distance, strong candidates are scheduled before weak ones,
+and route selection compares trace success before neighbour strength. A
+passively suggested route whose last relay has a fresh, complete, uniquely
+resolved single-page neighbour report that omits the destination is ranked as
+likely impossible, but retained as a last-resort route. Absence is unknown when
+the report is stale, partial, paginated, ambiguous, or otherwise incomplete.
+This is directional evidence from the reporting repeater's neighbor list; a
+message path alone does not establish the return direction. Existing route
+trace and owner checks still decide whether a selected route is usable.
+
+The neighbour-frontier pivot reuses existing SQLite observations and diagnostics;
+that pivot added no migration, public HTTP/MQTT contract or dependency. The later
+owner-info component is covered by migration v21 and existing generic telemetry
+reads. The distance/priority/key cursor is internal scheduler bookkeeping.
+Restart an already-running telemetry instance
 to load the change, preserving its database and configuration. Saved evidence
 keeps its original time, and saved deadlines are not reset. Port 3000's
 publication/bot instance does not need telemetry enabled for this change.
@@ -686,7 +703,7 @@ eligibility, trace, contact, foreground, quiet-air and persistence checks.
 An exchange admits one target under the ordinary shared budget, validates its
 route, traces it and sends guest login after the successful trace and short
 step/quiet-air checks. A successful proof must be saved before the next due
-collection can run. Due components use `neighbours → status → sensors` order,
+collection can run. Due components use `neighbours → status → sensors → owner-info` order,
 each at most once in that exchange. Successful collections advance to the next
 due component on the short exchange tick. Future refresh deadlines are never
 pulled forward. An already-valid guest session still uses the existing exact
@@ -716,8 +733,8 @@ writes. After the exchange ends, the shared remote cooldown is at least:
 `max(exchangeRestMs, usedAttempts * max(minIntervalMs, ceil(60000 / maxPerMinute)))`
 
 With the default one-per-minute policy, trace + login + one query owes at least
-three minutes **after completion**. Trace + login + all three due components
-owes at least five minutes. These are repaid turns, not an additional allowance
+three minutes **after completion**. Trace + login + all four due components
+owes at least six minutes. These are repaid turns, not an additional allowance
 of six requests every minute. Quiet-air checks can add delay within the exchange.
 An exchange with no RF dispatch spends no credit. Budget credit/debt is
 process-local, like the existing shared budget; reconnect does not reset it.
@@ -747,7 +764,7 @@ retaining the failed attempt.
 This follow-up changes pacing and scheduling through the existing owner/store
 seams. It introduces no migration, dependency or public HTTP/MQTT change. Existing
 separate-request regression cases explicitly select `EXCHANGE_MAX_REQUESTS=1`;
-new default-mode real-startup and real-owner scenarios cover prompt collection,
-all three components, delayed replies, cooldown repayment, retained retries,
+new default-mode real-startup and real-owner scenarios cover prompt collection
+of the original three data components, delayed replies, cooldown repayment, retained retries,
 foreground priority, unsafe proof, failed persistence and generation loss.
 The agent performed no live RF test or process restart for this implementation.

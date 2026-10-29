@@ -62,14 +62,14 @@ export const telemetryPollSettingsSchema = object(settingsProperties);
 export const telemetryPollLoadSchema = object({ settings: telemetryPollSettingsSchema,
   policyPath: { anyOf: [path, { type: 'null' }] }, secretsPath: { anyOf: [path, { type: 'null' }] } });
 
-const componentProperties = Object.fromEntries(['status', 'sensors', 'neighbours'].map(name => [name, { type: 'boolean' }]));
+const componentProperties = Object.fromEntries(['status', 'sensors', 'neighbours', 'ownerInfo'].map(name => [name, { type: 'boolean' }]));
 const components = object(componentProperties);
 const statusProfile = object({ layout: { enum: ['common48', 'current56'] }, evidence: { enum: ['unknown', 'established'] } });
 const verifiedStatusProfile = object({ layout: { enum: ['common48', 'current56'] }, evidence: { const: 'established' } });
 const neighbourProperties = { version: { const: 0 }, count: integer(1, 3), offset: integer(0, 65535),
   orderBy: { enum: [0, 1, 2, 3] }, prefixLength: { const: 32 } };
 
-export const TELEMETRY_POLL_COMPONENT_DEFAULTS = Object.freeze({ status: true, sensors: true, neighbours: true });
+export const TELEMETRY_POLL_COMPONENT_DEFAULTS = Object.freeze({ status: true, sensors: true, neighbours: true, ownerInfo: true });
 export const TELEMETRY_POLL_NEIGHBOUR_DEFAULTS = Object.freeze({ version: 0, count: 3, offset: 0, orderBy: 0, prefixLength: 32 });
 export const TELEMETRY_POLL_STATUS_DEFAULT = Object.freeze({ layout: 'common48', evidence: 'unknown' });
 

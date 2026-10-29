@@ -19,6 +19,7 @@ function bytes(minItems, maxItems = minItems) {
 
 const operations = {
   status: object({}),
+  'owner-info': object({}),
   telemetry: object({ permissionMask: byte }),
   neighbours: object({
     version: { const: 0 },

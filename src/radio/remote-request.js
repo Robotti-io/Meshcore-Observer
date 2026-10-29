@@ -25,7 +25,9 @@ export function prepareRemoteRequest(request, uniquenessBytes) {
   }
 
   let requestBytes;
-  if (request.operation === 'status') {
+  if (request.operation === 'owner-info') {
+    requestBytes = [0x07, 0, 0, 0, 0, ...uniquenessBytes];
+  } else if (request.operation === 'status') {
     requestBytes = [0x01, 0, 0, 0, 0, ...uniquenessBytes];
   } else if (request.operation === 'telemetry') {
     // The repeater inverts this byte to select requested sensor permissions;

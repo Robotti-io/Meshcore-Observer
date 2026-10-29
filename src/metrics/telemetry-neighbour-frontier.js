@@ -48,9 +48,9 @@ export function createTelemetryNeighbourFrontier(db) {
   function frontier(query, adjacent) {
     if (!validQuery(query)) throw new Error('Invalid telemetry neighbour query');
     adjacent ??= anchors(query);
-    const routes = [];
+    const routes = [], reports = new Map();
     let rejected = false;
-    if (!adjacent.size || query.radius < 2) return { routes, rejected };
+    if (!adjacent.size || query.radius < 2) return { routes, rejected, reports };
     const cutoff = query.now - query.windowMs;
     for (const row of rows.all(query.observerPublicKey, cutoff, query.now, cutoff, query.now)) {
       let observation, diagnostic;
@@ -76,6 +76,26 @@ export function createTelemetryNeighbourFrontier(db) {
         keys.push(matches[0].publicKeyHex);
       }
       if (!safe || keys.at(-1) !== row.reporterPublicKey || !adjacent.has(keys[0])) { rejected = true; continue; }
+      // A single page proves absence only when it covers the entire reported
+      // table. Ambiguous/non-repeater entries make that negative evidence unsafe.
+      const reporter = row.reporterPublicKey;
+      if (!reports.has(reporter)) {
+        const { params } = observation.variant;
+        const completePage = params.offset === 0 && observation.data.receivedCount === observation.data.reportedTotal
+          && observation.data.receivedCount <= params.count;
+        const targets = [];
+        let safeCompletePage = completePage;
+        if (completePage) for (const entry of observation.data.entries) {
+          const matches = resolve(entry.prefix);
+          if (matches.length !== 1 || matches[0].type !== 'REPEATER') { safeCompletePage = false; break; }
+          const routeMatches = resolve(matches[0].publicKeyHex.slice(0, 4));
+          if (routeMatches.length !== 1 || routeMatches[0].publicKeyHex !== matches[0].publicKeyHex) {
+            safeCompletePage = false; break;
+          }
+          targets.push(matches[0].publicKeyHex);
+        }
+        reports.set(reporter, { complete: safeCompletePage, targetPublicKeys: safeCompletePage ? targets : [] });
+      }
       const ageMs = query.now - observation.observedAt;
       if (ageMs < 0 || ageMs >= query.windowMs) continue;
       for (const entry of observation.data.entries) {
@@ -88,10 +108,11 @@ export function createTelemetryNeighbourFrontier(db) {
         // contact/trace path before it can extend the next outward layer.
         const routeMatches = resolve(targetPublicKey.slice(0, 4));
         if (routeMatches.length !== 1 || routeMatches[0].publicKeyHex !== targetPublicKey) continue;
-        routes.push({ targetPublicKey, path, distance: path.length + 1, receivedAt: observation.observedAt });
+        routes.push({ targetPublicKey, path, distance: path.length + 1, receivedAt: observation.observedAt,
+          snrDb: entry.snrDb });
       }
     }
-    return { routes, rejected };
+    return { routes, rejected, reports };
   }
   return { anchors, frontier };
 }

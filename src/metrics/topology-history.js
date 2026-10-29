@@ -30,6 +30,7 @@ const PREFIX_EXPRESSIONS = { 1: 'upper(substr(public_key_hex,1,2))',
   2: 'upper(substr(public_key_hex,1,4))', 3: 'upper(substr(public_key_hex,1,6))' };
 const validKey = (value) => /^[0-9a-f]{64}$/i.test(value);
 const validRouteQuery = validators.get(topologyOutboundRouteQuerySchema);
+const STRONG_NEIGHBOUR_SNR_DB = 0;
 
 export function topologyCanonical(evidence) {
   return JSON.stringify(['topology-v1', evidence.observerPublicKey, evidence.route, evidence.kind,
@@ -243,7 +244,8 @@ export function createTopologyHistory(db, requireRun) {
       return { total, candidates, now: query.now, effectiveNow: queryHighWater, windowMs: query.windowMs,
         radius: query.radius, clockRollback, ...POLICY };
     },
-    neighbourCandidates(query) { return neighbours.frontier(query).routes; },
+    neighbourCandidates(query) { return neighbours.frontier(query).routes.map(route => ({ ...route,
+      priority: route.snrDb >= STRONG_NEIGHBOUR_SNR_DB ? 0 : 1 })); },
     outboundRoute(query) {
       if (!validRouteQuery(query)) throw new Error('Invalid topology outbound-route query');
       const durableNow = topologyHighWater.get().value ?? 0;
@@ -270,6 +272,7 @@ export function createTopologyHistory(db, requireRun) {
           const firstKey = resolvePrefix.get(4, path[0]);
           const firstPublicKey = firstKey?.publicKeyHex?.toUpperCase();
           candidate = { path, receptionCount: 0, passiveReceptionCount: 0, neighbourSupportCount: 0,
+            strongNeighbourSupportCount: 0, weakNeighbourSupportCount: 0, bestNeighbourSnrDb: null, priority: 3,
             receivedAt: 0, anchorSuccessCount: anchors.get(firstPublicKey) ?? 0 };
           byRoute.set(routeKey, candidate);
         }
@@ -321,10 +324,25 @@ export function createTopologyHistory(db, requireRun) {
         if (route.targetPublicKey !== query.targetPublicKey) continue;
         const candidate = routeFor(route.path);
         candidate.neighbourSupportCount++;
+        if (route.snrDb >= STRONG_NEIGHBOUR_SNR_DB) {
+          candidate.strongNeighbourSupportCount++;
+          candidate.priority = Math.min(candidate.priority, 0);
+        } else {
+          candidate.weakNeighbourSupportCount++;
+          candidate.priority = Math.min(candidate.priority, 1);
+        }
+        candidate.bestNeighbourSnrDb = candidate.bestNeighbourSnrDb === null ? route.snrDb
+          : Math.max(candidate.bestNeighbourSnrDb, route.snrDb);
         candidate.receivedAt = Math.max(candidate.receivedAt, route.receivedAt);
         if (candidate.passiveReceptionCount === 0) candidate.receptionCount = candidate.neighbourSupportCount;
       }
       const candidates = [...byRoute.values()];
+      for (const candidate of candidates) {
+        if (candidate.priority !== 3 || !candidate.path.length) continue;
+        const lastRelay = resolvePrefix.get(4, candidate.path.at(-1))?.publicKeyHex?.toUpperCase();
+        const report = frontier.reports.get(lastRelay);
+        if (report?.complete && !report.targetPublicKeys.includes(query.targetPublicKey)) candidate.priority = 2;
+      }
       const positionSupport = new Map();
       const neighbourPositionSupport = new Map();
       for (const candidate of candidates) candidate.path.forEach((relayId, position) => {
@@ -352,6 +370,15 @@ export function createTopologyHistory(db, requireRun) {
           const aTrace = a.hopWeights[position]?.traceSuccessCount ?? 0;
           const bTrace = b.hopWeights[position]?.traceSuccessCount ?? 0;
           if (aTrace !== bTrace) return bTrace - aTrace;
+        }
+        if (a.strongNeighbourSupportCount !== b.strongNeighbourSupportCount)
+          return b.strongNeighbourSupportCount - a.strongNeighbourSupportCount;
+        if (a.bestNeighbourSnrDb !== b.bestNeighbourSnrDb)
+          return (b.bestNeighbourSnrDb ?? -Infinity) - (a.bestNeighbourSnrDb ?? -Infinity);
+        if (a.weakNeighbourSupportCount !== b.weakNeighbourSupportCount)
+          return b.weakNeighbourSupportCount - a.weakNeighbourSupportCount;
+        if (a.priority !== b.priority) return a.priority - b.priority;
+        for (let position = 0; position < maxHopCount; position++) {
           const aNeighbours = a.hopWeights[position]?.neighbourSupportCount ?? 0;
           const bNeighbours = b.hopWeights[position]?.neighbourSupportCount ?? 0;
           if (aNeighbours !== bNeighbours) return bNeighbours - aNeighbours;
