@@ -25,6 +25,20 @@ export const LOOKUP_RESPONSE_FIELDS = ['foundResponse', 'notFoundResponse', 'amb
 // is - one shared list, not a second hand-copied one.
 export const STATS_RESPONSE_FIELDS = ['response', 'usageResponse'];
 
+const semanticRegionNameSchema = configuredRegionScopesSchema.items;
+const commandScopeSchema = { oneOf: [
+  { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['inherit','device-default','unscoped'] } } },
+  { type: 'object', additionalProperties: false, required: ['mode','region'], properties: {
+    mode: { const: 'region' }, region: semanticRegionNameSchema
+  } }
+] };
+const commandFallbackSchema = { oneOf: [
+  { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { enum: ['none','unscoped'] } } },
+  { type: 'object', additionalProperties: false, required: ['mode','region'], properties: {
+    mode: { const: 'region' }, region: semanticRegionNameSchema
+  } }
+] };
+
 // Normalized output from decryptGroupText(). Sender may be null for a
 // successfully-decrypted bot reply being checked for a mesh rebroadcast;
 // ChannelBot requires a non-null sender before attempting command matching.
@@ -37,6 +51,20 @@ export const decryptedGroupTextSchema = {
     flags: { type: 'integer', minimum: 0, maximum: 255 },
     sender: { anyOf: [{ type: 'string', minLength: 1, maxLength: 49 }, { type: 'null' }] },
     text: { type: 'string' }
+  }
+};
+
+export const satisfactoryChannelResponseSchema = {
+  $id: 'meshcore-observer/bots/satisfactory-channel-response',
+  type: 'object',
+  additionalProperties: false,
+  required: ['channel', 'responseText', 'responseSender', 'observedAt', 'packetHash'],
+  properties: {
+    channel: { type: 'string', minLength: 1, maxLength: 128 },
+    responseText: { type: 'string', maxLength: 512 },
+    responseSender: { anyOf: [{ type: 'string', minLength: 1, maxLength: 49 }, { type: 'null' }] },
+    observedAt: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    packetHash: { type: 'string', minLength: 1, maxLength: 128 }
   }
 };
 
@@ -56,7 +84,7 @@ export const botConfigSchema = {
           minLength: 1,
           maxLength: 30,
           pattern: '^[^\\u0000-\\u001F\\u007F]+$',
-          not: { pattern: '^\\s+$' }
+          not: { anyOf: [{ pattern: '^\\s+$' }, { pattern: '^\\*?$|^\\$' }] }
         },
         {
           type: 'array',
@@ -79,6 +107,17 @@ export const botConfigSchema = {
         required: ['trigger'],
         properties: {
           trigger: { type: 'string', minLength: 1 },
+          // Opt-in only: when true, this command requires a leading
+          // @[Companion name] selector matching the current radio identity.
+          requiresTarget: { type: 'boolean' },
+          // Opt-in only: exact commands with a sender-addressed response can
+          // suppress a matching durable reply while it is still pending.
+          suppressIfAnswered: { type: 'boolean' },
+          // Omitted/inherit preserves bot-level and incoming-scope behavior.
+          scope: commandScopeSchema,
+          // Omitted fallback is none; explicit fallback stays within any
+          // fixed bot scope or region allowlist.
+          fallback: commandFallbackSchema,
           // Defaults to 'exact' (today's only behavior - a plain trigger
           // -> single response template). 'lookup' opts a command into
           // argument parsing (see channel-bot.js) and requires the four

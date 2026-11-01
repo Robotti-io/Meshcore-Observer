@@ -3,7 +3,12 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
-import { botInteractionSchema, botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
+import { botInteractionSchema, botReplyDeliveryPolicySchema, botReplyAcknowledgementSchema,
+  botReplyResolutionSchema, botReplyDispatchClaimSchema, botReplyRecoverySchema,
+  botReplySuppressionCandidatesSchema,
+  botReplySuppressionSchema,
+  botReplyLifecycleRangeSchema,
+  botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
 import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema,
   verifiedAdvertRouteQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
@@ -24,6 +29,8 @@ import { telemetryPollMigration } from './telemetry-poll-migration.js';
 import { createTelemetryPollState } from './telemetry-poll-state.js';
 import { createTelemetryDiagnostics } from './telemetry-diagnostics.js';
 import { telemetryOwnerInfoMigration } from './telemetry-owner-info-migration.js';
+import { botReplyLifecycleMigration } from './bot-reply-lifecycle-migration.js';
+import { botReplySuppressionMigration } from './bot-reply-suppression-migration.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -72,6 +79,14 @@ function explainDatabaseLock(error) {
 }
 
 const validateBotInteraction = compileSchema(botInteractionSchema);
+const validateBotReplyDeliveryPolicy = compileSchema(botReplyDeliveryPolicySchema);
+const validateBotReplyAcknowledgement = compileSchema(botReplyAcknowledgementSchema);
+const validateBotReplyResolution = compileSchema(botReplyResolutionSchema);
+const validateBotReplyDispatchClaim = compileSchema(botReplyDispatchClaimSchema);
+const validateBotReplyRecovery = compileSchema(botReplyRecoverySchema);
+const validateBotReplySuppressionCandidates = compileSchema(botReplySuppressionCandidatesSchema);
+const validateBotReplySuppression = compileSchema(botReplySuppressionSchema);
+const validateBotReplyLifecycleRange = compileSchema(botReplyLifecycleRangeSchema);
 const validateKnownRegionScopes = compileSchema(knownRegionScopesSchema);
 const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
 const validateBotUsageRange = compileSchema(botUsageRangeSchema);
@@ -602,7 +617,9 @@ const MIGRATIONS = [
     'CREATE INDEX idx_telemetry_diagnostics_time ON telemetry_request_diagnostics(completed_at DESC,request_id DESC)',
     'CREATE INDEX idx_telemetry_diagnostics_target_time ON telemetry_request_diagnostics(target_public_key,completed_at DESC,request_id DESC)'
   ] },
-  telemetryOwnerInfoMigration
+  telemetryOwnerInfoMigration,
+  botReplyLifecycleMigration,
+  botReplySuppressionMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -618,6 +635,9 @@ const BOT_REPLY_COLUMNS = `
   handler_state_json AS handlerStateJson,
   sender_identifier AS senderIdentifier, sender_identifier_kind AS senderIdentifierKind,
   sender_identifier_source AS senderIdentifierSource,
+  delivery_policy_json AS deliveryPolicyJson, recipient_public_key AS recipientPublicKey,
+  dispatch_started_at AS dispatchStartedAt, attempt_count AS attemptCount, outcome_reason AS outcomeReason,
+  ack_status AS ackStatus, ack_at AS ackAt, ack_latency_ms AS ackLatencyMs,
   enqueued_at AS enqueuedAt, expires_at AS expiresAt, status,
   resolved_at AS resolvedAt, queued_ms AS queuedMs
 `;
@@ -627,12 +647,19 @@ function toNumberOrNull(value) {
 }
 
 function mapBotReplyRow(row) {
+  const deliveryPolicy = JSON.parse(row.deliveryPolicyJson);
+  if (!validateBotReplyDeliveryPolicy(deliveryPolicy)) throw new Error(`Invalid persisted bot reply delivery policy: ${formatErrors(validateBotReplyDeliveryPolicy.errors)}`);
   return {
     ...row,
+    deliveryPolicy,
     id: Number(row.id),
     hopCount: toNumberOrNull(row.hopCount),
     enqueuedAt: toNumberOrNull(row.enqueuedAt),
     expiresAt: toNumberOrNull(row.expiresAt),
+    dispatchStartedAt: toNumberOrNull(row.dispatchStartedAt),
+    attemptCount: Number(row.attemptCount),
+    ackAt: toNumberOrNull(row.ackAt),
+    ackLatencyMs: toNumberOrNull(row.ackLatencyMs),
     resolvedAt: toNumberOrNull(row.resolvedAt),
     queuedMs: toNumberOrNull(row.queuedMs)
   };
@@ -698,7 +725,11 @@ export class MetricsStore {
   #selectExpiredBotRepliesStmt;
   #expireBotRepliesStmt;
   #peekOldestPendingBotReplyStmt;
+  #selectPendingBotReplyCandidatesStmt;
+  #claimBotReplyDispatchStmt;
   #resolveBotReplyStmt;
+  #recoverBotReplyDispatchStmt;
+  #resolveBotReplyAckStmt;
   #selectFloodAdvertStateStmt;
   #requestFloodAdvertStmt;
   #startFloodAdvertAttemptStmt;
@@ -774,8 +805,9 @@ export class MetricsStore {
         region_scope,
         handler_state_json,
         enqueued_at, expires_at, status,
-        sender_identifier, sender_identifier_kind, sender_identifier_source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        sender_identifier, sender_identifier_kind, sender_identifier_source,
+        delivery_policy_json, recipient_public_key
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
     `);
     this.#knownRegionScopesStmt = this.#db.prepare(`
       SELECT DISTINCT json_each.value AS regionScope
@@ -788,17 +820,34 @@ export class MetricsStore {
       ORDER BY regionScope COLLATE BINARY
       LIMIT 4096
     `);
-    this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status = 'pending'");
+    this.#countPendingBotRepliesStmt = this.#db.prepare("SELECT COUNT(*) AS total FROM bot_replies WHERE status IN ('pending','dispatching')");
     this.#selectExpiredBotRepliesStmt = this.#db.prepare(
       `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' AND expires_at <= ? ORDER BY enqueued_at ASC`
     );
     this.#expireBotRepliesStmt = this.#db.prepare(
-      "UPDATE bot_replies SET status = 'expired', resolved_at = ?, queued_ms = ? - enqueued_at WHERE status = 'pending' AND expires_at <= ?"
+      "UPDATE bot_replies SET status = 'expired', resolved_at = ?, queued_ms = ? - enqueued_at, outcome_reason='expired-before-dispatch', recipient_public_key=NULL WHERE status = 'pending' AND expires_at <= ?"
     );
     this.#peekOldestPendingBotReplyStmt = this.#db.prepare(
       `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies WHERE status = 'pending' ORDER BY enqueued_at ASC LIMIT 1`
     );
-    this.#resolveBotReplyStmt = this.#db.prepare('UPDATE bot_replies SET status = ?, resolved_at = ?, queued_ms = ? WHERE id = ?');
+    this.#selectPendingBotReplyCandidatesStmt = this.#db.prepare(
+      `SELECT ${BOT_REPLY_COLUMNS} FROM bot_replies
+       WHERE status='pending' AND channel=? COLLATE BINARY AND enqueued_at<=? AND expires_at>?
+       ORDER BY enqueued_at ASC LIMIT 257`
+    );
+    this.#claimBotReplyDispatchStmt = this.#db.prepare(`UPDATE bot_replies SET status='dispatching',dispatch_started_at=?,
+      attempt_count=attempt_count+1,ack_status=CASE json_extract(delivery_policy_json,'$.transport')
+        WHEN 'private' THEN 'waiting' ELSE 'not-applicable' END
+      WHERE id=? AND status='pending' AND expires_at>?
+        AND attempt_count<json_extract(delivery_policy_json,'$.maxAttempts')`);
+    this.#resolveBotReplyStmt = this.#db.prepare(`UPDATE bot_replies SET status=?,resolved_at=?,queued_ms=?,outcome_reason=?,
+      recipient_public_key=NULL WHERE id=? AND ((? IN ('sent','failed','delivery-unknown') AND status='dispatching')
+        OR (? IN ('expired','cancelled','suppressed') AND status='pending'))`);
+    this.#recoverBotReplyDispatchStmt = this.#db.prepare(`UPDATE bot_replies SET status='delivery-unknown',resolved_at=?,
+      queued_ms=?-enqueued_at,outcome_reason='process-restart',recipient_public_key=NULL
+      WHERE status='dispatching'`);
+    this.#resolveBotReplyAckStmt = this.#db.prepare(`UPDATE bot_replies SET ack_status=?,ack_at=?,
+      ack_latency_ms=?-dispatch_started_at WHERE id=? AND status='sent' AND ack_status='waiting' AND ?>=dispatch_started_at`);
     this.#selectFloodAdvertStateStmt = this.#db.prepare(`
       SELECT status, requested_at AS requestedAt, attempt_started_at AS attemptStartedAt,
              last_attempt_at AS lastAttemptAt, last_sent_at AS lastSentAt, next_due_at AS nextDueAt
@@ -1112,7 +1161,7 @@ export class MetricsStore {
     const timestamps = {
       packets: 'SELECT MIN(sample_at) AS earliest FROM metrics_samples',
       botsAccepted: 'SELECT MIN(enqueued_at) AS earliest FROM bot_replies WHERE enqueued_at IS NOT NULL',
-      botsOutcomes: "SELECT MIN(resolved_at) AS earliest FROM bot_replies WHERE status != 'pending' AND resolved_at IS NOT NULL",
+      botsOutcomes: "SELECT MIN(resolved_at) AS earliest FROM bot_replies WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at IS NOT NULL",
       adverts: 'SELECT MIN(received_at) AS earliest FROM advert_events',
       process: 'SELECT MIN(sample_at) AS earliest FROM process_samples',
       runtimeEvents: 'SELECT MIN(observed_at) AS earliest FROM runtime_events',
@@ -1322,9 +1371,8 @@ export class MetricsStore {
    * bot - backs the dashboard's reply-queue tiles (see metrics-server.js),
    * which - like every other historical chart on the dashboard - are
    * scoped to whatever duration is currently selected, and survive a
-   * restart the way an in-memory counter can't. `status != 'pending'`
-   * excludes anything still waiting for a quiet window - those aren't a
-   * resolved outcome yet.
+   * restart the way an in-memory counter can't. Dispatching is omitted
+   * from terminal totals until its send result or restart recovery is recorded.
    *
    * @param {{start: number, end: number}} options
    * @returns {{sent: number, failed: number, expired: number, cancelled: number}}
@@ -1332,11 +1380,27 @@ export class MetricsStore {
   queryReplyOutcomeTotals({ start, end }) {
     const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0 };
     const rows = this.#db
-      .prepare("SELECT status AS outcome, COUNT(*) AS total FROM bot_replies WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? GROUP BY status")
+      .prepare("SELECT status AS outcome, COUNT(*) AS total FROM bot_replies WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ? GROUP BY status")
       .all(start, end);
     for (const row of rows) {
       totals[row.outcome] = Number(row.total);
     }
+    return totals;
+  }
+
+  /** Complete durable terminal outcome totals, including T6 suppression and restart uncertainty. */
+  queryReplyLifecycleTotals(query) {
+    if (!validateBotReplyLifecycleRange(query)) {
+      throw new Error(`Invalid bot reply lifecycle range: ${formatErrors(validateBotReplyLifecycleRange.errors)}`);
+    }
+    if (query.start > query.end) throw new Error('Invalid bot reply lifecycle range: start must not exceed end');
+    const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0, suppressed: 0, 'delivery-unknown': 0 };
+    const rows = this.#db.prepare(`
+      SELECT status AS outcome, COUNT(*) AS total FROM bot_replies
+      WHERE status IN ('sent','failed','expired','cancelled','suppressed','delivery-unknown')
+        AND resolved_at >= ? AND resolved_at < ? GROUP BY status
+    `).all(query.start, query.end);
+    for (const row of rows) totals[row.outcome] = Number(row.total);
     return totals;
   }
 
@@ -1355,7 +1419,7 @@ export class MetricsStore {
         `
         SELECT bot_name AS botName, status AS outcome, COUNT(*) AS total
         FROM bot_replies
-        WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ?
+        WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ?
         GROUP BY bot_name, status
         ORDER BY bot_name, status
       `
@@ -1405,7 +1469,7 @@ export class MetricsStore {
     const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0 };
     const rows = this.#db.prepare(`
       SELECT status AS outcome, COUNT(*) AS total FROM bot_replies
-      WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}
+      WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}
       GROUP BY status
     `).all(...values);
     for (const row of rows) totals[row.outcome] = Number(row.total);
@@ -1469,7 +1533,7 @@ export class MetricsStore {
   queryBotOutcomeGroups(query) {
     const page = { limit: 100, offset: 0, ...query };
     assertBotQuery(validateBotUsagePage, page);
-    const where = `WHERE status != 'pending' AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
+    const where = `WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
     const values = [page.start, page.end, ...botFilterValues(page)];
     const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, sender_identifier COLLATE BINARY, status';
     const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
@@ -1899,16 +1963,24 @@ export class MetricsStore {
    * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, regionScope?: string|null, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
+    const deliveryPolicy = item.deliveryPolicy ?? { version: 1, transport: 'channel',
+      scope: item.regionScope ? { mode: 'region', region: item.regionScope } : { mode: 'device-default' },
+      fallback: { mode: 'none' }, maxAttempts: 1 };
     const interaction = {
       ...item,
       handlerStateJson: item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
       regionScope: item.regionScope ?? null,
       senderIdentifier: item.senderIdentifier ?? null,
       senderIdentifierKind: item.senderIdentifierKind ?? null,
-      senderIdentifierSource: item.senderIdentifierSource ?? null
+      senderIdentifierSource: item.senderIdentifierSource ?? null,
+      deliveryPolicy,
+      recipientPublicKey: item.recipientPublicKey ?? null
     };
     if (!validateBotInteraction(interaction)) {
       throw new Error(`Invalid bot interaction: ${formatErrors(validateBotInteraction.errors)}`);
+    }
+    if (!validateBotReplyDeliveryPolicy(interaction.deliveryPolicy)) {
+      throw new Error(`Invalid bot reply delivery policy: ${formatErrors(validateBotReplyDeliveryPolicy.errors)}`);
     }
     const { lastInsertRowid } = this.#insertBotReplyStmt.run(
       interaction.botName,
@@ -1924,12 +1996,14 @@ export class MetricsStore {
       interaction.expiresAt,
       interaction.senderIdentifier,
       interaction.senderIdentifierKind,
-      interaction.senderIdentifierSource
+      interaction.senderIdentifierSource,
+      JSON.stringify(interaction.deliveryPolicy),
+      interaction.recipientPublicKey
     );
     return Number(lastInsertRowid);
   }
 
-  /** How many replies are currently queued (`status = 'pending'`) - see ReplyQueue#getStats(). */
+  /** How many replies are pending or dispatching - see ReplyQueue#getStats(). */
   countPendingReplyItems() {
     const { total } = this.#countPendingBotRepliesStmt.get();
     return Number(total);
@@ -1957,17 +2031,10 @@ export class MetricsStore {
   }
 
   /**
-   * The single oldest pending item, or `null` if none are queued -
-   * ReplyQueue calls this once a quiet window is observed (see its own
-   * #tick()), then calls resolveReplyItem() once dispatch settles. Unlike
-   * the in-memory array this replaced (`Array#shift()`), this does *not*
-   * remove the row - it stays `status = 'pending'` until resolveReplyItem()
-   * is called, so a failure between the two (an unexpected process death,
-   * or - far more likely - resolveReplyItem() itself failing) leaves the
-   * item queued to be picked up again rather than silently lost. The
-   * tradeoff is the opposite risk: if the item's *dispatch* already
-   * succeeded but resolveReplyItem() then fails, a future tick could
-   * re-dispatch (and thus double-send) it - see ReplyQueue's own handling.
+   * The single oldest pending item, or `null` if none are queued. ReplyQueue
+   * reads this before the quiet-window callback and atomically claims it as
+   * `dispatching` immediately before sending. A process restart converts any
+   * remaining dispatching item to `delivery-unknown`; it is never replayed.
    *
    * @returns {object|null}
    */
@@ -1976,16 +2043,57 @@ export class MetricsStore {
     return row ? mapBotReplyRow(row) : null;
   }
 
+  /** Returns a bounded set of live pending replies observed no later than this response. */
+  queryPendingReplySuppressionCandidates(input) {
+    if (!validateBotReplySuppressionCandidates(input)) {
+      throw new Error(`Invalid bot reply suppression query: ${formatErrors(validateBotReplySuppressionCandidates.errors)}`);
+    }
+    const rows = this.#selectPendingBotReplyCandidatesStmt.all(input.channel, input.observedAt, input.observedAt);
+    return { items: rows.slice(0, 256).map(mapBotReplyRow), overflow: rows.length > 256 };
+  }
+
+  /** Atomically crosses the durable pending -> dispatching commit boundary. */
+  claimReplyDispatch(input) {
+    if (!validateBotReplyDispatchClaim(input)) throw new Error(`Invalid bot reply dispatch claim: ${formatErrors(validateBotReplyDispatchClaim.errors)}`);
+    return this.#claimBotReplyDispatchStmt.run(input.dispatchStartedAt, input.id, input.dispatchStartedAt).changes === 1;
+  }
+
+  /** Converts interrupted in-flight work to an explicit no-replay terminal state. */
+  recoverDispatchingReplyItems(input) {
+    if (!validateBotReplyRecovery(input)) throw new Error(`Invalid bot reply recovery: ${formatErrors(validateBotReplyRecovery.errors)}`);
+    return this.#recoverBotReplyDispatchStmt.run(input.recoveredAt, input.recoveredAt).changes;
+  }
+
+  /** Records a handler-proven suppression only while the reply is still pending. */
+  suppressPendingReplyItem(input) {
+    if (!validateBotReplySuppression(input)) {
+      throw new Error(`Invalid bot reply suppression: ${formatErrors(validateBotReplySuppression.errors)}`);
+    }
+    const item = this.getReplyById(input.id);
+    const queuedMs = Math.max(0, input.resolvedAt - (item?.enqueuedAt ?? input.resolvedAt));
+    return this.#resolveBotReplyStmt.run('suppressed', input.resolvedAt, queuedMs, 'satisfactory-response', input.id,
+      'suppressed', 'suppressed').changes === 1;
+  }
+
+  /** Updates private destination ACK evidence independently from send outcome. */
+  resolveReplyAcknowledgement(input) {
+    if (!validateBotReplyAcknowledgement(input)) throw new Error(`Invalid bot reply acknowledgement: ${formatErrors(validateBotReplyAcknowledgement.errors)}`);
+    return this.#resolveBotReplyAckStmt.run(input.status, input.occurredAt, input.occurredAt, input.id, input.occurredAt).changes === 1;
+  }
+
   /**
-   * Resolves one reply by id - the counterpart to peekOldestPendingReplyItem()
-   * and takeExpiredReplyItems() above; this is the only way a row moves out
-   * of `status = 'pending'` for a reply that was actually dispatched.
+   * Resolves one claimed reply by id. Successfully claimed sends resolve from
+   * `dispatching`; pending-only outcomes such as expiry and suppression use
+   * their own guarded transitions.
    *
    * @param {number} id
    * @param {{status: 'sent'|'failed', resolvedAt: number, queuedMs: number}} resolution
    */
-  resolveReplyItem(id, { status, resolvedAt, queuedMs }) {
-    this.#resolveBotReplyStmt.run(status, resolvedAt, queuedMs, id);
+  resolveReplyItem(id, { status, resolvedAt, queuedMs, reason: requestedReason }) {
+    const reason = status === 'failed' ? (requestedReason ?? 'send-failed') : undefined;
+    const input = { id, status, resolvedAt, queuedMs, ...(reason ? { reason } : {}) };
+    if (!validateBotReplyResolution(input)) throw new Error(`Invalid bot reply resolution: ${formatErrors(validateBotReplyResolution.errors)}`);
+    return this.#resolveBotReplyStmt.run(status, resolvedAt, queuedMs, reason ?? null, id, status, status).changes === 1;
   }
 
   /** One reply by id, in the same shape as the pending-item queries above - for diagnostics/tests. */
@@ -2011,7 +2119,7 @@ export class MetricsStore {
       this.#db.prepare('DELETE FROM metrics_sample_packet_types WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_sample_broker_deliveries WHERE sample_id IN (SELECT id FROM metrics_samples WHERE sample_at < ?)').run(cutoffMs);
       this.#db.prepare('DELETE FROM metrics_samples WHERE sample_at < ?').run(cutoffMs);
-      this.#db.prepare("DELETE FROM bot_replies WHERE status != 'pending' AND resolved_at < ?").run(cutoffMs);
+      this.#db.prepare("DELETE FROM bot_replies WHERE status NOT IN ('pending','dispatching') AND resolved_at < ?").run(cutoffMs);
       this.#db.prepare('DELETE FROM advert_events WHERE received_at < ?').run(cutoffMs);
       this.#db.prepare('DELETE FROM verified_advert_paths WHERE received_at < ?').run(cutoffMs);
       this.#pruneEndedRuns(cutoffMs);

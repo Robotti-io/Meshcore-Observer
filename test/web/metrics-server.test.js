@@ -61,6 +61,7 @@ function seedResolvedReply(store, { botName, trigger, status, occurredAt }) {
     expiresAt: occurredAt + 60000
   });
   const item = store.peekOldestPendingReplyItem();
+  if (['sent','failed'].includes(status)) store.claimReplyDispatch({ id: item.id, dispatchStartedAt: occurredAt });
   store.resolveReplyItem(item.id, { status, resolvedAt: occurredAt, queuedMs: 0 });
 }
 
@@ -604,6 +605,7 @@ test('historical bot reporting separates acceptance, completion, and redacted se
     senderIdentifier: 'A'.repeat(64), senderIdentifierKind: 'public-key', senderIdentifierSource: 'verified-event',
     hopCount: 1, path: 'AA', hash: 'usage-1', enqueuedAt: 1000, expiresAt: 10000 });
   const item = metricsStore.peekOldestPendingReplyItem();
+  metricsStore.claimReplyDispatch({ id: item.id, dispatchStartedAt: 1000 });
   metricsStore.resolveReplyItem(item.id, { status: 'sent', resolvedAt: 5000, queuedMs: 4000 });
 
   await withServer({ metricsStore }, async (baseUrl) => {
@@ -707,12 +709,12 @@ test('GET / returns the dashboard HTML page, referencing its stylesheet and brow
     // fails a test instead of only failing silently in a browser.
     for (const id of ['packets-decoded', 'chart-wrap', 'range-presets', 'queue-size', 'queue-sent', 'bot-commands-container',
       'overview-reporting-tiles', 'runtime-events-table', 'bot-accepted', 'bot-usage-table', 'repeater-advert-events',
-      'repeater-telemetry-latest', 'repeater-adverts-table', 'repeater-topology-table']) {
+      'repeater-telemetry-latest', 'repeater-adverts-table', 'nodes-table', 'repeater-history-table']) {
       assert.match(body, new RegExp(`id="${id}"`), `expected an element with id="${id}"`);
     }
     assert.match(body, /class="skip-link" href="#dashboard-views"/);
     assert.match(body, /id="range-data-status"[^>]*role="status"[^>]*aria-live="polite"/);
-    assert.match(body, /<caption class="sr-only">Current repeater inventory<\/caption>/);
+    assert.match(body, /<caption class="sr-only">Current repeaters and latest telemetry collection progress<\/caption>/);
   });
 });
 

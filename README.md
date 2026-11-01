@@ -226,12 +226,59 @@ region and then restore the Companion's default. These region-scope changes
 are serialized with radio commands; if the override cannot be restored, the
 radio connection is reset to prevent later traffic from inheriting it.
 
+Commands may override inherited scope with an explicit policy:
+
+```json
+{
+  "trigger": "!regional",
+  "response": "Reply for {sender}",
+  "scope": { "mode": "region", "region": "Oki" },
+  "fallback": { "mode": "region", "region": "Cvg" }
+}
+```
+
+`scope.mode` accepts `inherit`, `device-default`, `region`, or `unscoped`;
+`fallback.mode` accepts `none`, `region`, or `unscoped`. Omitted scope keeps
+the legacy bot and incoming-scope rules above. A fixed bot `regionScope`
+cannot be overridden, and an array allowlist constrains explicit scopes and
+fallback regions. Fallback defaults to `none`: a configured regional fallback
+is used only when the primary region cannot be applied before any send
+attempt. A send error never triggers another transmission because its RF
+result may be uncertain. The current Companion API cannot enforce explicit
+unscoped sends or unscoped fallback, so those policies fail closed without a
+send. The resolved policy is stored with the queued reply and is not widened
+if configuration changes before dispatch.
+
 Triggers match exactly - `!echo` does not match `!echo now` or
 `hello !echo`. A message is replied to at most once no matter how many
 times the mesh relays it to you. Decrypted command messages must include a
 valid `sender:` prefix; messages without one are not matched, even by
 commands whose templates do not use `{sender}`. The bot's own senderless
 reply rebroadcasts are still checked for repeat confirmation.
+
+#### Targeted commands
+
+Commands can opt in to requiring an explicit Companion target by setting
+`"requiresTarget": true` on that command. The leading message form is
+`@[Companion name] !command arguments`; for example, `@[Mesh Bot] !lookup E8`.
+The name is read from the current connected Companion, compared literally
+after Unicode NFC normalization, and remains case-sensitive. Omitted
+`requiresTarget` keeps the existing untagged behavior. A leading malformed or
+different target is ignored, including for commands that do not require a
+target. Companion names are selectors only; they do not authenticate the
+message sender.
+
+#### Cooperative reply suppression
+
+An exact command can opt in to "suppressIfAnswered": true when every
+configured response template includes {sender}. While its reply is still
+queued, the bot compares a received message on that channel with the exact
+rendered response for each live pending request. It suppresses only when one
+pending request matches uniquely. Generic mentions, partial text, ambiguous
+matches, duplicate packets, and replies whose dispatch has already been
+claimed do not suppress a reply. Lookup and stats commands do not currently
+have a satisfactory-response matcher and reject this option. Suppression is
+persisted as its own reply outcome; the competing message body is not stored.
 
 A command's `overflowResponse` is optional. When the rendered `response`
 doesn't fit `maxMessageBytes` (the hop-path listing is the field most

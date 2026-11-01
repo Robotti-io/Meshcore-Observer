@@ -1236,3 +1236,167 @@ The guiding principle for this pillar is:
 > **MeshCore Observer bots should respond to the right users, only when necessary, using the most appropriate delivery mechanism and the narrowest appropriate routing scope.**
 
 The implementation should achieve this while preserving the stable command-handler architecture, durable reply queue, conservative RF behavior, centralized configuration, and explicit operational semantics established in previous releases.
+
+## Implementation Plan
+
+### 1. Feature Summary
+
+Pillar 3 extends the existing channel-bot and durable reply system with opt-in bot targeting, safe suppression of redundant pending replies, command-level delivery scope, and supported private command/reply delivery with destination ACK outcomes. Existing untagged channel commands remain compatible. No routing capability is assumed until verified against the installed MeshCore.js and supported Companion firmware.
+
+This pillar-level plan covers the 14 scoped child issues. Each child remains a separately reviewable unit; implementation begins with capability research and policy decisions, then follows the dependencies below. Child issue acceptance criteria remain authoritative.
+
+### 2. Relevant Existing Architecture
+
+- `src/bots/channel-bot.js` owns channel intake, handler matching, duplicate suppression, queue acceptance, response rendering, and channel transmission. Handler selection and response execution are separated through command handlers.
+- `src/bots/reply-queue.js` is one durable FIFO across all bots. It persists pending items and currently resolves them as `sent`, `failed`, or `expired`; it coordinates with the shared airtime coordinator.
+- `src/bots/reply-dispatcher.js` dispatches persisted plain-data items to the configured bot instance.
+- `src/bots/schemas.js` and `src/bots/bots-config-loader.js` define and strictly validate bot/command configuration. Runtime environment configuration is centralized in `src/config/`.
+- `src/radio/radio-manager.js` serializes Companion commands through `CommandQueue`, exposes normalized radio events and device info, and can invalidate an unsafe connection generation. Its current events and identity exposure do not establish private-message or ACK support.
+- `src/bots/region-scope.js` derives and resolves channel region scopes. `ChannelBot` already supports bot-level fixed/allowlisted region scope, mirrors recognized incoming scoped commands, and clears scope after a serialized send; failure to restore invalidates that radio connection.
+- `src/metrics/store.js` owns the always-on SQLite `bot_replies` lifecycle table and migrations. It has a region-scope field but not the broader targeting, suppression, private transport, attempt, or ACK lifecycle requested here.
+- Existing test seams are under `test/bots/`, `test/radio/`, and `test/metrics/`. Reporting seams are in `src/metrics/`, `src/web/`, and their tests.
+
+### 3. Proposed Approach
+
+1. Complete P3-01 as evidence gathering against the installed library, protocol, supported firmware, client conventions, and authoritative OKI scoping guidance. Keep supported, unsupported, and unknown behavior distinct; propose any live RF checks for separate authorization.
+2. Record P3-02 policy decisions before defining configuration or persisted lifecycle fields. Settle target grammar/Unicode comparison, response-satisfaction evidence and commit boundary, per-command transport/scope inheritance, fallback/retry rules, privacy, restart behavior, and ACK counting.
+3. Add Companion identity as a small validated radio seam, then add opt-in command targeting while leaving existing definitions valid and untagged by default.
+4. Extend the durable reply lifecycle only after its state model and migration behavior are reviewed. Add suppression at the queue's transmission-commit boundary, not as a best-effort check after dispatch starts.
+5. Evolve region scope from the existing bot-level baseline to explicit command policy, then harden the scoped-send transaction under serialized radio ownership. Preserve fail-closed behavior and never broaden a failed scoped reply implicitly.
+6. Add private intake and delivery only for verified protocol/library capabilities. Reuse current handlers and the shared queue; never infer outbound routing by reversing observed paths. Add destination ACK tracking only if its identifiers and semantics support reliable correlation.
+7. Add reporting after outcome semantics stabilize. Keep metrics bounded, avoid private message text and unnecessary recipient identifiers, and preserve existing API meanings.
+8. Finish with deterministic regression/recovery coverage and separately authorized hardware/RF scenarios. Document supported versions, operator settings, ACK meaning, scope, retry, and fallback behavior.
+
+This work stays in JavaScript ES modules, uses centralized strict AJV schemas for structured inputs, preserves centralized configuration/logging, and adds no dependencies. Concrete storage/schema migrations and public API/reporting changes require the explicit approvals required by `AGENTS.md`; this plan records those gates but does not grant them. Real radio transmissions, restarts, and operational tests require issue-specific authorization.
+
+### 4. Impacted Areas
+
+- Research and decisions: `docs/plans/v2.5.0/` capability evidence and decision records; P3-01/#52 and P3-02/#53.
+- Bot identity and matching: `src/radio/radio-manager.js`, `src/bots/channel-bot.js`, `src/bots/schemas.js`, `src/bots/bots-config-loader.js`, and focused bot/radio tests.
+- Reply lifecycle and suppression: `src/bots/reply-queue.js`, `src/bots/reply-dispatcher.js`, `src/metrics/store.js`, centralized metrics schemas, migrations, and `test/bots/` / `test/metrics/`.
+- Scope policy and transmission: `src/bots/region-scope.js`, `src/bots/channel-bot.js`, bot configuration/schema, `src/radio/radio-manager.js` / command queue, and scope/radio tests.
+- Private transport and ACKs: radio event normalization and command ownership, bot intake/dispatch, reply lifecycle persistence, and corresponding bot/radio/store tests. Exact files depend on P3-01 evidence.
+- Reporting and operations: bot stats/reporting, MetricsStore queries, `src/web/` API/dashboard consumers, privacy/range schemas, operator documentation, and regression tests.
+
+### 5. Task Breakdown
+
+#### T1: P3-01 / #52 — Verify bot-specific protocol and library capabilities
+- Objective: Establish evidence required before selecting implementation seams.
+- Specific changes: Record installed `@liamcottle/meshcore.js` version and relevant APIs; research Companion identity/rename behavior, client targeting conventions, private intake/send/contact routing, ACK IDs/events, scope application/restoration/reconnect semantics, and authoritative region-name/key rules. Separate supported, unsupported, and unknown cases and identify fixtures. Do not change dependencies, firmware, contacts, routes, credentials, or radio state.
+- Definition of done: A dated, source-linked capability record answers each capability question, identifies version limits, and lists any separately authorized hardware checks. Research record: [P3 bot capability assessment](p3-bot-capability-assessment.md).
+- Expected tests / validation: Inspect installed library artifacts and primary upstream/protocol/community sources; no application tests or live transmission for this research task.
+
+#### T2: P3-02 / #53 — Decide targeting, response, and delivery policy
+- Objective: Turn T1 evidence and P1-02 shared radio policies into explicit compatibility-preserving decisions.
+- Specific changes: Record tag grammar and Unicode/case/normalization/duplicate identity behavior; opt-in defaults; satisfactory-response correlation and timing; exact dispatch commit point; transport/scope inheritance; fallback and bounded retry rules; ACK versus terminal outcome and counting semantics; restart/config-change recovery; and private-data retention/reporting rules.
+- Definition of done: A reviewed decision record resolves these policy choices and identifies opt-in settings. No code/schema changes are part of this decision task. Accepted decisions: [Pillar 3 policy decisions](pillar-3-decisions.md).
+- Expected tests / validation: Evaluate duplicate bots, competing/overlapping commands, restart/config change, delayed/duplicate ACK, and failed scoped/private sends against the decisions.
+
+#### T3: P3-03 / #54 — Expose current Companion identity
+- Objective: Supply validated runtime identity to target-aware command matching.
+- Specific changes: Reuse the radio handshake/device-info seam where supported; define a small current-identity getter/event with connection-generation freshness; refresh it on reconnect/rename according to T1; validate name length and Unicode boundary behavior; ensure unknown/stale identity cannot match.
+- Definition of done: Consumers receive only current validated identity, and existing non-targeted bot behavior is unchanged.
+- Expected tests / validation: Fixtures for absent, malformed, renamed, reconnecting, non-ASCII, emoji, and maximum-supported identity values; `npm test` and `npm run lint` when implemented.
+
+#### T4: P3-04 / #55 — Add command-level target matching
+- Objective: Let selected commands require the intended bot tag without changing legacy commands.
+- Specific changes: Extend the centralized strict bot command schema/config loader with the approved opt-in field; parse the approved grammar using literal comparisons rather than dynamic regex; separate tag, whitespace, trigger, and arguments before existing handler matching; use approved Unicode normalization/comparison and duplicate-name behavior.
+- Definition of done: Only an approved identity match can execute a target-required command; malformed/wrong tags are ignored; legacy command definitions retain current behavior; invalid config fails at startup before side effects.
+- Expected tests / validation: Grammar, adversarial tag text, whitespace, arguments, duplicate identity, Unicode normalization/case/length, and legacy config fixtures; `npm test` and `npm run lint`.
+
+#### T5: P3-05 / #56 — Define and persist the extended reply lifecycle
+- Objective: Preserve policy and attempt context needed to safely resume, suppress, route, and report queued replies.
+- Specific changes: After policy decisions and explicit storage approval, extend validated reply data and `MetricsStore` migrations transactionally for approved context and distinct lifecycle states. Define legacy pending-row defaults and config-change behavior; preserve IDs, handler state, pending/history data, retention, and always-on store ownership.
+- Definition of done: A documented state-transition model and migration safely recover old and new pending items; enqueue, dispatch acceptance, destination ACK, timeout, suppression, expiry, and send failure remain distinguishable.
+- Expected tests / validation: Migration/reopen from existing schema versions, legacy rows, state validation, restart/config changes, and transition/idempotency tests; `npm test` and `npm run lint`.
+- Implementation record: Complete. MetricsStore schema v22 stores normalized delivery policy, dispatch attempts, outcome reason, and independent ACK state. Durable dispatch claims establish the `pending -> dispatching` boundary; startup recovers interrupted sends as `delivery-unknown` without replay. Legacy policy defaults, retained history/report semantics, migration rollback, validation, and restart behavior are covered by tests. At T5 completion, `npm test` passed (113 files / 1,586 tests); lint passed with generated `docs/working_docs` artifacts excluded. T6 suppression is now implemented separately; T7 policy resolution remains.
+
+#### T6: P3-06 / #57 — Suppress only eligible uncommitted replies
+- Objective: Avoid redundant RF replies when handler-appropriate evidence shows the request is satisfied.
+- Specific changes: Add command opt-in and handler-specific response correlation; connect validated incoming responses to pending queue items; implement an atomic pending-to-suppressed transition that races safely with dispatch commitment; keep unrelated messages and multi-response commands unaffected.
+- Definition of done: Only an eligible pending reply for the correlated request can be suppressed, with a durable distinct outcome; committed/in-flight transmissions cannot be cancelled or misreported.
+- Expected tests / validation: Competing bots, false positives, overlapping requests, duplicates/late replies, dispatch race, restart, and lifecycle query fixtures; `npm test` and `npm run lint`.
+- Implementation record: Complete. Exact commands can opt in only when their configured response templates address `{sender}`; lookup/stats commands fail config validation because they lack a tested matcher. A shared, bounded response coordinator checks eligible pending requests on the channel, requires exactly one full rendered-response match, and conditionally changes only `pending -> suppressed`. Duplicate response packets and known own-reply echoes are ignored. MetricsStore schema v23 adds the pending channel index and strict candidate query; lifecycle totals expose suppression distinctly without changing the public dashboard API. Full `npm test` passed (114 files / 1,597 tests); lint and `git diff --check` passed.
+
+#### T7: P3-07 / #58 — Resolve per-command scope and fallback policy
+- Objective: Extend existing bot-level scope behavior to explicit, validated command-level policy.
+- Specific changes: After protocol and policy decisions, define semantic default/region/unscoped modes and inheritance; resolve human-facing region names through the verified mapping; persist intended policy in queued items; define fail/defer/retry and explicitly opted-in fallback. Keep OBS-02 discovery separate from authorization to reply in a scope.
+- Definition of done: Unknown/invalid required scopes fail safely, existing bot-level fixed/allowlist configuration has compatible documented semantics, and no required scoped send silently becomes broader.
+- Expected tests / validation: Strict schema, mapping, inheritance, unknown/default/wildcard, explicit fallback, restart/config-change, and legacy scope fixtures; `npm test` and `npm run lint`.
+- Implementation record: Complete. Commands accept validated `scope` and `fallback` modes; omitted/inherit scope preserves fixed bot, allowlist, incoming mirror, and device-default semantics. Resolved policy is persisted at enqueue, checked against current bot constraints at dispatch, and failures retain `scope-unavailable` or `unsupported-policy` lifecycle reasons. Only an explicit alternate region can follow a pre-send scope-apply failure; sends are never retried after an attempt, and unscoped delivery fails closed pending a supported Companion operation. Full `npm test` passed (115 files / 1,608 tests); lint and `git diff --check` passed. The final fail-closed behavior and policy-reason tests passed in the 137-test focused suite.
+
+#### T8: P3-08 / #59 — Make scoped sends one safe radio transaction
+- Objective: Preserve scope ownership through apply, send, and restoration for every competing radio consumer.
+- Specific changes: Review the existing serialized `setFloodScope` → send → `clearFloodScope` path against T1 and P1-08; add required scope acknowledgement, cancellation/disconnect handling, generation checks, observable failure outcome, and reconnect-safe restoration without assuming firmware state.
+- Definition of done: Scope cannot leak between bots or into later normal traffic; apply/send/restore failures follow approved fallback policy; normal capture, advert, and command coordination remain intact. Connection retirement may temporarily pause radio capture while the existing reconnect path runs.
+- Expected tests / validation: Interleavings with scoped/unscoped work, failures at each transaction step, reconnect/generation changes, mixed workload, and existing radio consumers; `npm test` and `npm run lint`. Hardware checks only under separately authorized validation.
+- Implementation record: Complete. The scoped transaction waits for Companion acknowledgments for apply, send, and restore; checks the active generation and cancellation signal at every boundary; and retires the connection after a five-second acknowledgment timeout or unconfirmed restoration. Explicit regional fallback remains limited to a proven pre-send apply failure followed by acknowledged restoration. If send acceptance is confirmed but restoration fails, lifecycle status remains `sent`, while the restoration error is logged and the connection is retired. Tests cover apply/send/restore failures and timeouts, disconnect and stale generation, accepted send with failed restoration, and competing command serialization. Full `npm test` passed (115 files / 1,615 tests); lint and `git diff --check` passed. Hardware validation was not performed.
+
+#### T9: P3-09 / #60 — Receive private commands through shared handlers
+- Objective: Accept supported private contact messages without duplicating command semantics.
+- Specific changes: Based on T1, normalize and AJV-validate the supported radio event; apply a strict private-command allowlist; carry bounded sender/contact/request identity and private transport context into the same handlers and durable queue; guard against duplicate/malformed events and private-text leakage.
+- Definition of done: Only enabled supported commands reach shared handlers; malformed/duplicate events cannot corrupt lifecycle state; public intake remains compatible; logs and reports omit private text and unnecessary contact data.
+- Expected tests / validation: Private event schema, allowlist, malformed/duplicate input, handler reuse, deduplication, and privacy-safe logging fixtures; `npm test` and `npm run lint`.
+
+#### T10: P3-10 / #61 — Deliver private replies with bounded routing policy
+- Objective: Return private commands through verified Companion contact routing.
+- Specific changes: Use only supported fresh contact records and library send APIs; queue private delivery through shared radio/airtime ownership; bound attempts/timeouts and apply only explicit retry/fallback policy; preserve pending-work recovery and capture continuity. Do not derive routes by reversing observed packet paths.
+- Definition of done: Valid private replies remain private by default; missing/stale contact, disconnect, timeout, and send failure are distinct; no public/unscoped fallback occurs unless explicitly configured and approved.
+- Expected tests / validation: Contact identity/freshness, unavailable route, send acceptance/failure, retry exhaustion, explicit fallback, reconnect, recovery, and capture continuity fixtures; `npm test` and `npm run lint`.
+
+#### T11: P3-11 / #62 — Correlate private destination ACKs
+- Objective: Track supported ACK evidence without claiming a human read receipt or counting a delivery twice.
+- Specific changes: After T1 verifies identifiers/semantics, correlate ACKs to one reply attempt; persist approved ACK timestamp/latency and timeout/failure outcomes; bound waiters/retries and resolve duplicate, late, out-of-order, shutdown, and reconnect events explicitly.
+- Definition of done: ACK, send acceptance, timeout, and send failure remain distinct; unrelated/stale ACKs cannot resolve another item; operator wording refers only to destination-node acknowledgement.
+- Expected tests / validation: Correlation IDs, duplicate/late/out-of-order ACKs, timeout/retry/restart/reconnect, and bounded-resource tests; `npm test` and `npm run lint`.
+
+#### T12: P3-12 / #63 — Decide whether observed topology can inform private routing
+- Objective: Determine whether Pillar 1 path evidence can safely complement Companion-maintained contacts.
+- Specific changes: Compare identity quality, ambiguity, freshness, reversibility, prior success, permission/state restoration, firmware constraints, and contact routing using representative evidence. Record an explicit no-integration result if proof is insufficient; scope any follow-up separately.
+- Definition of done: A source-backed decision separates proximity/observation from validated outbound route capability; no route mutation or code integration occurs in this task.
+- Expected tests / validation: Review representative path/contact cases against primary protocol evidence and library behavior; no live radio test unless separately authorized.
+
+#### T13: P3-13 / #64 — Report approved policy and lifecycle outcomes
+- Objective: Make targeting and delivery behavior observable without privacy leaks or legacy metric drift.
+- Specific changes: After outcome definitions stabilize and explicit storage/public-API approval, extend bounded store queries and existing bot stats/API/dashboard consumers for invocation, suppression, private transport, ACK, timeout, scope failure, and explicit fallback. Preserve range/filter/empty semantics and exclude message text, secrets, and high-cardinality private identifiers.
+- Definition of done: New counts map to approved lifecycle meanings; legacy totals remain compatible; retention/cardinality are bounded; API/dashboard documentation reflects the approved contract.
+- Expected tests / validation: Store/query/API/dashboard aggregate, range, empty/unknown, legacy, cardinality, and privacy tests; `npm test` and `npm run lint`.
+
+#### T14: P3-14 / #65 — Validate integrated behavior and document operations
+- Objective: Confirm combined behavior under competing bots, mixed radio traffic, failures, and recovery.
+- Specific changes: Run repository regression checks; execute only separately authorized multi-bot/RF, restart, and connection scenarios; record versions, configuration, airtime/retry budgets, outcomes, and limitations; document targeting, private ACK semantics, scope, fallback, supported versions, and RF implications.
+- Definition of done: No response storm, scope race, cross-attributed ACK, unexplained capture/starvation regression, or compatibility gap remains; evidence and limitations are recorded, with follow-up defects scoped explicitly.
+- Expected tests / validation: `npm test`, `npm run lint`, focused integrated fixtures, then authorized operational scenarios with an evidence record.
+
+### 6. Risks and Edge Cases
+
+- MeshCore.js, clients, and firmware may not expose consistent identity, private-message, ACK, or flood-scope behavior. T1 is a gate; unsupported features stay out until separately revisited.
+- Companion names may be duplicated or change during reconnect. Targeting must fail safely when identity is absent or ambiguous; names are selectors, not authentication.
+- Unicode visual equivalence and protocol byte limits differ from JavaScript string length. Matching/limits must follow the decision record and tested wire constraints.
+- Another reply may arrive while this one moves from pending to transmission. Suppression and dispatch need one atomic commit boundary to avoid lost or duplicate sends.
+- SQLite lifecycle changes are protected storage work. Transactional migration, rollback/reopen, legacy pending replies, pruning, and idempotent event handling need explicit review.
+- Scope is connection-global in the current send path. Failed restoration, disconnects, and command interleavings can leak scope unless connection ownership is retired safely.
+- Private contact data and message contents can leak through logs, persisted context, metrics, or dashboard filters. Persist minimum correlation data and omit private content.
+- A short ACK may refer to the destination radio, not a human reading the content; late ACKs and retries can otherwise double-count delivery.
+- Feature dependencies include open Pillar 1 foundations; integrated acceptance must verify actual interfaces/status rather than assume every prerequisite is complete.
+
+### 7. Open Questions / Assumptions
+
+- P3-01/#52 remains open and queued next in the live tracker. This plan assumes it will produce primary-source capability evidence before feature implementation; it does not pre-answer protocol questions.
+- P3-02/#53 must decide identity ambiguity, name comparison, satisfactory response, commit boundary, persistence recovery, private metadata, transport inheritance, retry budgets, and explicit fallback before dependent schemas/state are implemented.
+- `package.json` declares `@liamcottle/meshcore.js` `^1.15.0`, while the Observer package is `2.4.0`. Confirm the runtime-resolved dependency and supported firmware during T1; no dependency upgrade is assumed.
+- Existing region-scope support is bot-level and channel-oriented. P3-07/#58 and P3-08/#59 remain open because per-command policy, verified restoration semantics, failure/recovery behavior, and authorized hardware validation are outstanding.
+- Adding lifecycle fields/states requires explicit storage approval. Changing metrics HTTP/API shapes requires explicit public-API approval. Planning these changes does not authorize them.
+- P3-12 may conclude “no integration”; private delivery should use verified Companion contact routing independently of topology assistance.
+- P3-14 hardware/RF and runtime restart scenarios are operational work and require their separately authorized scope.
+
+### 8. Suggested Execution Order
+
+1. **T1 / #52, then T2 / #53:** establish capability evidence and settle policy before adding configuration or durable state.
+2. **T3 / #54, then T4 / #55:** expose current identity, then add opt-in Unicode-aware matching with legacy defaults.
+3. **T5 / #56, then T6 / #57:** review and establish durable lifecycle context before adding atomic suppression.
+4. **T7 / #58, then T8 / #59:** settle command scope/fallback policy before hardening the serialized scope transaction. Existing bot-level scope is a baseline.
+5. **T9 / #60, then T10 / #61, then T11 / #62:** add verified private intake, deliver through supported contact routing, then correlate destination ACKs.
+6. **T12 / #63:** complete topology research after #52/#53 and P1-06/#27 evidence; it may conclude with no integration and does not gate Companion contact routing.
+7. **T13 / #64:** implement reporting after lifecycle and delivery outcomes stabilize, with storage/public-API approval.
+8. **T14 / #65:** run integrated regression and separately authorized operational validation, then finalize operator documentation and evidence.

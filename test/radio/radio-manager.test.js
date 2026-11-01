@@ -85,7 +85,38 @@ test('connects successfully and emits radio.connected with normalized device inf
   assert.equal(deviceInfo.firmwareVersion, null, 'a protocol code is not a firmware release');
   assert.equal(manager.isConnected(), true);
   assert.deepEqual(manager.getDeviceInfo(), deviceInfo);
+  assert.deepEqual(manager.getCompanionIdentity(), { name: 'Test Node', generation: 1 });
+  assert.equal(Object.isFrozen(manager.getCompanionIdentity()), true);
+  deviceInfo.name = 'mutated display metadata';
+  assert.equal(manager.getCompanionIdentity().name, 'Test Node');
 
+  await manager.stop();
+  assert.equal(manager.getCompanionIdentity(), null);
+});
+
+test('Companion identity accepts Unicode and the 31-byte protocol boundary', async () => {
+  const connection = createFakeConnection();
+  connection.getSelfInfo = async () => ({ ...await createFakeConnection().getSelfInfo(), name: '😀'.repeat(7) + 'abc' });
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  assert.equal(manager.getCompanionIdentity().name, '😀'.repeat(7) + 'abc');
+  assert.equal(Buffer.byteLength(manager.getCompanionIdentity().name, 'utf8'), 31);
+  await manager.stop();
+});
+
+test.each([
+  ['missing', undefined],
+  ['empty', ''],
+  ['over schema character limit', 'x'.repeat(32)],
+  ['over UTF-8 byte limit', '界'.repeat(11)],
+  ['malformed Unicode', '\ud800']
+])('invalid %s Companion identity stays unavailable without blocking connection', async (_label, name) => {
+  const connection = createFakeConnection();
+  connection.getSelfInfo = async () => ({ ...await createFakeConnection().getSelfInfo(), name });
+  const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(), openTransport: async () => connection });
+  const connected = onceEvent(manager, 'radio.connected'); manager.start(); await connected;
+  assert.equal(manager.isConnected(), true);
+  assert.equal(manager.getCompanionIdentity(), null);
   await manager.stop();
 });
 
@@ -232,14 +263,19 @@ test('reconnects automatically when the active connection disconnects', async ()
   const firstConnected = onceEvent(manager, 'radio.connected');
   manager.start();
   await firstConnected;
+  const firstIdentity = manager.getCompanionIdentity();
+  assert.deepEqual(firstIdentity, { name: 'Test Node', generation: 1 });
+  secondConnection.getSelfInfo = async () => ({ ...await createFakeConnection().getSelfInfo(), name: 'Renamed Node' });
 
   const disconnected = onceEvent(manager, 'radio.disconnected');
   const reconnected = onceEvent(manager, 'radio.connected');
   firstConnection.emit('disconnected');
 
+  assert.equal(manager.getCompanionIdentity(), null, 'retired generation must not remain targetable');
   await disconnected;
   await reconnected;
   assert.equal(manager.isConnected(), true);
+  assert.deepEqual(manager.getCompanionIdentity(), { name: 'Renamed Node', generation: 2 });
 
   await manager.stop();
 });
@@ -489,9 +525,9 @@ test('targeted invalidation waits for close confirmation and uses one existing b
   await manager.stop(); assert.equal(vi.getTimerCount(), 0);
 });
 
-test('write/protocol recovery reasons produce fixed safe warnings rather than accepting SDK error text', async () => {
+test('write/protocol/scope-timeout recovery reasons produce fixed safe warnings rather than accepting SDK error text', async () => {
   vi.useFakeTimers();
-  for (const reason of ['write-error', 'protocol-error']) {
+  for (const reason of ['write-error', 'protocol-error', 'scope-command-timeout']) {
     const records = []; const logger = { ...silentLogger(), warn: (...args) => records.push(args) };
     const { manager } = await connectedManager([createFakeConnection()], { logger });
     const generation = manager.getConnectionSnapshot().generation;

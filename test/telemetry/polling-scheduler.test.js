@@ -15,7 +15,7 @@ function rig({ enabled = true, all = false, seed = true, ...settings } = {}) {
   vi.useFakeTimers();
   const f = createTelemetryFixture(); active.push(f);
   f.config = { ...TELEMETRY_POLL_DEFAULTS, enabled, refreshIntervalMs: HOUR, startupDelayMs: 1000, tickIntervalMs: 1000,
-    ...settings, components: all ? { ...TELEMETRY_POLL_COMPONENT_DEFAULTS } : { status: false, sensors: true, neighbours: false },
+    ...settings, components: all ? { ...TELEMETRY_POLL_COMPONENT_DEFAULTS } : { status: false, sensors: true, neighbours: false, ownerInfo: false },
     neighbourParams: { ...TELEMETRY_POLL_NEIGHBOUR_DEFAULTS }, statusProfile: { ...TELEMETRY_POLL_STATUS_DEFAULT },
     emitterProfile: 'unknown', permissionMask: 0, targetProfiles: [] };
   f.clock = { wall: 10000, monotonic: 10000 };
@@ -54,7 +54,8 @@ function rig({ enabled = true, all = false, seed = true, ...settings } = {}) {
     }
     const component = request.operation === 'telemetry' ? 'sensors' : request.operation;
     const response = f.response ?? { status: 'completed', body: telemetryBytes(component === 'status' ? telemetryWire.status48
-      : component === 'sensors' ? telemetryWire.sensors : '00000000'), receivedAt: f.clock.wall, tag: 42, route: 'direct' };
+      : component === 'sensors' ? telemetryWire.sensors : component === 'owner-info' ? telemetryWire.ownerInfo
+        : '00000000'), receivedAt: f.clock.wall, tag: 42, route: 'direct' };
     if (response.status !== 'completed') f.session = false;
     f.beforeCompletion?.();
     return { ...response, context, dispatchedAt };
@@ -137,9 +138,10 @@ test('all components advance one physical request per tick without a three-query
   const f = rig({ all: true });
   const status = { component: 'status', params: {}, profile: f.config.statusProfile };
   const neighbours = { component: 'neighbours', params: f.config.neighbourParams };
-  f.due(TARGET, [status, neighbours]); await f.start(); await f.tick(6000, 6000);
-  assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'neighbours', 'status', 'telemetry']);
-  assert.equal(f.history().outcomes.length, 3); assert.equal(f.history().outcomes.filter(x => x.status === 'partial').length, 2);
+  const ownerInfo = { component: 'owner-info', params: {} };
+  f.due(TARGET, [status, neighbours, SENSOR, ownerInfo]); await f.start(); await f.tick(7000, 7000);
+  assert.deepEqual(f.sent.map(x => x.operation), ['guest-login', 'neighbours', 'status', 'telemetry', 'owner-info']);
+  assert.equal(f.history().outcomes.length, 4); assert.equal(f.history().outcomes.filter(x => x.status === 'partial').length, 2);
 });
 
 test('a nearer layer precedes a lower-key outer target, and due neighbours precede other components without starving them', async () => {

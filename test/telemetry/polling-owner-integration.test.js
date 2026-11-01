@@ -27,7 +27,7 @@ function rig({ neighbours = false, neighbourSeed = false, exchange = false } = {
   f.dir = mkdtempSync(join(tmpdir(), 'telemetry-producer-'));
   const policyPath = join(f.dir, 'policy.json'), secretsPath = join(f.dir, 'secrets.json');
   writeFileSync(policyPath, JSON.stringify({ version: 1, defaultCredentialRef: 'fixtureGuest',
-    components: { status: false, sensors: !neighbours, neighbours } }));
+    components: { status: false, sensors: !neighbours, neighbours, ownerInfo: false } }));
   writeFileSync(secretsPath, JSON.stringify({ version: 1, secrets: { fixtureGuest: 'PRIVATE-ONLY7' } }));
   f.config = loadTelemetryPolling({ settings: { ...TELEMETRY_POLL_DEFAULTS, enabled: true, refreshIntervalMs: 3600000,
     startupDelayMs: 1000, tickIntervalMs: 1000, exchangeMaxRequests: exchange ? 6 : 1 }, policyPath, secretsPath });

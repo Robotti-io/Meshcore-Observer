@@ -7,7 +7,11 @@ export const radioCommandOptionsSchema = object({ generation, requireReady: { ty
 export const radioInvalidationSchema = object({
   generation, reason: { enum: ['ack-timeout', 'write-error', 'protocol-error', 'request-cancelled',
     'preflight-timeout', 'preflight-write-error', 'preflight-protocol-error', 'preflight-cancelled',
-    'scope-restore-failed'] }
+    'scope-restore-failed', 'scope-command-timeout'] }
+});
+export const companionIdentitySchema = object({
+  name: { type: 'string', minLength: 1, maxLength: 31 },
+  generation
 });
 // Internal test seam, not an additional environment/configuration setting.
 export const radioLifecycleOptionsSchema = object({

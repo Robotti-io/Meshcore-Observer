@@ -265,9 +265,9 @@ test('component/page/profile choices are strict and unknown interpretations rema
   const p = { version: 1, defaultCredentialRef: 'defaultPrivateRef', components: { sensors: false },
     neighbours: { count: 1, offset: 65535, orderBy: 3 } };
   const config = enabled(files(p));
-  assert.deepEqual(config.components, { status: true, sensors: false, neighbours: true });
+  assert.deepEqual(config.components, { status: true, sensors: false, neighbours: true, ownerInfo: true });
   assert.deepEqual(config.neighbourParams, { version: 0, count: 1, offset: 65535, orderBy: 3, prefixLength: 32 });
-  for (const component of [{ status: false, sensors: false, neighbours: false }, { sensors: 'false' }]) {
+  for (const component of [{ status: false, sensors: false, neighbours: false, ownerInfo: false }, { sensors: 'false' }]) {
     safeError(() => enabled(files({ ...p, components: component })));
   }
   for (const neighbours of [{ count: 0 }, { count: 4 }, { version: 1 }, { prefixLength: 4 }, { offset: -1 }, { orderBy: 4 }]) {

@@ -15,6 +15,7 @@ import { createDefaultCommandHandlers } from './bots/command-handlers/index.js';
 import { RepeatCheckSweeper } from './bots/repeat-check-sweeper.js';
 import { ReplyQueue } from './bots/reply-queue.js';
 import { createReplyDispatcher } from './bots/reply-dispatcher.js';
+import { createReplySuppressionCoordinator } from './bots/reply-suppression.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
 import { RemoteRequestCoordinator } from './radio/remote-request-coordinator.js';
@@ -138,6 +139,11 @@ async function main() {
     dispatch: createReplyDispatcher(botsByName),
     store: metricsStore,
     airtimeCoordinator
+  });
+  const replySuppression = createReplySuppressionCoordinator({
+    store: metricsStore,
+    botsByName,
+    logger
   });
   // Resumes any reply still pending from a previous process (see
   // reply-queue.js's class doc comment and AGENTS.md's "Persistence"
@@ -273,6 +279,7 @@ async function main() {
       botConfig,
       logger,
       replyQueue,
+      replySuppression,
       getKnownRegionScopes: () => [...config.knownRegionScopes, ...metricsStore.getKnownRegionScopes()],
       nodeRegistry,
       statsReporter,

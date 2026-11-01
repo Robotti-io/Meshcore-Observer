@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botsConfigSchema, LOOKUP_RESPONSE_FIELDS, STATS_RESPONSE_FIELDS } from './schemas.js';
+import { validateCommandScopeCompatibility } from './reply-scope-policy.js';
 
 const validate = compileSchema(botsConfigSchema);
 
@@ -8,6 +9,25 @@ export class BotsConfigError extends Error {
   constructor(message) {
     super(message);
     this.name = 'BotsConfigError';
+  }
+}
+
+function validateTargetCommandOverlaps(bots, filePath) {
+  for (let leftIndex = 0; leftIndex < bots.length; leftIndex += 1) {
+    const leftBot = bots[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < bots.length; rightIndex += 1) {
+      const rightBot = bots[rightIndex];
+      if (!leftBot.enabled || !rightBot.enabled || leftBot.channel !== rightBot.channel) continue;
+
+      for (const leftCommand of leftBot.commands) {
+        const rightCommand = rightBot.commands.find((command) => command.trigger === leftCommand.trigger);
+        if (rightCommand && (leftCommand.requiresTarget === true || rightCommand.requiresTarget === true)) {
+          throw new BotsConfigError(
+            `Ambiguous target command "${leftCommand.trigger}" for bots "${leftBot.name}" and "${rightBot.name}" on channel "${leftBot.channel}" in "${filePath}"`
+          );
+        }
+      }
+    }
   }
 }
 
@@ -22,6 +42,15 @@ export class BotsConfigError extends Error {
  */
 function validateCommandFieldsForKind(command, botName, filePath) {
   const context = `command "${command.trigger}" for bot "${botName}" in "${filePath}"`;
+  if (command.suppressIfAnswered === true) {
+    const responseFields = [command.response, command.overflowResponse].filter((value) => value !== undefined);
+    if ((command.kind ?? 'exact') !== 'exact') {
+      throw new BotsConfigError(`${context} opts into suppressIfAnswered but its handler has no satisfactory-response matcher`);
+    }
+    if (responseFields.some((template) => !template.includes('{sender}'))) {
+      throw new BotsConfigError(`${context} opts into suppressIfAnswered but each response template must address {sender}`);
+    }
+  }
 
   if (command.kind === 'lookup') {
     const missing = LOOKUP_RESPONSE_FIELDS.filter((field) => !(field in command));
@@ -122,8 +151,12 @@ export function loadBotsConfig(filePath) {
       triggers.add(command.trigger);
 
       validateCommandFieldsForKind(command, bot.name, filePath);
+      const scopeError = validateCommandScopeCompatibility(bot.regionScope, command);
+      if (scopeError) throw new BotsConfigError(`${scopeError} for bot "${bot.name}" in "${filePath}"`);
     }
   }
+
+  validateTargetCommandOverlaps(parsed, filePath);
 
   return parsed;
 }

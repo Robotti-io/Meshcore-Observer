@@ -77,7 +77,7 @@ async function launch(f, options = {}) {
   children.add(child); assert.deepEqual(await child.next(), { ready: true }); return child;
 }
 const physical = s => s.writes.filter(w => [26, 50].includes(w.code));
-const onlySensors = { status: false, sensors: true, neighbours: false };
+const onlySensors = { status: false, sensors: true, neighbours: false, ownerInfo: false };
 async function due(child) { await child.ask({ action: 'advert' }); await child.ask({ action: 'due' }); }
 
 test('default target exchange collects all due components promptly after trace/login with one-minute inter-target pacing', async () => {
@@ -89,13 +89,14 @@ test('default target exchange collects all due components promptly after trace/l
   const child = await launch(f); await due(child);
   const saved = await child.ask({ action: 'tick', ms: 65000 });
   const sent = saved.writes.filter(w => [36, 26, 50].includes(w.code));
-  assert.deepEqual(sent.map(w => w.code), [36, 26, 50, 50, 50], JSON.stringify(saved.diagnostics));
-  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors']);
+  assert.deepEqual(sent.map(w => w.code), [36, 26, 50, 50, 50, 50], JSON.stringify(saved.diagnostics));
+  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors', 'owner-info']);
   for (let i = 1; i < sent.length; i++) {
     assert.ok(sent[i].at - sent[i - 1].at >= 1000);
     assert.ok(sent[i].at - sent[i - 1].at < 10000, 'dependent exchange steps must not wait for the sixty-second rate limit');
   }
-  assert.equal(saved.observations.total, 3); assert.equal(saved.outcomes.total, 3);
+  assert.equal(saved.observations.total, 4, JSON.stringify({ observations: saved.observations.observations.map(o => o.variant.component), outcomes: saved.outcomes.outcomes.map(o => [o.variant.component, o.status, o.reason]) }));
+  assert.equal(saved.outcomes.total, 4);
   assert.ok(saved.diagnostics.diagnostics.filter(d => d.operation !== 'guest-login' && d.status === 'completed')
     .every(d => d.responseTimeoutMs === 60000));
   const ended = await child.stop(); assert.doesNotMatch(ended.output + JSON.stringify(saved), /PRIVATE-ONLY7|fixtureGuest/);
@@ -135,18 +136,20 @@ test('default-off actual entrypoint captures verified direct evidence and duplic
   assert.equal(saved.botUsage.accepted, 1); assert.equal(saved.replies.length, 1); assert.equal(saved.publishTopics.length, 4);
   await child.stop();
 });
-for (const profiles of [false, true]) test(`real opt-in entrypoint stores all three components with ${profiles ? 'established' : 'unknown'} profiles and original attribution`, async () => {
+for (const profiles of [false, true]) test(`real opt-in entrypoint stores all four components with ${profiles ? 'established' : 'unknown'} profiles and original attribution`, async () => {
   const f = environment({ profiles }), child = await launch(f); await due(child);
   let saved;
-  for (let n = 0; n < 4; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
-  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors'],
+  for (let n = 0; n < 5; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
+  assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors', 'owner-info'],
     JSON.stringify({ writes: saved.writes, diagnostics: saved.diagnostics }));
-  assert.equal(saved.auth.outcomes[0].record.status, 'completed'); assert.equal(saved.observations.total, 3); assert.equal(saved.outcomes.total, 3);
+  assert.equal(saved.auth.outcomes[0].record.status, 'completed');
+  assert.equal(saved.observations.total, 4, JSON.stringify({ observations: saved.observations.observations.map(o => o.variant.component), outcomes: saved.outcomes.outcomes.map(o => [o.variant.component, o.status, o.reason]) }));
+  assert.equal(saved.outcomes.total, 4);
   const loginDiagnostic = saved.diagnostics.diagnostics.find(row => row.operation === 'guest-login');
   assert.equal(loginDiagnostic.traceOutcome, 'response');
   assert.equal(loginDiagnostic.contactSyncOutcome, 'updated');
   assert.equal(loginDiagnostic.targetContactOutcome, 'eligible');
-  assert.deepEqual(saved.writes.filter(w => [36, 26, 50].includes(w.code)).map(w => w.code), [36, 26, 50, 50, 50]);
+  assert.deepEqual(saved.writes.filter(w => [36, 26, 50].includes(w.code)).map(w => w.code), [36, 26, 50, 50, 50, 50]);
   for (const outcome of saved.outcomes.outcomes) {
     assert.equal(outcome.runId, saved.runId); assert.equal(outcome.observerPublicKey, OBSERVER); assert.equal(outcome.targetPublicKey, f.targetPublicKey);
     assert.equal(outcome.route, 'direct'); assert.equal(outcome.receivedAt, outcome.completedAt);

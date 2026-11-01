@@ -360,6 +360,23 @@ test('a reply is resolved to "failed" when dispatching it throws', async () => {
   assert.equal(resolved.trigger, '!broken');
 });
 
+test('a policy dispatch failure preserves its specific terminal reason', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const { dispatch, calls } = testDispatcher({
+    '!scoped': () => {
+      const error = new Error('scope unavailable');
+      error.replyReason = 'scope-unavailable';
+      throw error;
+    }
+  });
+  const queue = newQueue({ store, dispatch });
+  const id = queue.enqueue(baseItem({ trigger: '!scoped' }));
+  await waitFor(() => store.getReplyById(id)?.status === 'failed');
+  const resolved = store.getReplyById(id);
+  assert.equal(resolved.outcomeReason, 'scope-unavailable');
+  assert.equal(calls.length, 1);
+});
+
 test('a reply is resolved to "expired" when dropped before a quiet window is observed', async () => {
   const store = new MetricsStore({ dbPath: ':memory:' });
   const { dispatch } = testDispatcher();
@@ -377,14 +394,17 @@ test('a reply is resolved to "expired" when dropped before a quiet window is obs
   assert.ok(resolved.queuedMs >= 20);
 });
 
-test('a resolveReplyItem failure is caught and logged (as a possible-duplicate risk), and does not crash the tick', async () => {
+test('a terminal-write failure leaves dispatching durable and cannot re-dispatch in the same process', async () => {
   const { dispatch, calls } = testDispatcher();
   const logger = silentLogger();
+  let status = 'pending';
   const brokenStore = {
-    enqueueReplyItem: () => {},
+    enqueueReplyItem: () => 1,
     countPendingReplyItems: () => 1,
     takeExpiredReplyItems: () => [],
-    peekOldestPendingReplyItem: () => ({ id: 1, botName: 'echo', trigger: '!echo', channel: '#echo', sender: 'Jeymz', enqueuedAt: Date.now() }),
+    peekOldestPendingReplyItem: () => status === 'pending' ? ({ id: 1, botName: 'echo', trigger: '!echo', channel: '#echo', sender: 'Jeymz', enqueuedAt: Date.now() }) : null,
+    recoverDispatchingReplyItems: () => 0,
+    claimReplyDispatch: () => { if (status !== 'pending') return false; status = 'dispatching'; return true; },
     resolveReplyItem: () => {
       throw new Error('store unavailable');
     }
@@ -393,14 +413,14 @@ test('a resolveReplyItem failure is caught and logged (as a possible-duplicate r
 
   queue.enqueue(baseItem({ trigger: '!echo' }));
   await waitFor(() => calls.length === 1);
-  // The broken store's resolveReplyItem() never actually resolves the
-  // item, so it would otherwise be re-dispatched forever (the documented
-  // duplicate-send risk) - stop() as soon as the warning is observed,
-  // rather than leaving the timer running past this test.
+  // The write failure leaves a durable commit marker. Subsequent queue
+  // peeks only return pending rows, so no same-process retry can duplicate RF.
   await waitFor(() => logger.calls.warn.some((c) => c.message.includes('failed to mark a reply resolved')));
+  await vi.advanceTimersByTimeAsync(POLL_MS * 3);
   await queue.stop();
 
   assert.ok(logger.calls.warn.some((c) => c.message.includes('failed to mark a reply resolved')));
+  assert.equal(status, 'dispatching'); assert.equal(calls.length, 1);
 });
 
 // --- Resume-after-restart (persisted pending items) --------------------
@@ -421,6 +441,19 @@ test('start() resumes a reply that was still pending in the store from a previou
 
   await waitFor(() => calls.length === 1, { timeoutMs: 2000 });
   assert.equal(calls[0].trigger, '!resumed');
+});
+
+test('start() resolves an interrupted dispatch as delivery-unknown without replaying it', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const now = Date.now();
+  const id = store.enqueueReplyItem({ ...baseItem({ trigger: '!interrupted' }), enqueuedAt: now, expiresAt: now + TTL_MS });
+  assert.equal(store.claimReplyDispatch({ id, dispatchStartedAt: now + 1 }), true);
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, dispatch });
+  queue.start();
+  assert.equal(store.getReplyById(id).status, 'delivery-unknown');
+  assert.equal(store.getReplyById(id).outcomeReason, 'process-restart');
+  assert.equal(calls.length, 0);
 });
 
 test('a persisted handler context is restored and dispatched after reopening the store', async () => {

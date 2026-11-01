@@ -68,7 +68,8 @@ function guest() {
 function binary(tag, component) {
   const header = Buffer.alloc(6); header[0] = 0x8C; header.writeUInt32LE(tag, 2);
   const body = mode === 'malformed' ? [1] : component === 'status' ? telemetryBytes(telemetryWire.status48)
-    : component === 'sensors' ? telemetryBytes(telemetryWire.sensors)
+    : component === 'owner-info' ? telemetryBytes(telemetryWire.ownerInfo)
+      : component === 'sensors' ? telemetryBytes(telemetryWire.sensors)
       : mode === 'empty' ? [0, 0, 0, 0] : neighbourPage([{ prefix: 'DD'.repeat(32), age: 5, snr: -16 }], { prefixLength: 32 });
   return [...header, ...body];
 }
@@ -93,7 +94,7 @@ TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
     return;
   }
   const code = bytes[0], component = code === 26 ? 'guest-login' : code === 50
-    ? ({ 1: 'status', 3: 'sensors', 6: 'neighbours' })[bytes[33]] : null;
+    ? ({ 1: 'status', 3: 'sensors', 6: 'neighbours', 7: 'owner-info' })[bytes[33]] : null;
   // Password-bearing guest wire buffers never enter IPC, logs or the ledger.
   const write = { at: Date.now(), generation: connections.indexOf(this) + 1, code, component };
   if (component) {
@@ -131,7 +132,8 @@ TCPConnection.prototype.sendToRadioFrame = async function (bytes) {
   if (!component) throw Error('Unexpected contact mutation or command');
   crash('after-send', component);
   if (mode === 'unsupported') { feed([1, 1], this); return; }
-  const tag = component === 'guest-login' ? Buffer.from(targetPublicKey, 'hex').readUInt32LE(0) : Buffer.from(bytes).readUInt32LE(34);
+  const tag = component === 'guest-login' ? Buffer.from(targetPublicKey, 'hex').readUInt32LE(0)
+    : Buffer.from(bytes).readUInt32LE(bytes.length - 4);
   pending = { tag, component, connection: this };
   if (mode === 'ack-wait') return;
   feed(ack(tag, mode === 'flood-ack' ? 1 : 0), this);
@@ -177,8 +179,9 @@ MqttManager.prototype.publish = function (topic, ...args) {
 function variants() {
   const c = loadConfig().telemetryPolling;
   const profile = c.targetProfiles.find(p => p.targetPublicKey === targetPublicKey)?.statusProfile ?? c.statusProfile;
-  return [{ component: 'guest-login', params: {} }, { component: 'status', params: {}, profile },
-    { component: 'sensors', params: { permissionMask: 0 } }, { component: 'neighbours', params: c.neighbourParams }];
+  return [{ component: 'guest-login', params: {} }, { component: 'owner-info', params: {} },
+    { component: 'status', params: {}, profile }, { component: 'sensors', params: { permissionMask: 0 } },
+    { component: 'neighbours', params: c.neighbourParams }];
 }
 function snapshot() {
   return { now: Date.now(), runId: run.runId, instanceId: run.instanceId, radio: radio.getConnectionSnapshot(), writes,
@@ -206,7 +209,8 @@ process.on('message', message => {
     if (message.action === 'due') {
       const c = loadConfig().telemetryPolling;
       const policy = Object.fromEntries(['refreshIntervalMs', 'retryBaseMs', 'retryMaxMs', 'maxAttempts', 'authCooldownMs'].map(k => [k, c[k]]));
-      for (const variant of variants().filter(v => v.component !== 'guest-login' && c.components[v.component])) {
+      for (const variant of variants().filter(v => v.component !== 'guest-login'
+        && (v.component === 'owner-info' ? c.components.ownerInfo : c.components[v.component]))) {
         store.deferTelemetryPoll({ observerPublicKey, targetPublicKey, variant, runId: run.runId,
           observedAt: Date.now(), nextDueAt: Date.now(), reason: 'rate-limited', policy });
       }

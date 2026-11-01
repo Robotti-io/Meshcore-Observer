@@ -23,7 +23,7 @@ test('migration 17 adds only empty polling datasets; legacy inventory and measur
   const prior = f.inspect(db => { db.exec(dropTelemetryPollSchema+' PRAGMA user_version=16;');
     return db.prepare('SELECT * FROM telemetry_observations').all(); });
   f.open(); assert.equal(f.store.queryTelemetryPollCandidates(query()).candidates.length, 0); f.close();
-  f.inspect(db => { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 20);
+  f.inspect(db => { assert.equal(db.prepare('PRAGMA user_version').get().user_version, 23);
     assert.deepEqual(db.prepare('SELECT * FROM telemetry_observations').all(), prior);
     for (const table of ['telemetry_direct_evidence', 'telemetry_auth_outcomes', 'telemetry_poll_state'])
       assert.equal(db.prepare('SELECT count(*) AS n FROM '+table).get().n, 0);
@@ -75,7 +75,7 @@ test('bounded keyset evidence pages deduplicate direct/flood candidates and reje
   const f = fixture(); for (const byte of ['AC', 'AD', 'AE']) observe(f, byte.repeat(32));
   const first = f.store.queryTelemetryPollCandidates(query(1000, { limit: 2 }));
   assert.equal(first.candidates.length, 2); assert.equal(first.exhausted, false);
-  const next = f.store.queryTelemetryPollCandidates(query(1000, { afterPublicKey: first.nextCursor, afterDistance: first.nextDistance, limit: 2 }));
+  const next = f.store.queryTelemetryPollCandidates(query(1000, { afterPublicKey: first.nextCursor, afterDistance: first.nextDistance, afterPriority: first.nextPriority, limit: 2 }));
   assert.equal(next.candidates.length, 1); assert.equal(next.exhausted, true);
   for (const extra of [{ limit: 201 }, { afterPublicKey: ' OR 1=1' }, { radius: 64 }, { windowMs: 0 }, { password: 'SENTINEL' }])
     assert.throws(() => f.store.queryTelemetryPollCandidates(query(1000, extra)), /^Error: Invalid telemetry polling data$/);

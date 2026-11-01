@@ -6,7 +6,7 @@ import { syncDeviceClock } from './clock-sync.js';
 import { openSerialConnection } from './transports/serial-transport.js';
 import { openTcpConnection } from './transports/tcp-transport.js';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
-import { radioCommandOptionsSchema, radioInvalidationSchema, radioLifecycleOptionsSchema } from './lifecycle-schemas.js';
+import { companionIdentitySchema, radioCommandOptionsSchema, radioInvalidationSchema, radioLifecycleOptionsSchema } from './lifecycle-schemas.js';
 import { RadioConnectionError, closeConnection, waitForSettlement } from './connection-lifecycle.js';
 import { installTraceDecoder } from './trace-decoder.js';
 import { normalizeDeviceQuery, readObserverStatusPart } from './observer-status-reader.js';
@@ -15,6 +15,13 @@ const HANDSHAKE_TIMEOUT_MS = 5000;
 const commandOptionsValid = compileSchema(radioCommandOptionsSchema);
 const invalidationValid = compileSchema(radioInvalidationSchema);
 const lifecycleOptionsValid = compileSchema(radioLifecycleOptionsSchema);
+const companionIdentityValid = compileSchema(companionIdentitySchema);
+
+function isValidCompanionIdentity(identity) {
+  return companionIdentityValid(identity)
+    && identity.name.isWellFormed()
+    && Buffer.byteLength(identity.name, 'utf8') <= 31;
+}
 
 async function defaultOpenTransport(radioConfig, logger) {
   if (radioConfig.type === 'tcp') {
@@ -121,6 +128,21 @@ export class RadioManager extends EventEmitter {
     return this.#deviceInfo;
   }
 
+  /**
+   * Returns the targetable Companion name only for the current ready
+   * connection generation. A stale display name is not an identity source
+   * while disconnected or reconnecting. The validated snapshot is separate
+   * from mutable status metadata returned by getDeviceInfo().
+   *
+   * @returns {{name: string, generation: number}|null}
+   */
+  getCompanionIdentity() {
+    const session = this.#session;
+    const identity = session?.companionIdentity;
+    if (!session?.ready || !identity || !isValidCompanionIdentity(identity)) return null;
+    return Object.freeze({ name: identity.name, generation: identity.generation });
+  }
+
   /** Fresh local device readings, guarded by the captured connection generation.
    * No RF requests and no persistence or dashboard dataset are involved.
    */
@@ -198,6 +220,7 @@ export class RadioManager extends EventEmitter {
       'write-error': 'Remote request write failed; the radio connection is being reset because command acknowledgement ownership is uncertain.',
       'protocol-error': 'Remote request acknowledgement was malformed; the radio connection is being reset to prevent incorrect command attribution.',
       'scope-restore-failed': 'Configured bot region scope could not be restored; the radio connection is being reset to prevent later traffic from inheriting it.',
+      'scope-command-timeout': 'A bot scope or send command acknowledgement timed out; the radio connection is being reset because command ownership is uncertain.',
       'request-cancelled': 'Remote request was stopped before acknowledgement; the radio connection is being reset because command acknowledgement ownership is uncertain.'
     };
     this.#logger.warn('services.radio', explanations[request.reason], {
@@ -305,6 +328,8 @@ export class RadioManager extends EventEmitter {
       const selfInfo = await this.#queueCommand(session, () => connection.getSelfInfo(HANDSHAKE_TIMEOUT_MS));
       this.#assertCurrent(session);
       session.deviceInfo = normalizeSelfInfo(selfInfo);
+      const identity = { name: session.deviceInfo.name, generation: session.id };
+      session.companionIdentity = isValidCompanionIdentity(identity) ? Object.freeze(identity) : null;
       this.#deviceInfo = session.deviceInfo;
       this.#attempt = 0;
 

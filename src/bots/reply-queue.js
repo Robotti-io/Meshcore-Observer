@@ -13,8 +13,8 @@ const DEFAULT_POLL_INTERVAL_MS = 250;
  * in-memory array - persisted state is a core observer capability now,
  * independent of the optional HTTP dashboard (see AGENTS.md's
  * "Persistence" section). A single row covers a reply's whole lifecycle,
- * from enqueue (`status: 'pending'`) through resolution
- * (`status: 'sent'|'failed'|'expired'`), so this queue's own history *is*
+ * from enqueue (`pending`) through the durable `dispatching` claim to a
+ * terminal result, so this queue's own history *is*
  * the dashboard's reply-lifecycle metrics - there's no separate event log
  * to keep in sync. This also means a pending reply survives a restart:
  * `start()` resumes ticking if anything was already pending when this
@@ -87,6 +87,7 @@ export class ReplyQueue {
     if (this.#stopped || this.#timer) {
       return;
     }
+    this.#store.recoverDispatchingReplyItems({ recoveredAt: this.#now() });
     if (this.#store.countPendingReplyItems() > 0) {
       this.#startTimer();
     }
@@ -181,17 +182,20 @@ export class ReplyQueue {
    * recordOutcome hook (purely a metrics side-channel), this call is what
    * actually moves the row out of `status: 'pending'` - if it fails, the
    * item stays pending and a future tick will pick it up again, which for
-   * an already-successfully-dispatched item means a real risk of a
-   * duplicate send. That risk is accepted as a rare, honestly-logged edge
-   * case (see MetricsStore#peekOldestPendingReplyItem's own doc comment)
-   * rather than building compensating machinery for what should only ever
-   * happen if the store itself is in serious trouble.
+   * a dispatch whose terminal write fails remains `dispatching`, so the
+   * current process cannot send it again. Startup recovery resolves it as
+   * `delivery-unknown`; it is never replayed without evidence.
    */
-  #resolve(item, status, occurredAt) {
+  #resolve(item, status, occurredAt, reason) {
     try {
-      this.#store.resolveReplyItem(item.id, { status, resolvedAt: occurredAt, queuedMs: occurredAt - item.enqueuedAt });
+      const resolved = this.#store.resolveReplyItem(item.id, {
+        status, resolvedAt: occurredAt, queuedMs: occurredAt - item.enqueuedAt, ...(reason ? { reason } : {})
+      });
+      if (!resolved) this.#logger.warn('bots.replyQueue', 'reply terminal state was not committed; restart will recover it as delivery-unknown', {
+        bot: item.botName, trigger: item.trigger, status
+      });
     } catch (err) {
-      this.#logger.warn('bots.replyQueue', 'failed to mark a reply resolved - it may be re-dispatched (and duplicated) on a future tick', {
+      this.#logger.warn('bots.replyQueue', 'failed to mark a reply resolved; restart will recover it as delivery-unknown', {
         bot: item.botName,
         trigger: item.trigger,
         status,
@@ -238,22 +242,30 @@ export class ReplyQueue {
 
     this.#sending = true;
     try {
-      const transmission = this.#airtimeCoordinator.tryRunWhenQuiet(() => this.#dispatch(next));
+      const transmission = this.#airtimeCoordinator.tryRunWhenQuiet(async () => {
+        if (!this.#store.claimReplyDispatch({ id: next.id, dispatchStartedAt: this.#now() })) return false;
+        await this.#dispatch(next);
+        return true;
+      });
       if (!transmission) {
         this.#sending = false;
         return;
       }
-      await transmission;
-      this.#resolve(next, 'sent', this.#now());
+      const dispatched = await transmission;
+      if (dispatched) this.#resolve(next, 'sent', this.#now());
     } catch (err) {
+      const reason = ['scope-unavailable', 'unsupported-policy'].includes(err?.replyReason)
+        ? err.replyReason
+        : 'send-failed';
       this.#logger.warn('bots.replyQueue', 'failed to send a queued reply', {
         bot: next.botName,
         channel: next.channel,
         trigger: next.trigger,
         sender: next.sender,
-        error: err.message
+        error: err.message,
+        reason
       });
-      this.#resolve(next, 'failed', this.#now());
+      this.#resolve(next, 'failed', this.#now(), reason);
     } finally {
       this.#sending = false;
       if (this.#store.countPendingReplyItems() === 0 && this.#timer) {

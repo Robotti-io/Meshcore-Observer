@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Packet } from '@liamcottle/meshcore.js';
 import { ChannelBot } from '../../src/bots/channel-bot.js';
+import { createReplySuppressionCoordinator } from '../../src/bots/reply-suppression.js';
 import { ReplyQueue } from '../../src/bots/reply-queue.js';
 import { AirtimeCoordinator } from '../../src/radio/airtime-coordinator.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
@@ -17,13 +18,13 @@ import { calculatePacketHash } from '../../src/packets/packet-hash.js';
 import { buildRawFrame, RouteType, PayloadType } from '../fixtures/packet-frames.js';
 
 function silentLogger() {
-  const calls = { debug: [], info: [], warn: [] };
+  const calls = { debug: [], info: [], warn: [], error: [] };
   return {
     calls,
     debug: (source, message, meta) => calls.debug.push({ source, message, meta }),
     info: (source, message, meta) => calls.info.push({ source, message, meta }),
     warn: (source, message, meta) => calls.warn.push({ source, message, meta }),
-    error: () => {}
+    error: (source, message, meta) => calls.error.push({ source, message, meta })
   };
 }
 
@@ -71,9 +72,14 @@ function buildGrpTxtFrame({ channelKey, hops = [], text, routeType = RouteType.F
   });
 }
 
-function fakeRadioManager() {
+function fakeRadioManager({ companionIdentity = null } = {}) {
   const emitter = new EventEmitter();
   const commandCalls = [];
+  const invalidations = [];
+  const controller = new AbortController();
+  let generation = 1;
+  let ready = true;
+  let commandTail = Promise.resolve();
   const connection = {
     getChannels: async () => [{ channelIdx: 0, name: '', secret: Buffer.alloc(16) }],
     setChannel: async () => {},
@@ -85,13 +91,29 @@ function fakeRadioManager() {
   };
   return {
     commandCalls,
+    invalidations,
     connection,
     on: (event, handler) => emitter.on(event, handler),
     off: (event, handler) => emitter.off(event, handler),
     listenerCount: (event) => emitter.listenerCount(event),
+    getCompanionIdentity: () => companionIdentity,
+    getConnectionSnapshot: () => ({ generation: ready ? generation : null, ready, observerPublicKey: null }),
+    invalidateConnection: async (input) => {
+      invalidations.push(input);
+      ready = false;
+      return { status: 'reset' };
+    },
+    disconnect: () => {
+      ready = false;
+      controller.abort(Object.assign(new Error('disconnected'), { code: 'disconnected' }));
+    },
     emitConnected: () => emitter.emit('radio.connected', {}),
     emitPacket: (frame) => emitter.emit('radio.packet', { lastSnr: 10, lastRssi: -50, raw: frame }),
-    runCommand: async (fn) => fn(connection, { generation: 1 })
+    runCommand: (fn) => {
+      const result = commandTail.then(() => fn(connection, { generation, signal: controller.signal }));
+      commandTail = result.then(() => undefined, () => undefined);
+      return result;
+    }
   };
 }
 
@@ -150,6 +172,169 @@ test('replies to an exact trigger on the bot channel meeting the hop requirement
   assert.equal(bot.getRepliesSent(), 1);
 });
 
+test('a handler-matched response suppresses only its unique pending reply and duplicate evidence is not reused', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  let now = 2000;
+  const logger = silentLogger();
+  const botsByName = new Map();
+  const replySuppression = createReplySuppressionCoordinator({ store, botsByName, logger });
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [
+      { trigger: '!echo', response: 'Ack @{sender}', suppressIfAnswered: true }
+    ] }),
+    replyQueue: { enqueue: () => 0 },
+    replySuppression,
+    logger,
+    now: () => now
+  });
+  botsByName.set('echo', bot);
+  await startAndConnect(bot, radioManager);
+
+  const enqueue = (sender, enqueuedAt) => store.enqueueReplyItem({
+    botName: 'echo', channel: '#echo', trigger: '!echo', sender, hopCount: 1,
+    path: 'AA', hash: `request-${sender}`, handlerStateJson: '{"kind":"exact","version":1,"data":{}}',
+    enqueuedAt, expiresAt: 10000
+  });
+  const aliceId = enqueue('Alice', 1000);
+  const bobId = enqueue('Bob', 1100);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Another Bot: Ack @Alice' }));
+  await flush();
+  assert.equal(store.getReplyById(aliceId).status, 'suppressed');
+  assert.equal(store.getReplyById(bobId).status, 'pending');
+
+  const lateId = enqueue('Alice', 2100);
+  now = 2200;
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Another Bot: Ack @Alice' }));
+  await flush();
+  assert.equal(store.getReplyById(lateId).status, 'pending');
+  assert.equal(store.getReplyById(lateId).outcomeReason, null);
+  bot.stop();
+  store.close();
+});
+
+test('a rebroadcast of this bot’s own reply cannot satisfy a newer pending request', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const now = () => 2000;
+  const tracker = new RepeatCheckTracker({ timeoutMs: 10000, now });
+  tracker.register('Ack @Alice', { sender: 'Alice', trigger: '!echo', hash: 'prior-reply' });
+  const botsByName = new Map();
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [
+      { trigger: '!echo', response: 'Ack @{sender}', suppressIfAnswered: true }
+    ] }),
+    replyQueue: { enqueue: () => 0 },
+    replySuppression: createReplySuppressionCoordinator({ store, botsByName, logger: silentLogger() }),
+    repeatCheckTracker: tracker,
+    logger: silentLogger(),
+    now
+  });
+  botsByName.set('echo', bot);
+  await startAndConnect(bot, radioManager);
+  const id = store.enqueueReplyItem({ botName: 'echo', channel: '#echo', trigger: '!echo', sender: 'Alice',
+    hopCount: 1, path: 'AA', hash: 'new-request', handlerStateJson: '{"kind":"exact","version":1,"data":{}}',
+    enqueuedAt: 1500, expiresAt: 10000 });
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey: deriveHashtagChannelKey('#echo'), hops: ['aa'], text: 'Ack @Alice' }));
+  await flush();
+  assert.equal(store.getReplyById(id).status, 'pending');
+  assert.equal(bot.getRepeatsConfirmed(), 1);
+  bot.stop();
+  store.close();
+});
+
+test('requires a matching leading Companion target only for opted-in commands', async () => {
+  const radioManager = fakeRadioManager({ companionIdentity: { name: 'Mesh Bot', generation: 7 } });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [{ trigger: '!echo', response: 'targeted', requiresTarget: true }] }),
+    logger: silentLogger()
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: !echo' }));
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Other Bot] !echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 0);
+
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Mesh Bot]   !echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 1);
+  assert.equal(radioManager.commandCalls[0].message, 'targeted');
+});
+
+test('a target for another bot suppresses even an otherwise untagged legacy command', async () => {
+  const radioManager = fakeRadioManager({ companionIdentity: { name: 'Mesh Bot', generation: 1 } });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Other Bot] !echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 0);
+});
+
+test('a target-required command fails closed when the current Companion identity is unavailable', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [{ trigger: '!echo', response: 'targeted', requiresTarget: true }] }),
+    logger: silentLogger()
+  });
+  await startAndConnect(bot, radioManager);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Mesh Bot] !echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 0);
+});
+
+test('target matching uses NFC normalization, exact case, and literal name comparison', async () => {
+  const radioManager = fakeRadioManager({ companionIdentity: { name: 'Café .*', generation: 1 } });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [{ trigger: '!echo', response: 'ok', requiresTarget: true }] }),
+    logger: silentLogger()
+  });
+  await startAndConnect(bot, radioManager);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Cafe\u0301 .*] !echo' }));
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[CAFÉ .*] !echo' }));
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[CafeX .*] !echo' }));
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 1);
+});
+
+test('malformed leading target selectors fail closed', async () => {
+  const radioManager = fakeRadioManager({ companionIdentity: { name: 'Mesh Bot', generation: 1 } });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  for (const text of ['Jeymz: @[Mesh Bot !echo', 'Jeymz: @[] !echo', 'Jeymz: @[Mesh Bot]!echo', 'Jeymz: @[Mesh Bot] ']) {
+    radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text }));
+  }
+  await flush();
+  assert.equal(radioManager.commandCalls.length, 0);
+});
+
+test('targeted command arguments are passed to the existing handler parser unchanged', async () => {
+  const radioManager = fakeRadioManager({ companionIdentity: { name: 'Mesh Bot', generation: 1 } });
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [{ trigger: '!lookup', kind: 'lookup', requiresTarget: true,
+      foundResponse: '{query}', notFoundResponse: 'none', ambiguousResponse: 'many', invalidResponse: 'bad' }] }),
+    logger: silentLogger(),
+    nodeRegistry: { findByPrefix: (query) => ({ status: 'found', query }), countRepeaters: () => 0 }
+  });
+  await startAndConnect(bot, radioManager);
+  const channelKey = deriveHashtagChannelKey('#echo');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Jeymz: @[Mesh Bot] !lookup E8' }));
+  await flush();
+  assert.equal(radioManager.commandCalls[0].message, 'E8');
+});
+
 test('a configured region candidate scopes a reply when the command packet matches it', async () => {
   const radioManager = fakeRadioManager();
   const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
@@ -180,12 +365,127 @@ for (const failure of ['set', 'send', 'restore', 'send-and-restore']) test(`scop
   radioManager.invalidateConnection = async input => {
     events.push('retire'); assert.deepEqual(input, { generation: 1, reason: 'scope-restore-failed' });
   };
-  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
-    path: 'AA', hash: 'deadbeef', handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }),
-  failure.includes('restore') ? /Could not restore/ : failure === 'set' ? /scope setup failed/ : /send failed/);
+  const dispatch = bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) });
+  if (failure === 'restore') {
+    await dispatch;
+  } else {
+    await assert.rejects(dispatch,
+      failure.includes('restore') ? /Could not restore/ : failure === 'set' ? /could not apply/ : /send failed/);
+  }
   assert.deepEqual(events, ['set', ...(failure === 'set' ? [] : ['send']), 'restore',
     ...(failure.includes('restore') ? ['retire'] : [])]);
-  assert.equal(bot.getRepliesSent(), 0);
+  assert.equal(bot.getRepliesSent(), failure === 'restore' ? 1 : 0);
+  bot.stop();
+});
+
+test('scoped scope-apply acknowledgement timeout retires the connection and sends nothing', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }),
+    logger: silentLogger(), scopeCommandTimeoutMs: 10 });
+  await startAndConnect(bot, radioManager);
+  radioManager.connection.setFloodScope = async () => new Promise(() => {});
+  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }), /did not acknowledge the scope apply/);
+  assert.deepEqual(radioManager.invalidations, [{ generation: 1, reason: 'scope-command-timeout' }]);
+  assert.equal(radioManager.commandCalls.some((call) => call.action === 'send'), false);
+  bot.stop();
+});
+
+test('scoped send acknowledgement timeout retires the connection and does not retry or restore on a stale session', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }),
+    logger: silentLogger(), scopeCommandTimeoutMs: 10 });
+  await startAndConnect(bot, radioManager);
+  radioManager.connection.sendChannelTextMessage = async () => {
+    radioManager.commandCalls.push({ action: 'send' });
+    return new Promise(() => {});
+  };
+  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }), /did not acknowledge the scope send/);
+  assert.deepEqual(radioManager.invalidations, [{ generation: 1, reason: 'scope-command-timeout' }]);
+  assert.deepEqual(radioManager.commandCalls.map((call) => call.action), ['set-scope', 'send']);
+  bot.stop();
+});
+
+test('scope restoration acknowledgement timeout retires the connection but preserves accepted send outcome', async () => {
+  const logger = silentLogger();
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }),
+    logger, scopeCommandTimeoutMs: 10 });
+  await startAndConnect(bot, radioManager);
+  radioManager.connection.clearFloodScope = async () => new Promise(() => {});
+  await bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) });
+  assert.deepEqual(radioManager.invalidations, [{ generation: 1, reason: 'scope-command-timeout' }]);
+  assert.deepEqual(radioManager.commandCalls.map((call) => call.action), ['set-scope', 'send']);
+  assert.equal(bot.getRepliesSent(), 1);
+  assert.ok(logger.calls.error.some((call) => call.meta.reason === 'scope-restore-failed'));
+  bot.stop();
+});
+
+test('disconnect during scope apply cancels the transaction before send', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  radioManager.connection.setFloodScope = async () => radioManager.disconnect();
+  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }), /Radio connection ended during the scope apply/);
+  assert.equal(radioManager.commandCalls.some((call) => call.action === 'send'), false);
+  bot.stop();
+});
+
+test('scope apply acknowledgement from a retired generation cannot proceed to send', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  const currentSnapshot = radioManager.getConnectionSnapshot;
+  radioManager.connection.setFloodScope = async () => {
+    radioManager.getConnectionSnapshot = () => ({ ...currentSnapshot(), generation: 2 });
+  };
+  await assert.rejects(bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) }), /generation changed/);
+  assert.equal(radioManager.commandCalls.some((call) => call.action === 'send'), false);
+  bot.stop();
+});
+
+test('next radio command waits until scope restoration completes', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig({ regionScope: 'Oki' }), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  let releaseScope;
+  let scopeStarted;
+  const enteredScope = new Promise((resolve) => { scopeStarted = resolve; });
+  const scopeGate = new Promise((resolve) => { releaseScope = resolve; });
+  const setScope = radioManager.connection.setFloodScope;
+  radioManager.connection.setFloodScope = async (key) => {
+    await setScope(key);
+    scopeStarted();
+    await scopeGate;
+  };
+
+  const reply = bot.sendQueuedReply({ trigger: '!echo', sender: 'Fixture', hopCount: 1,
+    path: 'AA', hash: 'deadbeef', regionScope: 'Oki',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }) });
+  await enteredScope;
+  let ordinaryCommandStarted = false;
+  const ordinaryCommand = radioManager.runCommand(async () => {
+    ordinaryCommandStarted = true;
+    radioManager.commandCalls.push({ action: 'ordinary-command' });
+  });
+  await flush();
+  assert.equal(ordinaryCommandStarted, false);
+  releaseScope();
+  await Promise.all([reply, ordinaryCommand]);
+  assert.deepEqual(radioManager.commandCalls.map((call) => call.action), [
+    'set-scope', 'send', 'clear-scope', 'ordinary-command'
+  ]);
   bot.stop();
 });
 
@@ -475,6 +775,13 @@ test('enqueues a plain-data reply (not a callback) into the shared replyQueue ra
   assert.equal(item.botName, 'echo');
   assert.equal(item.channel, '#echo');
   assert.equal(item.trigger, '!echo');
+  assert.deepEqual(item.deliveryPolicy, {
+    version: 1,
+    transport: 'channel',
+    scope: { mode: 'device-default' },
+    fallback: { mode: 'none' },
+    maxAttempts: 1
+  });
   assert.equal(item.sender, 'Jeymz');
   assert.equal(item.hopCount, 3);
   assert.equal(item.path, 'AA➡️BB➡️CC');
@@ -487,6 +794,59 @@ test('enqueues a plain-data reply (not a callback) into the shared replyQueue ra
   assert.equal(radioManager.commandCalls.length, 1);
   assert.equal(radioManager.commandCalls[0].message, '🔁 @[Jeymz]! 3 hops via AA➡️BB➡️CC');
   assert.equal(bot.getRepliesSent(), 1);
+});
+
+test('explicit unscoped reply policy fails closed when Companion cannot enforce it', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  await assert.rejects(bot.sendQueuedReply({
+    trigger: '!echo', sender: 'Fixture', hopCount: 1, path: 'AA', hash: 'deadbeef',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }),
+    deliveryPolicy: { version: 1, transport: 'channel', scope: { mode: 'unscoped' },
+      fallback: { mode: 'region', region: 'Backup' }, maxAttempts: 1 }
+  }), /Explicit unscoped replies are not supported/);
+  assert.equal(radioManager.commandCalls.some((call) => call.action === 'send'), false);
+  bot.stop();
+});
+
+test('regional fallback is used only after a pre-send scope apply failure', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  const applied = [];
+  radioManager.connection.setFloodScope = async (key) => {
+    const value = Buffer.from(key);
+    applied.push(value);
+    if (applied.length === 1) throw new Error('primary scope rejected');
+  };
+  const item = {
+    trigger: '!echo', sender: 'Fixture', hopCount: 1, path: 'AA', hash: 'deadbeef',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }),
+    deliveryPolicy: { version: 1, transport: 'channel', scope: { mode: 'region', region: 'Primary' },
+      fallback: { mode: 'region', region: 'Backup' }, maxAttempts: 1 }
+  };
+  await bot.sendQueuedReply(item);
+  assert.deepEqual(applied, [deriveRegionTransportKey('Primary'), deriveRegionTransportKey('Backup')]);
+  assert.equal(radioManager.commandCalls.filter((call) => call.action === 'send').length, 1);
+  bot.stop();
+});
+
+test('a regional fallback is never used after a send attempt fails', async () => {
+  const radioManager = fakeRadioManager();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  await startAndConnect(bot, radioManager);
+  let scopeSets = 0;
+  radioManager.connection.setFloodScope = async () => { scopeSets += 1; };
+  radioManager.connection.sendChannelTextMessage = async () => { throw new Error('send result uncertain'); };
+  await assert.rejects(bot.sendQueuedReply({
+    trigger: '!echo', sender: 'Fixture', hopCount: 1, path: 'AA', hash: 'deadbeef',
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: {} }),
+    deliveryPolicy: { version: 1, transport: 'channel', scope: { mode: 'region', region: 'Primary' },
+      fallback: { mode: 'region', region: 'Backup' }, maxAttempts: 1 }
+  }), /send result uncertain/);
+  assert.equal(scopeSets, 1);
+  bot.stop();
 });
 
 test('invalid queued handler state fails dispatch before any radio send', async () => {

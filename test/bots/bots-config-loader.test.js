@@ -38,6 +38,34 @@ test('loads and validates a well-formed bots config file', () => {
   assert.equal(result[0].commands[0].trigger, '!echo');
 });
 
+test('accepts an opt-in requiresTarget command and leaves the default omitted', () => {
+  const bot = { ...VALID_BOT, commands: [{ ...VALID_BOT.commands[0], requiresTarget: true }] };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].commands[0].requiresTarget, true);
+  assert.equal(VALID_BOT.commands[0].requiresTarget, undefined);
+});
+
+test('accepts suppression opt-in only for a sender-addressed exact response', () => {
+  const bot = { ...VALID_BOT, commands: [{ ...VALID_BOT.commands[0], suppressIfAnswered: true }] };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].commands[0].suppressIfAnswered, true);
+  assert.throws(() => withTempFile(JSON.stringify([{
+    ...VALID_BOT,
+    commands: [{ trigger: '!lookup', kind: 'lookup', suppressIfAnswered: true,
+      foundResponse: 'found {sender}', notFoundResponse: 'none {sender}',
+      ambiguousResponse: 'many {sender}', invalidResponse: 'bad {sender}' }]
+  }]), (filePath) => loadBotsConfig(filePath)), /no satisfactory-response matcher/);
+  assert.throws(() => withTempFile(JSON.stringify([{
+    ...VALID_BOT,
+    commands: [{ trigger: '!echo', response: 'pong', suppressIfAnswered: true }]
+  }]), (filePath) => loadBotsConfig(filePath)), /must address \{sender\}/);
+});
+
+test('strictly rejects a non-boolean requiresTarget value', () => {
+  const bot = { ...VALID_BOT, commands: [{ ...VALID_BOT.commands[0], requiresTarget: 'yes' }] };
+  assert.throws(() => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)), BotsConfigError);
+});
+
 test('accepts a command with an optional overflowResponse', () => {
   const bot = {
     ...VALID_BOT,
@@ -68,6 +96,31 @@ test('accepts an optional case-sensitive regionScope separate from the channel',
     assert.throws(() => withTempFile(JSON.stringify([{ ...VALID_BOT, regionScope }]),
       (filePath) => loadBotsConfig(filePath)), BotsConfigError);
   }
+});
+
+test('accepts explicit per-command scope and fallback policies', () => {
+  const bot = {
+    ...VALID_BOT,
+    commands: [{ ...VALID_BOT.commands[0], scope: { mode: 'region', region: 'Oki' }, fallback: { mode: 'region', region: 'Cvg' } }]
+  };
+  const result = withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath));
+  assert.deepEqual(result[0].commands[0].scope, { mode: 'region', region: 'Oki' });
+  assert.deepEqual(result[0].commands[0].fallback, { mode: 'region', region: 'Cvg' });
+});
+
+test('rejects malformed command policy and policy that widens a bot region constraint', () => {
+  for (const scope of [{ mode: 'region' }, { mode: 'region', region: '$' }, { mode: 'global' }]) {
+    const bot = { ...VALID_BOT, commands: [{ ...VALID_BOT.commands[0], scope }] };
+    assert.throws(() => withTempFile(JSON.stringify([bot]), (filePath) => loadBotsConfig(filePath)), BotsConfigError);
+  }
+  const fixedConflict = { ...VALID_BOT, regionScope: 'Oki', commands: [{
+    ...VALID_BOT.commands[0], scope: { mode: 'device-default' }
+  }] };
+  assert.throws(() => withTempFile(JSON.stringify([fixedConflict]), (filePath) => loadBotsConfig(filePath)), /conflicts with bot fixed regionScope/);
+  const allowlistConflict = { ...VALID_BOT, regionScope: ['Oki'], commands: [{
+    ...VALID_BOT.commands[0], fallback: { mode: 'region', region: 'Cvg' }
+  }] };
+  assert.throws(() => withTempFile(JSON.stringify([allowlistConflict]), (filePath) => loadBotsConfig(filePath)), /must be a region in bot regionScope allowlist/);
 });
 
 test('throws BotsConfigError for invalid JSON', () => {
@@ -116,6 +169,29 @@ test('allows the same trigger name across two different bots', () => {
   const botB = { ...VALID_BOT, name: 'echo-b', channel: '#b' };
   const result = withTempFile(JSON.stringify([botA, botB]), (filePath) => loadBotsConfig(filePath));
   assert.equal(result.length, 2);
+});
+
+test('rejects same-channel trigger overlap when either local command requires targeting', () => {
+  const targetBot = { ...VALID_BOT, name: 'targeted', commands: [{ ...VALID_BOT.commands[0], requiresTarget: true }] };
+  const legacyBot = { ...VALID_BOT, name: 'legacy' };
+  assert.throws(
+    () => withTempFile(JSON.stringify([targetBot, legacyBot]), (filePath) => loadBotsConfig(filePath)),
+    /Ambiguous target command "!echo"/
+  );
+});
+
+test('preserves same-channel legacy overlap when targeting is not enabled', () => {
+  const first = { ...VALID_BOT, name: 'first' };
+  const second = { ...VALID_BOT, name: 'second' };
+  assert.equal(withTempFile(JSON.stringify([first, second]), (filePath) => loadBotsConfig(filePath)).length, 2);
+});
+
+test('a disabled targeted bot does not make a same-channel legacy trigger ambiguous', () => {
+  const disabledTargetBot = { ...VALID_BOT, name: 'disabled', enabled: false,
+    commands: [{ ...VALID_BOT.commands[0], requiresTarget: true }] };
+  const legacyBot = { ...VALID_BOT, name: 'legacy' };
+  assert.equal(withTempFile(JSON.stringify([disabledTargetBot, legacyBot]),
+    (filePath) => loadBotsConfig(filePath)).length, 2);
 });
 
 const VALID_LOOKUP_COMMAND = {

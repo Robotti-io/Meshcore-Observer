@@ -4,8 +4,10 @@ import { calculatePacketHash } from '../packets/packet-hash.js';
 import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
 import { RepeatCheckTracker } from './repeat-check-tracker.js';
 import { createDefaultCommandHandlers } from './command-handlers/index.js';
+import { matchesCompanionTarget, parseLeadingCommandTarget } from './command-target.js';
 import { channelHashForKey } from './channel-key.js';
 import { deriveRegionTransportKey, matchPacketRegionScope } from './region-scope.js';
+import { isReplyPolicyAllowedByBot, ReplyPolicyError, resolveReplyDeliveryPolicy } from './reply-scope-policy.js';
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
 import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.js';
@@ -16,6 +18,15 @@ const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
 // only used when a caller (e.g. a test) constructs a bot without threading
 // the configured value through.
 const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 10000;
+const DEFAULT_SCOPE_COMMAND_TIMEOUT_MS = 5000;
+
+class ScopeCommandTimeoutError extends Error {
+  constructor(phase) {
+    super(`Companion did not acknowledge the scope ${phase} command`);
+    this.name = 'ScopeCommandTimeoutError';
+    this.phase = phase;
+  }
+}
 
 function hopCountFor(packet) {
   if (DIRECT_ROUTES.has(packet.route_type_string)) {
@@ -29,12 +40,6 @@ function formatPath(packet) {
     .getPathHashes()
     .map((hash) => Buffer.from(hash).toString('hex').toUpperCase())
     .join('➡️');
-}
-
-function hasConfiguredRegionScope(scope, configuredScopes) {
-  if (!scope || !configuredScopes) return false;
-  const scopeKey = deriveRegionTransportKey(scope).toString('hex');
-  return configuredScopes.some((candidate) => deriveRegionTransportKey(candidate).toString('hex') === scopeKey);
 }
 
 /**
@@ -93,6 +98,8 @@ export class ChannelBot {
   #now;
   #onRadioConnected = null;
   #onRadioPacket = null;
+  #replySuppression;
+  #scopeCommandTimeoutMs;
 
   /**
    * `replyQueue` (see reply-queue.js) is a single instance *shared across
@@ -117,12 +124,18 @@ export class ChannelBot {
     now = () => Date.now(),
     repeatCheckTracker = new RepeatCheckTracker({ timeoutMs: repeatCheckTimeoutMs, now }),
     replyQueue,
+    replySuppression = async () => false,
     getKnownRegionScopes = () => [],
+    scopeCommandTimeoutMs = DEFAULT_SCOPE_COMMAND_TIMEOUT_MS,
     nodeRegistry,
     statsReporter,
     commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter })
   }) {
     this.#radioManager = radioManager;
+    if (!Number.isInteger(scopeCommandTimeoutMs) || scopeCommandTimeoutMs < 1 || scopeCommandTimeoutMs > 30000) {
+      throw new Error('scopeCommandTimeoutMs must be an integer from 1 to 30000');
+    }
+    this.#scopeCommandTimeoutMs = scopeCommandTimeoutMs;
     this.#name = botConfig.name;
     this.#channelName = botConfig.channel;
     this.#configuredRegionScope = typeof botConfig.regionScope === 'string' ? botConfig.regionScope : null;
@@ -164,6 +177,7 @@ export class ChannelBot {
           });
         }
       };
+    this.#replySuppression = replySuppression;
   }
 
   get name() {
@@ -233,6 +247,20 @@ export class ChannelBot {
   /** Replies whose repeat-check window elapsed with no confirmed rebroadcast heard. */
   getRepeatsUnconfirmed() {
     return this.#repeatsUnconfirmed;
+  }
+
+  /** Applies this bot's tested handler matcher to one persisted reply candidate. */
+  isSatisfactoryResponse({ item, responseText }) {
+    if (item.botName !== this.#name || item.channel !== this.#channelName) return false;
+    const command = this.#commands.get(item.trigger);
+    if (command?.suppressIfAnswered !== true) return false;
+    const handler = this.#commandHandlers.get(command.kind ?? 'exact');
+    return handler?.isSatisfactoryResponse?.({
+      command,
+      item,
+      responseText,
+      maxBytes: this.#maxMessageBytes
+    }) === true;
   }
 
   /**
@@ -329,14 +357,35 @@ export class ChannelBot {
       return;
     }
 
+    const hash = calculatePacketHash(packet.payload_type, packet.pathLen, payload);
+    // First remove our own known reply echoes from the response evidence
+    // stream. They may arrive after a newer request is queued and must not
+    // accidentally satisfy that newer interaction.
+    const isOwnReplyEcho = this.#checkForRepeat(decrypted.text, hopCountFor(packet), decrypted.sender);
+    if (!isOwnReplyEcho && [...this.#commands.values()].some((command) => command.suppressIfAnswered === true)) {
+      try {
+        await this.#replySuppression({
+          channel: this.#channelName,
+          responseText: decrypted.text,
+          responseSender: decrypted.sender,
+          observedAt: this.#now(),
+          packetHash: hash
+        });
+      } catch {
+        this.#logger.warn('bots.channelBot', 'could not evaluate a pending reply against a channel response', {
+          bot: this.#name,
+          channel: this.#channelName,
+          reason: 'response-evaluation-failed'
+        });
+      }
+    }
+
     // Checked before the sender-prefix bail below: our own reply templates
     // never carry a "name: " prefix, so a rebroadcast of our own reply
     // decrypts with sender: null and would otherwise never reach any check
     // at all. Any successfully-decrypted plaintext is fair game here -
     // repeat-confirmation doesn't require a sender to attribute the message
     // to, unlike trigger-matching below.
-    this.#checkForRepeat(decrypted.text, hopCountFor(packet));
-
     if (!decrypted.sender) {
       this.#logger.debug('bots.channelBot', 'GRP_TXT on this channel had no sender prefix', {
         bot: this.#name,
@@ -345,9 +394,29 @@ export class ChannelBot {
       return;
     }
 
+    const parsedTarget = parseLeadingCommandTarget(decrypted.text);
+    if (parsedTarget.kind === 'invalid') {
+      this.#logger.debug('bots.channelBot', 'ignored malformed command target selector', {
+        bot: this.#name,
+        channel: this.#channelName
+      });
+      return;
+    }
+
+    const hasMatchingTarget = parsedTarget.kind === 'targeted'
+      && matchesCompanionTarget(parsedTarget.name, this.#radioManager.getCompanionIdentity?.());
+    if (parsedTarget.kind === 'targeted' && !hasMatchingTarget) {
+      this.#logger.debug('bots.channelBot', 'ignored command targeted to another or unavailable Companion identity', {
+        bot: this.#name,
+        channel: this.#channelName
+      });
+      return;
+    }
+    const commandText = parsedTarget.commandText;
+
     let match = null;
     for (const handler of this.#commandHandlers.values()) {
-      match = handler?.match({ commands: [...this.#commands.values()], text: decrypted.text }) ?? null;
+      match = handler?.match({ commands: [...this.#commands.values()], text: commandText }) ?? null;
       if (match) {
         break;
       }
@@ -363,6 +432,15 @@ export class ChannelBot {
       return;
     }
     const { command, state: handlerStateJson } = match;
+
+    if (command.requiresTarget === true && !hasMatchingTarget) {
+      this.#logger.debug('bots.channelBot', 'ignored command that requires an explicit Companion target', {
+        bot: this.#name,
+        channel: this.#channelName,
+        trigger: command.trigger
+      });
+      return;
+    }
 
     const hopCount = hopCountFor(packet);
     if (hopCount < this.#minHops) {
@@ -385,7 +463,6 @@ export class ChannelBot {
     // permanently blackhole a later delivery of the same message that
     // *does* clear minHops - this ordering lets that later delivery still
     // win, while still guaranteeing at most one reply per accepted trigger.
-    const hash = calculatePacketHash(packet.payload_type, packet.pathLen, payload);
     if (this.#deduplicator.isDuplicate(hash)) {
       this.#logger.debug('bots.channelBot', 'ignored duplicate delivery of an already-replied-to trigger', {
         bot: this.#name,
@@ -394,12 +471,12 @@ export class ChannelBot {
       return;
     }
 
-    // A string setting fixes every reply to one region. An array setting is
-    // an allowlist: only commands scoped to a listed region are answered, and
-    // the reply mirrors that command's scope. Bots without either setting
-    // mirror any scoped command whose region can be resolved.
-    let replyRegionScope = this.#configuredRegionScope;
-    if (!replyRegionScope) {
+    // Explicit command policy does not need to infer the incoming transport
+    // scope. Inherited policy retains legacy fixed/allowlist/mirror behavior.
+    const explicitCommandScope = command.scope && command.scope.mode !== 'inherit';
+    const needsIncomingScope = !explicitCommandScope && !this.#configuredRegionScope;
+    let incomingScope = { status: 'unscoped', regionScope: null };
+    if (needsIncomingScope) {
       let knownRegionScopes;
       try {
         knownRegionScopes = this.#getKnownRegionScopes();
@@ -413,24 +490,21 @@ export class ChannelBot {
       }
       const regionCandidates = [...new Set([...knownRegionScopes, ...(this.#configuredRegionScopes ?? [])])];
       const regionMatch = matchPacketRegionScope(packet, regionCandidates);
-      if (regionMatch.status === 'unknown' || regionMatch.status === 'ambiguous') {
-        this.#logger.debug('bots.channelBot', 'scoped command region could not be resolved; reply was skipped', {
-          bot: this.#name,
-          trigger: decrypted.text,
-          resolution: regionMatch.status,
-          knownRegionCount: knownRegionScopes.length
-        });
-        return;
-      }
-      if (this.#configuredRegionScopes && !hasConfiguredRegionScope(regionMatch.regionScope, this.#configuredRegionScopes)) {
-        this.#logger.debug('bots.channelBot', 'command region is outside this bot\'s configured scopes; reply was skipped', {
-          bot: this.#name,
-          trigger: decrypted.text,
-          configuredRegionCount: this.#configuredRegionScopes.length
-        });
-        return;
-      }
-      replyRegionScope = regionMatch.regionScope;
+      incomingScope = regionMatch;
+    }
+    const scopeResolution = resolveReplyDeliveryPolicy({
+      botRegionScope: this.#configuredRegionScope ?? this.#configuredRegionScopes,
+      command,
+      incomingScope
+    });
+    if (scopeResolution.status !== 'resolved') {
+      this.#logger.debug('bots.channelBot', 'command scope policy could not be resolved; reply was skipped', {
+        bot: this.#name,
+        channel: this.#channelName,
+        trigger: command.trigger,
+        resolution: scopeResolution.reason
+      });
+      return;
     }
 
     // Queued rather than sent immediately: the shared ReplyQueue holds
@@ -447,7 +521,8 @@ export class ChannelBot {
     this.#replyQueue.enqueue({
       botName: this.#name,
       channel: this.#channelName,
-      regionScope: replyRegionScope,
+      regionScope: scopeResolution.regionScope,
+      deliveryPolicy: scopeResolution.deliveryPolicy,
       // command.trigger, not decrypted.text: argument-taking handlers
       // match text that also carries command-specific input.
       trigger: command.trigger,
@@ -488,10 +563,21 @@ export class ChannelBot {
    *
    * @param {{trigger: string, sender: string, hopCount: number, path: string, hash: string, handlerStateJson: string, regionScope?: string|null}} item
    */
-  async sendQueuedReply({ trigger, sender, hopCount, path, hash, handlerStateJson, regionScope = null }) {
-    const effectiveRegionScope = this.#configuredRegionScope ?? regionScope;
-    if (this.#configuredRegionScopes && !hasConfiguredRegionScope(effectiveRegionScope, this.#configuredRegionScopes)) {
-      throw new Error('Queued bot reply has no allowed region scope');
+  async sendQueuedReply(item) {
+    const { trigger, sender, hopCount, path, hash, handlerStateJson, regionScope = null } = item;
+    const deliveryPolicy = item.deliveryPolicy ?? {
+      version: 1,
+      transport: 'channel',
+      scope: regionScope ? { mode: 'region', region: regionScope } : { mode: 'device-default' },
+      fallback: { mode: 'none' },
+      maxAttempts: 1
+    };
+    const botRegionScope = this.#configuredRegionScope ?? this.#configuredRegionScopes;
+    if (deliveryPolicy.transport !== 'channel') {
+      throw new ReplyPolicyError('unsupported-policy', 'Queued reply transport is not supported by this channel bot');
+    }
+    if (!isReplyPolicyAllowedByBot(botRegionScope, deliveryPolicy)) {
+      throw new ReplyPolicyError('scope-unavailable', 'Queued reply scope is no longer permitted by this bot configuration');
     }
     const command = this.#commands.get(trigger);
     if (!command) {
@@ -528,25 +614,132 @@ export class ChannelBot {
       maxBytes: this.#maxMessageBytes
     });
 
-    await this.#radioManager.runCommand(async (connection, context) => {
-      if (!effectiveRegionScope) return connection.sendChannelTextMessage(this.#channelIdx, message);
-      const regionScopeKey = deriveRegionTransportKey(effectiveRegionScope);
-      let sendFailure;
-      try {
-        await connection.setFloodScope(regionScopeKey);
-        await connection.sendChannelTextMessage(this.#channelIdx, message);
-      } catch (error) {
-        sendFailure = { error };
+    const transaction = { failure: null };
+    try {
+      await this.#radioManager.runCommand(async (connection, context) => {
+        const runScopeCommand = async (phase, action) => {
+          transaction.phase = phase;
+          this.#assertScopeContext(context);
+          let timer;
+          let onAbort;
+          const aborted = new Promise((_, reject) => {
+            if (context.signal.aborted) {
+              reject(context.signal.reason ?? new Error('Radio command was cancelled'));
+              return;
+            }
+            onAbort = () => reject(context.signal.reason ?? new Error('Radio command was cancelled'));
+            context.signal.addEventListener('abort', onAbort, { once: true });
+          });
+          const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new ScopeCommandTimeoutError(phase)), this.#scopeCommandTimeoutMs);
+          });
+          try {
+            await Promise.race([Promise.resolve().then(action), aborted, timeout]);
+            // The SDK's resolved send promise is the Companion's explicit OK
+            // acknowledgment. Preserve that evidence even if disconnect is
+            // observed immediately afterward while restoration is still due.
+            if (phase === 'send') transaction.sendAccepted = true;
+            this.#assertScopeContext(context);
+          } catch (error) {
+            if (error instanceof ScopeCommandTimeoutError) {
+              transaction.failure = new ReplyPolicyError(
+                phase === 'send' ? 'send-failed' : 'scope-unavailable',
+                `Companion did not acknowledge the scope ${phase} command`,
+                { cause: error }
+              );
+              await this.#radioManager.invalidateConnection({
+                generation: context.generation,
+                reason: 'scope-command-timeout'
+              });
+              throw transaction.failure;
+            }
+            throw error;
+          } finally {
+            clearTimeout(timer);
+            if (onAbort) context.signal.removeEventListener('abort', onAbort);
+          }
+        };
+
+        const sendScoped = async (region, mayUseFallback) => {
+          let applyError = null;
+          try {
+            await runScopeCommand('apply', () => connection.setFloodScope(deriveRegionTransportKey(region)));
+          } catch (error) {
+            if (transaction.failure || context.signal.aborted || error instanceof ReplyPolicyError) throw error;
+            applyError = error ?? new Error('Companion rejected the configured region scope');
+          }
+
+          if (applyError) {
+            await this.#restoreDeviceScope(connection, context, runScopeCommand, transaction);
+            if (mayUseFallback && deliveryPolicy.fallback.mode === 'region') {
+              this.#logger.info('bots.channelBot', 'using explicitly configured region fallback after scope apply failure', {
+                bot: this.#name,
+                trigger,
+                primaryScope: region,
+                fallbackScope: deliveryPolicy.fallback.region
+              });
+              return sendScoped(deliveryPolicy.fallback.region, false);
+            }
+            if (mayUseFallback && deliveryPolicy.fallback.mode === 'unscoped') {
+              throw new ReplyPolicyError('unsupported-policy', 'Explicit unscoped fallback is not supported by the current Companion send API');
+            }
+            throw new ReplyPolicyError('scope-unavailable', 'Companion could not apply the configured reply region scope', { cause: applyError });
+          }
+
+          let sendError = null;
+          try {
+            await runScopeCommand('send', () => connection.sendChannelTextMessage(this.#channelIdx, message));
+          } catch (error) {
+            if (transaction.failure || context.signal.aborted || error instanceof ReplyPolicyError) throw error;
+            sendError = error ?? new Error('Companion rejected the channel reply');
+          }
+
+          let restoreError = null;
+          try {
+            await this.#restoreDeviceScope(connection, context, runScopeCommand, transaction);
+          } catch (error) {
+            restoreError = error;
+          }
+          if (restoreError) {
+            if (sendError) throw sendError;
+            this.#logger.error('bots.channelBot', 'Companion accepted a scoped reply but scope restoration failed; connection was retired', {
+              bot: this.#name,
+              trigger,
+              generation: context.generation,
+              reason: 'scope-restore-failed'
+            });
+            return;
+          }
+          if (sendError) throw sendError;
+        };
+
+        if (deliveryPolicy.scope.mode === 'device-default') {
+          await runScopeCommand('send', () => connection.sendChannelTextMessage(this.#channelIdx, message));
+        } else if (deliveryPolicy.scope.mode === 'region') {
+          await sendScoped(deliveryPolicy.scope.region, true);
+        } else if (deliveryPolicy.scope.mode === 'unscoped') {
+          throw new ReplyPolicyError('unsupported-policy', 'Explicit unscoped replies are not supported by the current Companion send API');
+        } else {
+          throw new ReplyPolicyError('unsupported-policy', 'Queued reply has an unknown scope policy');
+        }
+      });
+    } catch (error) {
+      if (!transaction.failure && transaction.phase
+        && ['disconnected', 'stopped', 'invalidated', 'stale-generation'].includes(error?.code)) {
+        transaction.failure = new ReplyPolicyError(
+          transaction.phase === 'send' ? 'send-failed' : 'scope-unavailable',
+          `Radio connection ended during the scope ${transaction.phase} command`,
+          { cause: error }
+        );
       }
-      try { await connection.clearFloodScope(); }
-      catch {
-        // The region-scope override is connection-global. If it cannot be cleared,
-        // retire the radio session before another queued command can inherit it.
-        await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
-        throw new Error('Could not restore the Companion region scope after a bot reply');
+      if (transaction.failure && !transaction.sendAccepted) throw transaction.failure;
+      if (transaction.failure && transaction.sendAccepted) {
+        // The channel command was accepted, so preserve that delivery result;
+        // restoration failure is separately logged and the connection retired.
+      } else {
+        throw error;
       }
-      if (sendFailure) throw sendFailure.error;
-    });
+    }
     this.#repliesSent += 1;
     this.#logger.info('bots.channelBot', 'sent reply', { bot: this.#name, sender, hopCount, trigger, degraded });
 
@@ -558,6 +751,29 @@ export class ChannelBot {
     this.#reportCapacityEvictions(evicted);
   }
 
+  #assertScopeContext(context) {
+    if (context.signal.aborted) throw context.signal.reason ?? new Error('Radio command was cancelled');
+    const snapshot = this.#radioManager.getConnectionSnapshot?.();
+    if (!snapshot || snapshot.generation !== context.generation || !snapshot.ready) {
+      throw new ReplyPolicyError('scope-unavailable', 'Radio connection generation changed during the scoped reply transaction');
+    }
+  }
+
+  async #restoreDeviceScope(connection, context, runScopeCommand, transaction) {
+    try {
+      await runScopeCommand('restore', () => connection.clearFloodScope());
+    } catch (error) {
+      if (transaction.failure) throw transaction.failure;
+      transaction.failure = new ReplyPolicyError('scope-unavailable', 'Could not restore the Companion region scope after a bot reply', { cause: error });
+      // Region scope is connection-global. Never run later commands on a
+      // session whose scope restoration could not be confirmed.
+      if (!context.signal.aborted) {
+        await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
+      }
+      throw transaction.failure;
+    }
+  }
+
   /**
    * Called for every successfully-decrypted GRP_TXT on this channel,
    * including ones with no sender prefix (see #handleRawPacket). MeshCore
@@ -566,12 +782,16 @@ export class ChannelBot {
    * (half-duplex), so an exact plaintext match here is necessarily a
    * rebroadcast of a reply this bot sent, not an echo of our own TX.
    */
-  #checkForRepeat(text, hopCount) {
-    const { confirmed, expired } = this.#repeatCheckTracker.checkAndConsume(text);
+  #checkForRepeat(text, hopCount, sender = null) {
+    let result = this.#repeatCheckTracker.checkAndConsume(text);
+    if (!result.confirmed && sender) {
+      result = this.#repeatCheckTracker.checkAndConsume(`${sender}: ${text}`);
+    }
+    const { confirmed, expired } = result;
     this.#reportExpiredRepeatChecks(expired);
 
     if (!confirmed) {
-      return;
+      return false;
     }
 
     this.#repeatsConfirmed += 1;
@@ -583,6 +803,7 @@ export class ChannelBot {
       hopCount,
       elapsedMs: confirmed.elapsedMs
     });
+    return true;
   }
 
   #reportExpiredRepeatChecks(expired) {

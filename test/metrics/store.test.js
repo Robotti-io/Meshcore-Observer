@@ -211,6 +211,7 @@ test('queryBrokerDeliveryTotals omits zero-count (broker, outcome) pairs rather 
 function seedResolvedReply(store, { status, resolvedAt, queuedMs = 0, ...itemOverrides }) {
   store.enqueueReplyItem(baseReplyQueueItem({ enqueuedAt: resolvedAt - queuedMs, expiresAt: resolvedAt + 60_000, ...itemOverrides }));
   const item = store.peekOldestPendingReplyItem();
+  if (['sent','failed'].includes(status)) assert.equal(store.claimReplyDispatch({ id: item.id, dispatchStartedAt: resolvedAt - queuedMs }), true);
   store.resolveReplyItem(item.id, { status, resolvedAt, queuedMs });
 }
 
@@ -633,6 +634,8 @@ test('resolveReplyItem moves an item out of pending, recording status/resolvedAt
   store.enqueueReplyItem(baseReplyQueueItem({ enqueuedAt: 1_000 }));
   const item = store.peekOldestPendingReplyItem();
 
+  assert.equal(store.claimReplyDispatch({ id: item.id, dispatchStartedAt: 1_000 }), true);
+
   store.resolveReplyItem(item.id, { status: 'sent', resolvedAt: 1_500, queuedMs: 500 });
 
   assert.equal(store.countPendingReplyItems(), 0);
@@ -813,7 +816,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 20);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 23);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
     assert.ok(columns.includes('handler_state_json'));
     assert.ok(!columns.includes('lookup_outcome'));
@@ -896,12 +899,13 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
     migratedStore.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 20);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 23);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
     assert.deepEqual(columns, [
       'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',
       'enqueued_at', 'expires_at', 'status', 'resolved_at', 'queued_ms',
-      'sender_identifier', 'sender_identifier_kind', 'sender_identifier_source', 'region_scope'
+      'sender_identifier', 'sender_identifier_kind', 'sender_identifier_source', 'region_scope', 'delivery_policy_json',
+      'recipient_public_key', 'dispatch_started_at', 'attempt_count', 'outcome_reason', 'ack_status', 'ack_at', 'ack_latency_ms'
     ]);
     migratedDb.close();
   } finally {

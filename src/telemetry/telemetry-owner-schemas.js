@@ -12,6 +12,8 @@ export const telemetryOwnedRequestSchema = { oneOf: remoteRequestSchema.oneOf.fi
       ? object({ ...schema.properties.params.properties, count: integer(1, 3), prefixLength: { const: 32 } })
       : schema.properties.params }
 })) };
+const telemetryNeighbourParamsSchema = telemetryOwnedRequestSchema.oneOf
+  .find(schema => schema.properties.operation.const === 'neighbours').properties.params;
 export const telemetryOwnerSnapshotSchema = object({ generation: { anyOf: [integer(1), { type: 'null' }] },
   ready: { type: 'boolean' }, observerPublicKey: { anyOf: [{ ...base.targetPublicKey, pattern: '^[0-9a-fA-F]{64}$' }, { type: 'null' }] } });
 export const telemetryReplayReadSchema = object({ serverTimestamp: { anyOf: [integer(0, 0xFFFFFFFF), { type: 'null' }] } });
@@ -25,7 +27,7 @@ export const telemetryTraceFrameSchema = object({ bytes: { type: 'array', minIte
 export const telemetryOwnerClockSchema = object({ wall: integer(0), monotonic: { type: 'number', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } });
 export const telemetryOwnerContextSchema = object({ requestId: base.requestId, targetPublicKey: base.targetPublicKey,
   operation: { enum: ['guest-login', 'owner-info', 'status', 'telemetry', 'neighbours'] }, params: { oneOf: [
-    object({}), object({ permissionMask: { const: 0 } }), telemetryOwnedRequestSchema.oneOf[2].properties.params
+    object({}), object({ permissionMask: { const: 0 } }), telemetryNeighbourParamsSchema
   ] }, generation: integer(1), observerPublicKey: base.targetPublicKey });
 export const TELEMETRY_OWNER_REASONS = Object.freeze([...new Set([
   ...TELEMETRY_INVENTORY_FAILURES, 'stopped', 'recovery-failed', 'busy', 'disconnected', 'not-ready',

@@ -8,7 +8,7 @@ const fixture = () => { const f = createTelemetryFixture(); fixtures.push(f); re
 const range = { start: 0, end: 2000 };
 afterEach(() => { for (const f of fixtures.splice(0)) f.cleanup(); });
 
-test('migration 20 preserves v19 telemetry and rolls back a late index failure before a safe retry', () => {
+test('migrations 20 and 21 preserve telemetry and roll back a late index failure before a safe retry', () => {
   const f = fixture();
   f.store.recordTelemetryResult(telemetryResult(f.run)); f.close();
   const before = f.inspect(db => {
@@ -26,7 +26,7 @@ test('migration 20 preserves v19 telemetry and rolls back a late index failure b
   f.open();
   assert.equal(f.store.queryTelemetryRequestDiagnostics(range).total, 0);
   f.close(); f.inspect(db => {
-    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 20);
+    assert.equal(db.prepare('PRAGMA user_version').get().user_version, 23);
     assert.deepEqual(telemetrySnapshot(db), before);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_schema WHERE type='index' AND name LIKE 'idx_telemetry_diagnostics_%'").get().n, 2);

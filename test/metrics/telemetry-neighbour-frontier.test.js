@@ -45,9 +45,9 @@ test('distance/key cursor visits inner layers first and deduplicates reports aga
     transportCodes: null, containsRepeatedPrefix: false });
   const first = f.store.queryTelemetryPollCandidates(query({ limit: 1 }));
   assert.deepEqual(first.candidates.map(r => [r.targetPublicKey, r.distance]), [[near, 1]]);
-  const second = f.store.queryTelemetryPollCandidates(query({ limit: 1, afterPublicKey: first.nextCursor, afterDistance: first.nextDistance }));
+  const second = f.store.queryTelemetryPollCandidates(query({ limit: 1, afterPublicKey: first.nextCursor, afterDistance: first.nextDistance, afterPriority: first.nextPriority }));
   assert.deepEqual(second.candidates.map(r => [r.targetPublicKey, r.distance]), [[far, 2]]);
-  const end = f.store.queryTelemetryPollCandidates(query({ afterPublicKey: second.nextCursor, afterDistance: second.nextDistance }));
+  const end = f.store.queryTelemetryPollCandidates(query({ afterPublicKey: second.nextCursor, afterDistance: second.nextDistance, afterPriority: second.nextPriority }));
   assert.deepEqual(end.candidates, []); assert.equal(end.exhausted, true);
   assert.throws(() => f.store.queryTelemetryPollCandidates(query({ afterDistance: 1 })), /Invalid telemetry polling data/);
 });

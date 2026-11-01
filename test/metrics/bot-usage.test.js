@@ -39,6 +39,7 @@ test('usage belongs to acceptance; every outcome belongs to completion, across m
   const midnight = Date.UTC(2026, 9, 8);
   for (const status of ['sent', 'failed', 'expired', 'cancelled']) {
     const id = store.enqueueReplyItem(item({ enqueuedAt: midnight - 1, expiresAt: midnight + 1000 }));
+    if (['sent','failed'].includes(status)) assert.equal(store.claimReplyDispatch({ id, dispatchStartedAt: midnight - 1 }), true);
     store.resolveReplyItem(id, { status, resolvedAt: midnight, queuedMs: 1 });
   }
   store.enqueueReplyItem(item({ enqueuedAt: midnight, expiresAt: midnight + 1000 }));
@@ -114,8 +115,10 @@ test('completion-based shared pruning protects pending and recent completions; I
   const store = openStore();
   const pending = store.enqueueReplyItem(item({ enqueuedAt: 1 }));
   const recent = store.enqueueReplyItem(item({ enqueuedAt: 2 }));
+  assert.equal(store.claimReplyDispatch({ id: recent, dispatchStartedAt: 2 }), true);
   store.resolveReplyItem(recent, { status: 'sent', resolvedAt: 1000, queuedMs: 998 });
   const removed = store.enqueueReplyItem(item({ enqueuedAt: 3 }));
+  assert.equal(store.claimReplyDispatch({ id: removed, dispatchStartedAt: 3 }), true);
   store.resolveReplyItem(removed, { status: 'failed', resolvedAt: 999, queuedMs: 996 });
   store.pruneOlderThan(1000);
   assert.equal(store.getReplyById(removed), null);
@@ -180,7 +183,7 @@ test('v8 migration preserves IDs, legacy unavailable evidence, other datasets an
   assert.ok(id > 42);
   const reopened = openStore(dbPath);
   assert.deepEqual(reopened.getReplyById(id), store.getReplyById(id));
-  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 20);
+  assert.equal(openDb(dbPath).prepare('PRAGMA user_version').get().user_version, 23);
 });
 
 test('a failed v9 migration rolls back its rebuild and version without losing old records', () => {
