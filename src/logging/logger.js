@@ -1,4 +1,8 @@
+import { compileSchema } from '../validation/ajv.js';
+import { requestInfoSchema } from './schemas.js';
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const validateRequestInfo = compileSchema(requestInfoSchema);
 
 const REDACTED = '[REDACTED]';
 
@@ -43,8 +47,11 @@ function redact(value, depth = 0) {
 export function createLogger({ level = 'info' } = {}) {
   const threshold = LEVELS[level] ?? LEVELS.info;
 
-  function write(logLevel, source, message, meta) {
-    if (LEVELS[logLevel] < threshold) {
+  function write(logLevel, source, message, meta, reqInfo) {
+    // Required HTTP/application pairs must survive an operator's log-level
+    // filter. Standalone events and optional request debug details retain it.
+    const requiredRequestRecord = reqInfo && logLevel !== 'debug';
+    if (!requiredRequestRecord && LEVELS[logLevel] < threshold) {
       return;
     }
 
@@ -53,6 +60,7 @@ export function createLogger({ level = 'info' } = {}) {
       level: logLevel,
       source,
       message,
+      ...(reqInfo ? { reqInfo } : {}),
       ...(meta && Object.keys(meta).length > 0 ? { meta: redact(meta) } : {})
     };
 
@@ -64,10 +72,27 @@ export function createLogger({ level = 'info' } = {}) {
     }
   }
 
+  function methods(reqInfo) {
+    return {
+      debug: (source, message, meta) => write('debug', source, message, meta, reqInfo),
+      info: (source, message, meta) => write('info', source, message, meta, reqInfo),
+      warn: (source, message, meta) => write('warn', source, message, meta, reqInfo),
+      error: (source, message, meta) => write('error', source, message, meta, reqInfo)
+    };
+  }
+
   return {
-    debug: (source, message, meta) => write('debug', source, message, meta),
-    info: (source, message, meta) => write('info', source, message, meta),
-    warn: (source, message, meta) => write('warn', source, message, meta),
-    error: (source, message, meta) => write('error', source, message, meta)
+    ...methods(),
+    /** Bind generated, secret-free request metadata once at the HTTP boundary. */
+    forRequest(reqInfo) {
+      if (!validateRequestInfo(reqInfo)) {
+        throw new TypeError('Invalid HTTP request log context');
+      }
+      const context = Object.freeze({ ...reqInfo });
+      return {
+        ...methods(context),
+        http: (source) => write('http', source, 'HTTP request received', undefined, context)
+      };
+    }
   };
 }

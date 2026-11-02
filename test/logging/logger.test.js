@@ -90,3 +90,43 @@ test('includes stable source and omits meta when none is given', () => {
   assert.equal('meta' in entry, false);
   assert.ok(entry.timestamp);
 });
+
+test('request records and linked application events survive the level filter without leaking into standalone logs', () => {
+  const capture = captureConsole();
+  const reqInfo = { requestID: '12345678-1234-4567-89ab-123456789abc', hostname: 'observer',
+    path: '/api/metrics', method: 'GET', requestTime: '2026-11-01T12:00:00.000Z' };
+  try {
+    const logger = createLogger({ level: 'error' });
+    const request = logger.forRequest(reqInfo);
+    reqInfo.hostname = 'changed-after-validation';
+    request.http('services.metricsUi');
+    request.debug('services.metricsUi', 'optional detail');
+    request.info('services.metricsUi', 'request completed', { password: 'never-log-me' });
+    logger.error('app.bootstrap', 'standalone event');
+  } finally {
+    capture.restore();
+  }
+  const entries = capture.lines.map(line => JSON.parse(line));
+  assert.deepEqual(entries.map(entry => entry.level), ['http', 'info', 'error']);
+  assert.equal(entries[0].reqInfo.hostname, 'observer');
+  assert.deepEqual(entries[1].reqInfo, entries[0].reqInfo);
+  assert.equal(entries[1].meta.password, '[REDACTED]');
+  assert.equal('reqInfo' in entries[2], false);
+  assert.equal(capture.lines.some(line => line.includes('never-log-me')), false);
+});
+
+test('rejects malformed request log context before emitting any record', () => {
+  const capture = captureConsole();
+  try {
+    const logger = createLogger();
+    for (const context of [
+      { requestID: 'bad', hostname: 'observer' },
+      { requestID: '12345678-1234-4567-89ab-123456789abc', hostname: 'observer', authorization: 'SECRET' }
+    ]) {
+      assert.throws(() => logger.forRequest(context), /Invalid HTTP request log context/);
+    }
+  } finally {
+    capture.restore();
+  }
+  assert.equal(capture.lines.length, 0);
+});

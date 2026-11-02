@@ -48,7 +48,7 @@ function rig({ neighbours = false, neighbourSeed = false, exchange = false } = {
       const variant = bytes[0] === 26 ? { component: 'guest-login', params: {} } : f.variant;
       const state = f.store.getTelemetryPollState({ observerPublicKey: OBSERVER, targetPublicKey: TARGET, variant });
       assert.equal(state.reason, 'reserved');
-      assert.equal(state.reservedAt, exchange && bytes[0] === 26
+      assert.equal(state.reservedAt, bytes[0] === 26
         ? f.writes.findLast(w => w.code === Constants.CommandCodes.SendTracePath).at : f.clock);
     }
   };
@@ -84,7 +84,15 @@ function rig({ neighbours = false, neighbourSeed = false, exchange = false } = {
   f.authenticate = async proof => {
     f.scheduler.start(); await f.tick(10000); assert.equal(f.writes.at(-1)?.code, 4, JSON.stringify([f.logger.warn.mock.calls, f.calls]));
     await f.frame(telemetryInventoryBoundary(2, 1)); await f.frame(telemetryContactFrame());
-    await f.frame(telemetryInventoryBoundary(4)); assert.equal(f.writes.at(-1).code, 30);
+    await f.frame(telemetryInventoryBoundary(4));
+    if (!exchange) {
+      assert.equal(f.writes.at(-1).code, Constants.CommandCodes.SendTracePath);
+      await f.tick(10000);
+      assert.equal(f.writes.at(-1).code, 4);
+      await f.frame(telemetryInventoryBoundary(2, 1)); await f.frame(telemetryContactFrame());
+      await f.frame(telemetryInventoryBoundary(4));
+    }
+    assert.equal(f.writes.at(-1).code, 30);
     await f.frame(telemetryContactFrame()); assert.equal(f.writes.at(-1).code, 26);
     await f.frame(ack(Buffer.from(TARGET, 'hex').readUInt32LE(0))); await f.frame(proof ?? login());
   };
@@ -270,6 +278,10 @@ test('a neighbour-seeded route passes real trace, guest proof, saved reservation
   await f.frame(telemetryInventoryBoundary(2, 1)); await f.frame(telemetryContactFrame());
   await f.frame(telemetryInventoryBoundary(4));
   assert.ok(f.writes.some(w => w.code === Constants.CommandCodes.SendTracePath));
+  await f.tick(10000);
+  assert.equal(f.writes.at(-1).code, 4);
+  await f.frame(telemetryInventoryBoundary(2, 1)); await f.frame(telemetryContactFrame());
+  await f.frame(telemetryInventoryBoundary(4));
   assert.equal(f.contactUpdates.length, 1);
   assert.equal(f.writes.at(-1).code, 30); await f.frame(contact);
   assert.equal(f.writes.at(-1).code, 26);

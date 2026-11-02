@@ -144,6 +144,15 @@ meshcore/{IATA}/{PUBLIC_KEY}/status    (retained; online/offline, with a Last Wi
 meshcore/{IATA}/{PUBLIC_KEY}/packets
 ```
 
+Each broker admits up to 64 ordinary packet publications at once and waits up
+to 10 seconds for a publish callback. Capacity overflow is reported as failed;
+a callback timeout retires the uncertain client, fails its outstanding work,
+and retries connection after 5 seconds. Healthy brokers report outcomes
+independently. There is no application replay or local raw-packet copy, so a
+failed/uncertain publication may be lost. Initial credential-preparation
+failures also retry every 5 seconds until stopped; MQTT.js owns transport
+reconnection once a client exists.
+
 ### 2. Channel bots
 
 ```sh
@@ -498,6 +507,14 @@ you understand the dashboard and its `/api/metrics*` endpoints will then be
 reachable by anyone who can reach that address - put your own
 reverse proxy and authentication in front of it if you need remote access.
 
+The native HTTP server sends a strict Content Security Policy and browser
+hardening headers. It permits same-origin modules/styles and the exact pinned
+Chart.js CDN resource without unsafe-inline/eval. Request logs use generated
+UUIDs and the machine hostname, omit raw queries/Host values, and pair each
+valid request with an application event even when the log level is `error`.
+The live stream admits 32 clients and snapshots up to 256 KiB; a blocked client
+receives the newest pending snapshot rather than every intermediate update.
+
 The packet-activity chart and packet-types pie chart are rendered
 client-side with [Chart.js](https://www.chartjs.org/), loaded by the
 browser directly from the jsdelivr CDN (pinned to an exact version with
@@ -528,8 +545,11 @@ uses one aggregate read plus accepted-usage and outcome reads; Repeaters uses
 one aggregate read plus advert, topology, and telemetry reads. Packet activity
 and MQTT brokers use the aggregate read only. The persistent EventSource is
 separate, and overlapping range refreshes are aborted or coalesced so an SSE
-tick cannot create an unbounded request queue. Focused sections retain their
-last successful values when an individual read fails. Browser layout and
+tick cannot create an unbounded request queue. Reads time out after 15 seconds.
+Focused sections retain same-range last-good values when a read fails; values
+from another range are hidden, and retained aggregate values are labeled.
+The request controller has deterministic deferred/cancellation tests beside the
+pure logic tests. Browser layout and
 keyboard behavior still require the manual checklist because this repository
 does not include a browser automation dependency.
 
@@ -797,8 +817,8 @@ behavior tests.
 
 ### GitHub Actions
 
-`.github/workflows/ci.yml` runs for pull requests targeting `main` and pushes
-to `main`. Its independent lint job runs on Ubuntu with Node 24.x. The test
+`.github/workflows/ci.yml` runs for pull requests targeting `main` or `release-*`
+and pushes to those branches. Its independent lint job runs on Ubuntu with Node 24.x. The test
 matrix runs on Ubuntu and Windows with Node 22.x and 24.x; each job runs
 `npm ci` followed by `npm run test:ci`.
 

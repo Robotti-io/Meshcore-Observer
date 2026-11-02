@@ -1,5 +1,5 @@
 import { remoteRequestSchema, REMOTE_BODY_MAX_BYTES } from '../radio/remote-request-schemas.js';
-import { telemetryLoginResultSchema, TELEMETRY_INVENTORY_FAILURES } from './telemetry-radio-schemas.js';
+import { telemetryLoginResultSchema, TELEMETRY_INVENTORY_FAILURES, TELEMETRY_CONTACT_INVENTORY_MAX } from './telemetry-radio-schemas.js';
 
 const object = (properties, required = Object.keys(properties)) =>
   ({ type: 'object', additionalProperties: false, properties, required });
@@ -52,7 +52,7 @@ export const telemetryOwnerCompletionSchema = object({ status: { enum: ['deferre
     routeEvidenceSource: { anyOf: [{ enum: ['verified-advert', 'passive-topology', 'telemetry-neighbours'] }, { type: 'null' }] },
     routeFailureReason: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
     routeEvidenceAt: { anyOf: [integer(0), { type: 'null' }] },
-    routeSupportCount: { anyOf: [integer(0), { type: 'null' }] }, inventoryContactCount: { anyOf: [integer(0, 350), { type: 'null' }] },
+    routeSupportCount: { anyOf: [integer(0), { type: 'null' }] }, inventoryContactCount: { anyOf: [integer(0, TELEMETRY_CONTACT_INVENTORY_MAX), { type: 'null' }] },
     routeHopWeights: { type: 'array', maxItems: 31, items: object({
       position: integer(1, 31), repeaterId: { type: 'string', pattern: '^[0-9A-F]{4}$' },
       anchorSuccessCount: integer(0), pathReceptionCount: integer(0), traceSuccessCount: integer(0), neighbourSupportCount: integer(0)

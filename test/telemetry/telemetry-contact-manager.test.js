@@ -49,3 +49,20 @@ test('no verified route or full table with only favourites never mutates other c
     contacts: [record(favourite, { flags: 1 })], route }), error => error.meshcoreErrorCode === 3);
   assert.deepEqual(full.calls.removes, []);
 });
+
+test('retired command ownership cancels a pending upsert without later eviction or retry', async () => {
+  const radio = connection(), controller = new AbortController();
+  let rejectUpsert;
+  radio.emitter.addOrUpdateContact = () => new Promise((_, reject) => { rejectUpsert = reject; });
+  const pending = reconcileTelemetryContact({ connection: radio.emitter, targetPublicKey: target,
+    contacts: [record(older)], route, signal: controller.signal });
+  await Promise.resolve();
+  const reason = new Error('retired generation');
+  controller.abort(reason);
+  await assert.rejects(pending, reason);
+  radio.emitter.emit(Constants.ResponseCodes.Err, { errCode: 3 });
+  rejectUpsert(new Error('late table full'));
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(radio.calls.removes, []);
+  assert.equal(radio.emitter.listenerCount(Constants.ResponseCodes.Err), 0);
+});

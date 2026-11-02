@@ -1,4 +1,5 @@
 import { REMOTE_BODY_MAX_BYTES } from '../radio/remote-request-schemas.js';
+import { TELEMETRY_CONTACT_INVENTORY_MAX } from './telemetry-radio-schemas.js';
 
 export const TELEMETRY_BODY_MAX_BYTES = REMOTE_BODY_MAX_BYTES;
 export const TELEMETRY_RESULT_MAX_BYTES = 16 * 1024;
@@ -183,7 +184,7 @@ const telemetryRequestDiagnosticProperties = {
   routeFailureReason: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
   routeEvidenceAt: { anyOf: [epoch, { type: 'null' }] },
   routeSupportCount: { anyOf: [integer(0, Number.MAX_SAFE_INTEGER), { type: 'null' }] },
-  inventoryContactCount: { anyOf: [integer(0, 350), { type: 'null' }] },
+  inventoryContactCount: { anyOf: [integer(0, TELEMETRY_CONTACT_INVENTORY_MAX), { type: 'null' }] },
   inventoryOutcome: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },
   contactSyncOutcome: { anyOf: [{ enum: ['unchanged', 'added', 'added-evicted', 'updated', 'deferred', 'failed'] }, { type: 'null' }] },
   targetContactOutcome: { anyOf: [{ type: 'string', minLength: 1, maxLength: 64 }, { type: 'null' }] },

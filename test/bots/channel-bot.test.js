@@ -106,6 +106,7 @@ function fakeRadioManager({ companionIdentity = null } = {}) {
     disconnect: () => {
       ready = false;
       controller.abort(Object.assign(new Error('disconnected'), { code: 'disconnected' }));
+      emitter.emit('radio.disconnected');
     },
     emitConnected: () => emitter.emit('radio.connected', {}),
     emitPacket: (frame) => emitter.emit('radio.packet', { lastSnr: 10, lastRssi: -50, raw: frame }),
@@ -213,6 +214,44 @@ test('a handler-matched response suppresses only its unique pending reply and du
   assert.equal(store.getReplyById(lateId).outcomeReason, null);
   bot.stop();
   store.close();
+});
+
+test('a sender-prefixed configured response suppresses its pending request through the real bot adapter', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const radioManager = fakeRadioManager();
+  const botsByName = new Map();
+  const logger = silentLogger();
+  const bot = new ChannelBot({
+    radioManager,
+    botConfig: baseBotConfig({ commands: [
+      { trigger: '!echo', response: '{sender}: Ack', suppressIfAnswered: true }
+    ] }),
+    replyQueue: { enqueue: () => 0 },
+    replySuppression: createReplySuppressionCoordinator({ store, botsByName, logger }),
+    logger,
+    now: () => 2000
+  });
+  botsByName.set('echo', bot);
+  try {
+    await startAndConnect(bot, radioManager);
+    const id = store.enqueueReplyItem({
+      botName: 'echo', channel: '#echo', trigger: '!echo', sender: 'Alice', hopCount: 1,
+      path: 'AA', hash: 'request-Alice', handlerStateJson: '{"kind":"exact","version":1,"data":{}}',
+      enqueuedAt: 1000, expiresAt: 10000
+    });
+    const channelKey = deriveHashtagChannelKey('#echo');
+    radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Bob: Ack' }));
+    await flush();
+    assert.equal(store.getReplyById(id).status, 'pending');
+
+    radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: ['aa'], text: 'Alice: Ack' }));
+    await flush();
+    assert.equal(store.getReplyById(id).status, 'suppressed');
+    assert.equal(radioManager.commandCalls.length, 0);
+  } finally {
+    bot.stop();
+    store.close();
+  }
 });
 
 test('a rebroadcast of this bot’s own reply cannot satisfy a newer pending request', async () => {
@@ -995,6 +1034,84 @@ test('stop() marks the bot not ready', async () => {
 
   bot.stop();
   assert.equal(bot.isReady(), false);
+});
+
+test('setup completing after stop cannot restore readiness or subscriptions', async () => {
+  const radioManager = fakeRadioManager();
+  let finishChannels;
+  radioManager.connection.getChannels = () => new Promise(resolve => { finishChannels = resolve; });
+  const logger = silentLogger();
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger });
+  bot.start();
+  radioManager.emitConnected();
+  await flush();
+  bot.stop();
+  finishChannels([{ channelIdx: 0, name: '#echo', secret: deriveHashtagChannelKey('#echo') }]);
+  await flush();
+
+  assert.equal(bot.isReady(), false);
+  assert.equal(radioManager.listenerCount('radio.connected'), 0);
+  assert.equal(radioManager.listenerCount('radio.disconnected'), 0);
+  assert.equal(radioManager.listenerCount('radio.packet'), 0);
+  assert.equal(logger.calls.info.filter(call => call.message === 'bot ready').length, 0);
+});
+
+test('restart waits for its own setup instead of publishing an earlier completion', async () => {
+  const radioManager = fakeRadioManager();
+  const completions = [];
+  radioManager.connection.getChannels = () => new Promise(resolve => { completions.push(resolve); });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  bot.start();
+  radioManager.emitConnected();
+  await flush();
+  bot.stop();
+  bot.start();
+  radioManager.emitConnected();
+  completions[0]([{ channelIdx: 0, name: '#echo', secret: deriveHashtagChannelKey('#echo') }]);
+  await flush();
+  assert.equal(bot.isReady(), false);
+
+  completions[1]([{ channelIdx: 1, name: '#echo', secret: deriveHashtagChannelKey('#echo') }]);
+  await flush();
+  assert.equal(bot.isReady(), true);
+  radioManager.emitPacket(buildGrpTxtFrame({
+    channelKey: deriveHashtagChannelKey('#echo'), hops: ['aa'], text: 'Alice: !echo'
+  }));
+  await flush();
+  assert.equal(radioManager.commandCalls[0].channelIdx, 1);
+  bot.stop();
+});
+
+test('disconnect during setup prevents stale readiness', async () => {
+  const radioManager = fakeRadioManager();
+  let finishChannels;
+  radioManager.connection.getChannels = () => new Promise(resolve => { finishChannels = resolve; });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  bot.start();
+  radioManager.emitConnected();
+  await flush();
+  radioManager.disconnect();
+  finishChannels([{ channelIdx: 0, name: '#echo', secret: deriveHashtagChannelKey('#echo') }]);
+  await flush();
+  assert.equal(bot.isReady(), false);
+  bot.stop();
+});
+
+test('a changed connection generation cannot publish an old setup result', async () => {
+  const radioManager = fakeRadioManager();
+  let generation = 1;
+  radioManager.getConnectionSnapshot = () => ({ ready: true, generation });
+  let finishChannels;
+  radioManager.connection.getChannels = () => new Promise(resolve => { finishChannels = resolve; });
+  const bot = new ChannelBot({ radioManager, botConfig: baseBotConfig(), logger: silentLogger() });
+  bot.start();
+  radioManager.emitConnected();
+  await flush();
+  generation = 2;
+  finishChannels([{ channelIdx: 0, name: '#echo', secret: deriveHashtagChannelKey('#echo') }]);
+  await flush();
+  assert.equal(bot.isReady(), false);
+  bot.stop();
 });
 
 test('stop() is idempotent and safe to call without a prior start()', () => {

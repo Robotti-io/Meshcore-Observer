@@ -164,3 +164,52 @@ test('stop() prevents any further checks', async () => {
 
   assert.equal(checks, checksAtStop);
 });
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('pending signing is single flight and cannot reconnect after stop', async () => {
+  const signing = deferred();
+  let calls = 0;
+  const auth = {
+    getExpiration: () => 1,
+    refreshIfNeeded: () => { calls += 1; return signing.promise; }
+  };
+  const broker = fakeBroker();
+  const stop = startTrackedLoop({ auth, broker, logger: silentLogger(), checkIntervalMs: 5 });
+
+  await vi.advanceTimersByTimeAsync(30);
+  assert.equal(calls, 1);
+  stop();
+  signing.resolve('fresh-token');
+  await vi.advanceTimersByTimeAsync(30);
+  assert.equal(broker.calls.close, 0);
+  assert.equal(broker.calls.connect.length, 0);
+});
+
+test('stop during broker close fences reconnect and pending renewal failure is harmless', async () => {
+  const closing = deferred();
+  const broker = fakeBroker();
+  broker.close = () => closing.promise;
+  const auth = { getExpiration: () => 1, refreshIfNeeded: async () => 'fresh-token' };
+  const logger = silentLogger();
+  const stop = startTrackedLoop({ auth, broker, logger, checkIntervalMs: 5 });
+  await vi.advanceTimersByTimeAsync(5);
+  stop();
+  closing.resolve();
+  await vi.advanceTimersByTimeAsync(30);
+  assert.equal(broker.calls.connect.length, 0);
+
+  const signing = deferred();
+  const stopFailed = startTrackedLoop({ auth: { ...auth, refreshIfNeeded: () => signing.promise },
+    broker, logger, checkIntervalMs: 5 });
+  await vi.advanceTimersByTimeAsync(5);
+  stopFailed();
+  signing.reject(new Error('late failure'));
+  await vi.advanceTimersByTimeAsync(10);
+  assert.equal(logger.calls.warn.length, 0);
+});

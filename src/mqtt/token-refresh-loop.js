@@ -10,7 +10,9 @@ const DEFAULT_THRESHOLD_SECONDS = 300;
  * mqtt-broker.js). A cheap timestamp check runs every `checkIntervalMs`;
  * the expensive on-device signing only happens once actually near expiry.
  *
- * @returns a function that stops the loop.
+ * Stop invalidates pending renewal continuations immediately. On-device
+ * signing may finish later, but it cannot close or reconnect the broker.
+ * @returns {() => void} an idempotent synchronous stop function.
  */
 export function startTokenRefreshLoop({
   auth,
@@ -21,7 +23,31 @@ export function startTokenRefreshLoop({
   thresholdSeconds = DEFAULT_THRESHOLD_SECONDS,
   now = () => Date.now()
 }) {
+  let stopped = false;
+  let renewalPending = false;
+
+  async function renew() {
+    renewalPending = true;
+    try {
+      await auth.refreshIfNeeded({ thresholdSeconds });
+      if (stopped) return;
+
+      logger.info('services.mqtt.letsmesh', 'reconnecting broker with a refreshed token');
+      await broker.close();
+      if (stopped) return;
+
+      broker.connect(will);
+    } catch (err) {
+      if (!stopped) {
+        logger.warn('services.mqtt.letsmesh', 'token refresh failed', { error: err.message });
+      }
+    } finally {
+      renewalPending = false;
+    }
+  }
+
   const timer = setInterval(() => {
+    if (stopped || renewalPending) return;
     const expiresAt = auth.getExpiration();
     if (expiresAt === null) {
       return;
@@ -32,18 +58,12 @@ export function startTokenRefreshLoop({
       return;
     }
 
-    auth
-      .refreshIfNeeded({ thresholdSeconds })
-      .then(async () => {
-        logger.info('services.mqtt.letsmesh', 'reconnecting broker with a refreshed token');
-        await broker.close();
-        broker.connect(will);
-      })
-      .catch((err) => {
-        logger.warn('services.mqtt.letsmesh', 'token refresh failed', { error: err.message });
-      });
+    void renew();
   }, checkIntervalMs);
   timer.unref?.();
 
-  return () => clearInterval(timer);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }

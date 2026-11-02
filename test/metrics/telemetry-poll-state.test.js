@@ -126,6 +126,46 @@ test('physical failures use capped backoff, attempts exhaust and refresh resets 
   const next = f.store.reserveTelemetryPoll(reservation(f, now)); assert.equal(next.reserved, true); assert.equal(next.state.cycleAttempts, 1);
 });
 
+for (const example of [
+  { status: 'answered', reason: 'answered', attempts: 0, delay: POLICY.refreshIntervalMs },
+  { status: 'partial', reason: 'answered', attempts: 0, delay: POLICY.refreshIntervalMs },
+  { status: 'unsupported', reason: 'unsupported', attempts: 0, delay: POLICY.refreshIntervalMs },
+  { status: 'failed', reason: 'retry', attempts: 1, delay: POLICY.retryBaseMs },
+  { status: 'failed', maxAttempts: 1, reason: 'exhausted', attempts: 1, delay: POLICY.refreshIntervalMs }
+]) test(`data completion ${example.status}/${example.reason} retains its reason, cycle and deadline`, () => {
+  const f = fixture();
+  observe(f);
+  const policy = { ...POLICY, maxAttempts: example.maxAttempts ?? POLICY.maxAttempts };
+  const r = reservation(f, 1000, SENSOR, { policy });
+  assert.equal(f.store.reserveTelemetryPoll(r).reserved, true);
+  const options = { status: example.status };
+  if (example.status === 'partial') options.body = [1, 250];
+  const terminal = completion(f, r, options);
+  const result = f.store.completeTelemetryPoll(terminal);
+  assert.equal(result.state.reason, example.reason);
+  assert.equal(result.state.cycleAttempts, example.attempts);
+  assert.equal(result.state.nextDueAt, terminal.result.outcome.completedAt + example.delay);
+  assert.deepEqual(state(f), result.state, 'returned and durable scheduling state agree');
+});
+
+for (const example of [
+  { status: 'completed', failure: null, reason: 'authenticated', attempts: 0, delay: POLICY.retryBaseMs },
+  { status: 'failed', failure: 'authentication-denied', reason: 'auth-cooldown', attempts: 1, delay: POLICY.authCooldownMs },
+  { status: 'failed', failure: 'response-timeout', reason: 'retry', attempts: 1, delay: POLICY.retryBaseMs }
+]) test(`authentication completion ${example.reason} retains its distinct deadline`, () => {
+  const f = fixture();
+  observe(f);
+  const r = reservation(f, 1000, AUTH);
+  assert.equal(f.store.reserveTelemetryPoll(r).reserved, true);
+  const input = authCompletion(r, { status: example.status, reason: example.failure });
+  if (example.status !== 'completed') delete input.record.proof;
+  const result = f.store.completeTelemetryAuthentication(input);
+  assert.equal(result.state.reason, example.reason);
+  assert.equal(result.state.cycleAttempts, example.attempts);
+  assert.equal(result.state.nextDueAt, input.record.completedAt + example.delay);
+  assert.deepEqual(state(f, AUTH), result.state);
+});
+
 test('deferrals do not spend physical attempts or create outcomes and cannot overwrite pending reservation', () => {
   const f = fixture(); observe(f);
   const d = { ...SCOPE, variant: SENSOR, runId: f.run.runId, observedAt: 1000, nextDueAt: 2000, reason: 'quiet-air', policy: POLICY };
@@ -197,6 +237,10 @@ test('restart orphan recovery is bounded, keeps consumed attempts, advances cool
   assert.equal(first.recovered, 1); assert.equal(first.exhausted, false);
   const next = f.store.recoverTelemetryPollReservations({ runId: f.run.runId, observedAt: 2000, policy: POLICY, limit: 1, afterRequestId: first.nextCursor });
   assert.equal(next.recovered, 1); assert.equal(state(f).cycleAttempts, 1); assert.equal(state(f, AUTH).cycleAttempts, 1);
+  assert.equal(state(f).reason, 'orphaned');
+  assert.equal(state(f).nextDueAt, 2000 + POLICY.retryBaseMs);
+  assert.equal(state(f, AUTH).reason, 'auth-cooldown');
+  assert.equal(state(f, AUTH).nextDueAt, 2000 + POLICY.authCooldownMs);
   assert.equal(f.store.reserveTelemetryPoll(reservation(f, 2000)).reason, 'auth-cooldown');
   f.close(); f.inspect(db => { assert.equal(snapshot(db).telemetry_auth_outcomes.length, 0); assert.equal(snapshot(db).telemetry_query_outcomes.length, 0); });
 });

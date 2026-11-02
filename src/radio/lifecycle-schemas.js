@@ -3,7 +3,8 @@ function object(properties, required = Object.keys(properties)) {
   return { type: 'object', additionalProperties: false, properties, required };
 }
 
-export const radioCommandOptionsSchema = object({ generation, requireReady: { type: 'boolean' } }, []);
+export const radioCommandOptionsSchema = object({ generation, requireReady: { type: 'boolean' },
+  timeoutMs: { type: 'integer', minimum: 1, maximum: 30000 } }, []);
 export const radioInvalidationSchema = object({
   generation, reason: { enum: ['ack-timeout', 'write-error', 'protocol-error', 'request-cancelled',
     'preflight-timeout', 'preflight-write-error', 'preflight-protocol-error', 'preflight-cancelled',

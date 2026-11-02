@@ -34,6 +34,42 @@ test('invalid topology configuration fails before database/hardware/network star
   assert.doesNotMatch(result.stdout + result.stderr, /failed to open tcp connection/);
 });
 
+test('overflowing native timer configuration fails before store creation or external startup', () => {
+  for (const key of ['PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS',
+    'PACKETCAPTURE_CONNECTION_RETRY_DELAY', 'PACKETCAPTURE_CONNECTION_RETRY_DELAY_MAX']) {
+    const env = { ...environment(), [key]: '2147483648' };
+    const result = spawnSync(process.execPath, [resolve('src/index.js')], {
+      env, cwd: process.cwd(), encoding: 'utf8', timeout: 3000, windowsHide: true
+    });
+    assert.equal(result.status, 1, key);
+    assert.match(result.stderr, /Configuration error:/);
+    assert.equal(existsSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH), false);
+    assert.doesNotMatch(result.stdout + result.stderr, /meshcore-observer starting|failed to open tcp connection/);
+  }
+});
+
+test('newer database schema startup reports compatibility failure rather than a runtime-version error', () => {
+  const env = environment();
+  const store = new MetricsStore({ dbPath: env.PACKETCAPTURE_METRICS_UI_DB_PATH });
+  store.close();
+  const fixture = new DatabaseSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH);
+  fixture.exec('PRAGMA user_version = 999');
+  fixture.close();
+  const result = spawnSync(process.execPath, [resolve('src/index.js')], {
+    env, cwd: process.cwd(), encoding: 'utf8', timeout: 3000, windowsHide: true
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout + result.stderr, /schema 999 is newer than supported schema/);
+  assert.doesNotMatch(result.stdout + result.stderr, /Node >=22\.13\.0|failed to open tcp connection|observer run started/);
+  const preserved = new DatabaseSync(env.PACKETCAPTURE_METRICS_UI_DB_PATH);
+  try {
+    assert.equal(preserved.prepare('PRAGMA user_version').get().user_version, 999);
+    assert.equal(preserved.prepare('SELECT COUNT(*) AS count FROM observer_runs').get().count, 0);
+  } finally {
+    preserved.close();
+  }
+});
+
 test('invalid explicit region freshness fails before store creation and hardware/network startup', () => {
   for (const value of ['', '0', '8761', '1.5']) {
     const env = { ...environment(), PACKETCAPTURE_REGION_ANSWER_FRESHNESS_HOURS: value };

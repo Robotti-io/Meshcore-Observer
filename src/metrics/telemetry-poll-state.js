@@ -150,18 +150,41 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
   }
   function compareCandidates(a, b) { return a.distance - b.distance || (a.priority ?? 3) - (b.priority ?? 3)
     || a.targetPublicKey.localeCompare(b.targetPublicKey); }
-  function finish(state, end, policy, successful, unsupported = false, authFailure = false) {
+  function finish(state, end, policy, outcome) {
     state.policy = conservative(state.policy, policy);
     state.lastPolicyAt = Math.max(state.lastPolicyAt, end);
     state.lastCompletedAt = state.lastPolicyAt;
-    if (successful || unsupported) {
-      state.cycleAttempts = 0; state.cycleStartedAt = state.lastPolicyAt;
-      state.reason = state.variant.component === 'guest-login' ? 'authenticated' : unsupported ? 'unsupported' : 'answered';
-    } else state.reason = authFailure ? 'auth-cooldown' : state.cycleAttempts >= state.policy.maxAttempts ? 'exhausted' : 'retry';
-    const delay = authFailure ? state.policy.authCooldownMs : successful && state.variant.component === 'guest-login'
-      ? state.policy.retryBaseMs : successful || unsupported || state.reason === 'exhausted' ? state.policy.refreshIntervalMs
-        : retry(state.policy, state.cycleAttempts);
-    state.nextDueAt = Math.max(state.nextDueAt, at(state.lastPolicyAt, delay)); write(state);
+    const completedCycle = outcome === 'successful' || outcome === 'unsupported';
+    if (completedCycle) {
+      state.cycleAttempts = 0;
+      state.cycleStartedAt = state.lastPolicyAt;
+      if (state.variant.component === 'guest-login') {
+        state.reason = 'authenticated';
+      } else if (outcome === 'unsupported') {
+        state.reason = 'unsupported';
+      } else {
+        state.reason = 'answered';
+      }
+    } else if (outcome === 'authentication-failed') {
+      state.reason = 'auth-cooldown';
+    } else if (state.cycleAttempts >= state.policy.maxAttempts) {
+      state.reason = 'exhausted';
+    } else {
+      state.reason = 'retry';
+    }
+
+    let delay;
+    if (outcome === 'authentication-failed') {
+      delay = state.policy.authCooldownMs;
+    } else if (outcome === 'successful' && state.variant.component === 'guest-login') {
+      delay = state.policy.retryBaseMs;
+    } else if (completedCycle || state.reason === 'exhausted') {
+      delay = state.policy.refreshIntervalMs;
+    } else {
+      delay = retry(state.policy, state.cycleAttempts);
+    }
+    state.nextDueAt = Math.max(state.nextDueAt, at(state.lastPolicyAt, delay));
+    write(state);
     highWater = Math.max(highWater, state.lastPolicyAt);
   }
   return {
@@ -252,7 +275,13 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
         const recorded = recordWithinTransaction(input.result);
         const end = Math.max(o.startedAt, o.completedAt, o.receivedAt ?? 0);
         const successful = ['answered', 'partial'].includes(o.status) && !o.clockAnomaly && !run.wallTimeAnomaly && !recorded.observationTimeConflict;
-        finish(state, end, input.policy, successful, o.status === 'unsupported');
+        let completionOutcome = 'failed';
+        if (successful) {
+          completionOutcome = 'successful';
+        } else if (o.status === 'unsupported') {
+          completionOutcome = 'unsupported';
+        }
+        finish(state, end, input.policy, completionOutcome);
         return { completed: true, recorded, state };
       });
     },
@@ -278,8 +307,13 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
         insertAuth.run(c.requestId, input.runId, ...scope(c), r.dispatchedAt, r.completedAt, c.generation, r.status,
           r.reason, r.route, Number(anomaly), json(r), r.proof?.status === 'guest-proof' ? r.proof.serverTimestamp : null);
         if (success) Object.assign(state, { serverTimestamp: r.proof.serverTimestamp, replayRunId: input.runId, replayRequestId: c.requestId });
-        finish(state, Math.max(r.dispatchedAt, r.completedAt), input.policy, success, false,
-          !success && (anomaly || unsafeAuthentication.has(r.reason)));
+        let completionOutcome = 'failed';
+        if (success) {
+          completionOutcome = 'successful';
+        } else if (anomaly || unsafeAuthentication.has(r.reason)) {
+          completionOutcome = 'authentication-failed';
+        }
+        finish(state, Math.max(r.dispatchedAt, r.completedAt), input.policy, completionOutcome);
         return { completed: true, duplicate: false, state };
       });
     },
@@ -290,8 +324,14 @@ export function createTelemetryPollState(db, requireRun, recordWithinTransaction
         const limit = input.limit ?? 100;
         const rows = db.prepare(`SELECT ${columns} FROM telemetry_poll_state WHERE request_id>? AND reason='reserved'
           AND run_id!=? ORDER BY request_id LIMIT ?`).all(input.afterRequestId ?? '', input.runId, limit);
-        for (const row of rows) { const state = map(row); finish(state, input.observedAt, input.policy, false, false,
-          state.variant.component === 'guest-login'); state.reason = state.variant.component === 'guest-login' ? 'auth-cooldown' : 'orphaned'; write(state); }
+        for (const row of rows) {
+          const state = map(row);
+          const authentication = state.variant.component === 'guest-login';
+          const completionOutcome = authentication ? 'authentication-failed' : 'failed';
+          finish(state, input.observedAt, input.policy, completionOutcome);
+          state.reason = authentication ? 'auth-cooldown' : 'orphaned';
+          write(state);
+        }
         return { recovered: rows.length, clockRollback: false, nextCursor: rows.at(-1)?.requestId ?? null, exhausted: rows.length < limit };
       });
     },

@@ -14,39 +14,41 @@ import { deriveHashtagChannelKey } from './channel-key.js';
  */
 export async function ensureChannel({ runCommand, channelName, logger }) {
   const target = channelName.toLowerCase();
+  let phase = 'list';
 
-  let channels;
+  // Slot selection and creation are one transaction on the shared command
+  // queue: another bot must not select the same empty slot between them.
   try {
-    channels = await runCommand((connection) => connection.getChannels());
-  } catch (err) {
-    logger.warn('bots.channelBot', 'failed to list channel slots', { channel: channelName, error: err.message });
-    return null;
-  }
+    return await runCommand(async (connection, transaction) => {
+      const channels = await connection.getChannels();
+      transaction?.signal.throwIfAborted();
+      const existing = channels.find((channel) => (channel.name || '').toLowerCase() === target);
+      if (existing) {
+        logger.info('bots.channelBot', 'found existing channel slot', {
+          channelIdx: existing.channelIdx,
+          channel: channelName
+        });
+        return { channelIdx: existing.channelIdx, secret: Buffer.from(existing.secret) };
+      }
 
-  const existing = channels.find((channel) => (channel.name || '').toLowerCase() === target);
-  if (existing) {
-    logger.info('bots.channelBot', 'found existing channel slot', {
-      channelIdx: existing.channelIdx,
-      channel: channelName
+      const emptySlot = channels.find((channel) => !channel.name || channel.name.trim() === '');
+      if (!emptySlot) {
+        logger.warn('bots.channelBot', 'no empty channel slot available', { channel: channelName });
+        return null;
+      }
+
+      const secret = deriveHashtagChannelKey(channelName);
+      phase = 'create';
+      await connection.setChannel(emptySlot.channelIdx, channelName, secret);
+      transaction?.signal.throwIfAborted();
+
+      // Never log the derived key itself, per the repository's logging contract.
+      logger.info('bots.channelBot', 'created channel', { channelIdx: emptySlot.channelIdx, channel: channelName });
+      return { channelIdx: emptySlot.channelIdx, secret };
     });
-    return { channelIdx: existing.channelIdx, secret: Buffer.from(existing.secret) };
-  }
-
-  const emptySlot = channels.find((channel) => !channel.name || channel.name.trim() === '');
-  if (!emptySlot) {
-    logger.warn('bots.channelBot', 'no empty channel slot available', { channel: channelName });
-    return null;
-  }
-
-  const secret = deriveHashtagChannelKey(channelName);
-  try {
-    await runCommand((connection) => connection.setChannel(emptySlot.channelIdx, channelName, secret));
   } catch (err) {
-    logger.warn('bots.channelBot', 'failed to create channel', { channel: channelName, error: err.message });
+    const message = phase === 'list' ? 'failed to list channel slots' : 'failed to create channel';
+    logger.warn('bots.channelBot', message, { channel: channelName, error: err.message });
     return null;
   }
-
-  // Never log the derived key itself, per the repository's logging contract.
-  logger.info('bots.channelBot', 'created channel', { channelIdx: emptySlot.channelIdx, channel: channelName });
-  return { channelIdx: emptySlot.channelIdx, secret };
 }

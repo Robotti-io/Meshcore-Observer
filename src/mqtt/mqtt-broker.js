@@ -2,6 +2,10 @@ import mqtt from 'mqtt';
 
 const RECONNECT_PERIOD_MS = 5000;
 const CONNECT_TIMEOUT_MS = 10000;
+// Captured packets have no local replay store. Reject excess work explicitly
+// instead of retaining an unbounded application/MQTT.js outgoing queue.
+const MAX_PACKET_PUBLISHES = 64;
+const PACKET_PUBLISH_TIMEOUT_MS = 10000;
 // The client is shared with packet capture, so a single slow acknowledgement
 // must not drop it. Only a run of consecutive timeouts is treated as a stuck
 // connection worth retiring.
@@ -39,6 +43,7 @@ export class MqttBroker {
   #recoveryTimer = null;
   #lastWill = null;
   #boundedReject = null;
+  #packetRejects = new Set();
   #ackTimeouts = 0;
 
   /**
@@ -90,6 +95,8 @@ export class MqttBroker {
     }
 
     this.#stopping = false;
+    clearTimeout(this.#recoveryTimer);
+    this.#recoveryTimer = null;
     const generation=++this.#generation;
     this.#ackTimeouts=0;
     this.#lastWill=will;
@@ -112,15 +119,32 @@ export class MqttBroker {
           error: err.message
         });
         this.#state = 'failed';
+        // MQTT.js cannot reconnect until a client exists. This retry only
+        // owns preparation failures; transport reconnect remains MQTT.js's.
+        this.#scheduleRecovery(generation);
       });
+  }
+
+  #scheduleRecovery(generation = this.#generation) {
+    if (this.#stopping || this.#recoveryTimer) return;
+    this.#recoveryTimer = setTimeout(() => {
+      this.#recoveryTimer = null;
+      if (!this.#stopping && generation === this.#generation) {
+        this.connect(this.#lastWill);
+      }
+    }, RECONNECT_PERIOD_MS);
+    this.#recoveryTimer.unref();
   }
 
   async close() {
     this.#stopping = true;
     this.#generation += 1;
     clearTimeout(this.#recoveryTimer);this.#recoveryTimer=null;
-    const force=Boolean(this.#boundedReject);
+    const force = Boolean(this.#boundedReject || this.#packetRejects.size || this.#ackTimeouts);
     this.#boundedReject?.(new Error('Region publication stopped'));
+    for (const settle of [...this.#packetRejects]) {
+      settle(new Error('Packet publication stopped before completion'));
+    }
     const client = this.#client;
     this.#client = null;
     if (client) {
@@ -133,14 +157,48 @@ export class MqttBroker {
     if (!this.isConnected()) {
       return Promise.reject(new Error(`broker "${this.#config.id}" is not connected`));
     }
+    if (this.#packetRejects.size >= MAX_PACKET_PUBLISHES) {
+      return Promise.reject(new Error('Packet publication capacity exceeded; packet not admitted'));
+    }
+    const client = this.#client;
     return new Promise((resolve, reject) => {
-      this.#client.publish(
-        topic,
-        payload,
-        { qos: qos ?? this.#config.qos, retain: retain ?? this.#config.retain },
-        (err) => (err ? reject(err) : resolve())
-      );
+      let finished = false;
+      const settle = error => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.#packetRejects.delete(settle);
+        if (error) reject(error);
+        else resolve();
+      };
+      const timer = setTimeout(() => {
+        // A deadline alone would leave the old QoS payloads in MQTT.js.
+        // Retire their client before admitting any replacement work.
+        this.#retireClient(client, new Error('Packet publication timed out; connection retired for recovery'));
+      }, PACKET_PUBLISH_TIMEOUT_MS);
+      timer.unref();
+      this.#packetRejects.add(settle);
+      try {
+        client.publish(topic, payload,
+          { qos: qos ?? this.#config.qos, retain: retain ?? this.#config.retain }, settle);
+      } catch (error) {
+        settle(error);
+      }
     });
+  }
+
+  #retireClient(client, error) {
+    if (this.#client !== client) return;
+    this.#generation += 1;
+    this.#client = null;
+    this.#state = 'retrying';
+    this.#ackTimeouts = 0;
+    this.#boundedReject?.(error);
+    for (const settle of [...this.#packetRejects]) settle(error);
+    // Forced end discards the retired client's outgoing QoS queue. Late
+    // callbacks/events can only settle their already-finished operations.
+    try { client.end(true, {}, () => {}); } catch { /* recovery remains bounded */ }
+    this.#scheduleRecovery();
   }
 
   /** QoS acknowledgement deadline shared by region and observer status work.
@@ -162,17 +220,7 @@ export class MqttBroker {
       };
       const timer=setTimeout(()=>{
         if(this.#client===client && ++this.#ackTimeouts>=REGION_ACK_TIMEOUTS_BEFORE_RETIRE) {
-          this.#ackTimeouts=0;
-          this.#generation += 1;this.#client=null;this.#state='retrying';
-          // Forced end discards this client's outgoing QoS queue. Late
-          // callbacks/events belong to the retired client, never a new one.
-          try { client.end(true,{},()=>{}); } catch { /* recovery remains bounded */ }
-          this.#recoveryTimer=setTimeout(()=>{
-            this.#recoveryTimer=null;
-            if(!this.#stopping) this.connect(this.#lastWill);
-          },RECONNECT_PERIOD_MS);
-          this.#recoveryTimer.unref();
-          settle(new Error('Region broker acknowledgement timed out; connection retired for recovery'));
+          this.#retireClient(client, new Error('Region broker acknowledgement timed out; connection retired for recovery'));
           return;
         }
         settle(new Error('Region broker acknowledgement timed out'));

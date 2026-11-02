@@ -1,7 +1,10 @@
-import { test } from 'vitest';
+import { afterEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { MqttBroker } from '../../src/mqtt/mqtt-broker.js';
+import { LetsMeshAuth } from '../../src/mqtt/letsmesh-auth.js';
+
+afterEach(() => vi.useRealTimers());
 
 function silentLogger() {
   const noop = () => {};
@@ -270,4 +273,79 @@ test('moves to failed and logs a warning when credential resolution rejects', as
   assert.equal(broker.getState(), 'failed');
   assert.equal(warnings.length, 1);
   assert.match(warnings[0].meta.error, /on-device signing failed/);
+  await broker.close();
+});
+
+test('first signing failure retries preparation and recovers without a radio reconnect', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  let signs = 0;
+  const auth = new LetsMeshAuth({
+    radioManager: {
+      getDeviceInfo: () => ({ publicKey: 'AB'.repeat(32) }),
+      runCommand: async () => {
+        signs += 1;
+        if (signs === 1) throw new Error('temporary signing failure');
+        return Buffer.alloc(64);
+      }
+    },
+    logger: silentLogger()
+  });
+  const clients = [];
+  const options = [];
+  const broker = new MqttBroker({
+    config: baseBrokerConfig({ auth: { method: 'token' } }), logger: silentLogger(),
+    getPassword: () => auth.refreshIfNeeded(),
+    createClient: settings => {
+      options.push(settings);
+      const client = createFakeClient();
+      clients.push(client);
+      return client;
+    }
+  });
+  const will = { topic: 'status', payload: 'offline' };
+  broker.connect(will);
+  await flush();
+  assert.equal(broker.getState(), 'failed');
+  assert.equal(auth.getExpiration(), null);
+  await vi.advanceTimersByTimeAsync(4999);
+  assert.equal(signs, 1);
+  await vi.advanceTimersByTimeAsync(1);
+  assert.equal(signs, 2);
+  assert.equal(clients.length, 1);
+  assert.deepEqual(options[0].will, { ...will, qos: 0, retain: true });
+  clients[0].emit('connect');
+  assert.equal(broker.getState(), 'connected');
+  await broker.close();
+  assert.equal(vi.getTimerCount(), 0);
+});
+
+test('preparation retries stop and never overlap a pending credential resolution', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  let calls = 0;
+  let release;
+  let created = 0;
+  const broker = new MqttBroker({
+    config: baseBrokerConfig({ auth: { method: 'token' } }), logger: silentLogger(),
+    getPassword: () => {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new Error('radio not ready'));
+      return new Promise(resolve => { release = resolve; });
+    },
+    createClient: () => { created += 1; return createFakeClient(); }
+  });
+  broker.connect();
+  await flush();
+  await vi.advanceTimersByTimeAsync(20000);
+  assert.equal(calls, 2);
+  await broker.close();
+  release('late-token');
+  await flush();
+  await vi.advanceTimersByTimeAsync(20000);
+  assert.equal(created, 0);
+  assert.equal(vi.getTimerCount(), 0);
+
+  broker.connect();
+  await flush();
+  await broker.close();
+  assert.equal(vi.getTimerCount(), 0);
 });

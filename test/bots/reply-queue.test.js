@@ -255,6 +255,72 @@ test('logs a warning with channel/sender and continues when dispatching a queued
   assert.equal(failureLog.meta.sender, 'Jeymz');
 });
 
+test.each([
+  [null, 'null'],
+  [undefined, 'undefined'],
+  ['radio busy', 'radio busy'],
+  [42, 'non-Error rejection (number)'],
+  [{}, 'non-Error rejection (object)'],
+  [new Error(), 'Error']
+])('resolves a dispatch rejected with %j and continues draining', async (rejection, description) => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const logger = silentLogger();
+  const { dispatch, calls } = testDispatcher({ '!broken': () => { throw rejection; } });
+  const queue = newQueue({ store, logger, dispatch });
+  const failedId = queue.enqueue(baseItem({ trigger: '!broken' }));
+  const sentId = queue.enqueue(baseItem({ trigger: '!ok' }));
+
+  await waitFor(() => store.getReplyById(sentId).status === 'sent');
+
+  assert.equal(store.getReplyById(failedId).status, 'failed');
+  assert.equal(store.getReplyById(failedId).outcomeReason, 'send-failed');
+  assert.equal(calls.length, 2);
+  const warning = logger.calls.warn.find(call => call.message.includes('failed to send a queued reply'));
+  assert.equal(warning.meta.error, description);
+});
+
+test('commits a policy failure and continues even when warning and error logging throw', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const logger = silentLogger();
+  logger.warn = vi.fn(() => { throw new Error('warning logger unavailable'); });
+  logger.error = vi.fn(() => { throw new Error('error logger unavailable'); });
+  const { dispatch, calls } = testDispatcher({
+    '!broken': () => {
+      const error = new Error('scope unavailable');
+      error.replyReason = 'scope-unavailable';
+      throw error;
+    }
+  });
+  const queue = newQueue({ store, logger, dispatch });
+  const failedId = queue.enqueue(baseItem({ trigger: '!broken' }));
+  const sentId = queue.enqueue(baseItem({ trigger: '!ok' }));
+
+  await waitFor(() => store.getReplyById(sentId).status === 'sent');
+
+  assert.equal(store.getReplyById(failedId).status, 'failed');
+  assert.equal(store.getReplyById(failedId).outcomeReason, 'scope-unavailable');
+  assert.equal(calls.length, 2);
+  assert.equal(logger.error.mock.calls.length, 1);
+  assert.equal(logger.error.mock.calls[0][2].error, 'warning logger unavailable');
+});
+
+test('catches an unexpected poll failure and resumes on the next tick', async () => {
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  vi.spyOn(store, 'takeExpiredReplyItems').mockImplementationOnce(() => { throw null; });
+  const logger = silentLogger();
+  logger.error = vi.fn();
+  const { dispatch, calls } = testDispatcher();
+  const queue = newQueue({ store, logger, dispatch });
+  const id = queue.enqueue(baseItem());
+
+  await waitFor(() => store.getReplyById(id).status === 'sent');
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(logger.error.mock.calls, [[
+    'bots.replyQueue', 'reply queue tick failed unexpectedly', { error: 'null' }
+  ]]);
+});
+
 test('getStats() reports only the live queue depth - lifetime counters are queried back from the store instead', async () => {
   const { dispatch } = testDispatcher();
   const queue = newQueue({ dispatch });

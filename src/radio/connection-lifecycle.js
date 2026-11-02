@@ -6,6 +6,7 @@ const messages = {
   stopped: 'radio stopped before the command completed',
   invalidated: 'radio connection was reset before the command completed',
   'connect-failed': 'radio connection setup failed before the command completed',
+  'command-timeout': 'radio command timed out; its connection generation was retired',
   'close-failed': 'Radio connection close failed; verify the transport is closed and restart Observer.',
   'close-timeout': 'Radio connection closure was not confirmed; verify the transport is closed and restart Observer.',
   'open-timeout': 'Radio transport opening did not settle during shutdown; verify the transport is closed and restart Observer.'

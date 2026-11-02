@@ -8,6 +8,10 @@ import { regionPublicationConfigSchema } from '../mqtt/region-publication-schema
 import { telemetryConfigSchema } from '../telemetry/telemetry-schemas.js';
 import { telemetryPollConfigSchema } from '../telemetry/polling-schemas.js';
 
+// Native timers clamp larger delays to 1 ms. Durable deadlines are separate:
+// they are compared against clocks and need not fit a single timer delay.
+export const MAX_NATIVE_TIMER_DELAY_MS = 2147483647;
+
 export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
@@ -38,8 +42,8 @@ export const configSchema = {
           required: ['maxRetries', 'initialDelayMs', 'maxDelayMs'],
           properties: {
             maxRetries: { type: 'integer', minimum: 0 },
-            initialDelayMs: { type: 'integer', minimum: 0 },
-            maxDelayMs: { type: 'integer', minimum: 0 }
+            initialDelayMs: { type: 'integer', minimum: 0, maximum: MAX_NATIVE_TIMER_DELAY_MS },
+            maxDelayMs: { type: 'integer', minimum: 0, maximum: MAX_NATIVE_TIMER_DELAY_MS }
           }
         }
       }
@@ -66,9 +70,9 @@ export const configSchema = {
       additionalProperties: false,
       required: ['quietMs', 'ttlMs', 'repeatCheckTimeoutMs'],
       properties: {
-        quietMs: { type: 'integer', minimum: 0 },
-        ttlMs: { type: 'integer', minimum: 0 },
-        repeatCheckTimeoutMs: { type: 'integer', minimum: 0 }
+        quietMs: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        ttlMs: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        repeatCheckTimeoutMs: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }
       }
     },
     floodAdvert: {
@@ -106,7 +110,7 @@ export const configSchema = {
         enabled: { type: 'boolean' },
         host: { type: 'string', minLength: 1 },
         port: { type: 'integer', minimum: 1, maximum: 65535 },
-        sampleIntervalMs: { type: 'integer', minimum: 1000 },
+        sampleIntervalMs: { type: 'integer', minimum: 1000, maximum: MAX_NATIVE_TIMER_DELAY_MS },
         dbPath: { type: 'string', minLength: 1 },
         // 0 = unlimited retention.
         retentionDays: { type: 'integer', minimum: 0 },
@@ -142,7 +146,7 @@ export const configSchema = {
           transport: { enum: ['tcp', 'wss'] },
           tls: { type: 'boolean' },
           websocketPath: { type: ['string', 'null'] },
-          keepalive: { type: 'integer', minimum: 0 },
+          keepalive: { type: 'integer', minimum: 0, maximum: Math.floor(MAX_NATIVE_TIMER_DELAY_MS / 1000) },
           qos: { enum: [0, 1, 2] },
           retain: { type: 'boolean' },
           clientIdPrefix: { type: 'string', minLength: 1 },

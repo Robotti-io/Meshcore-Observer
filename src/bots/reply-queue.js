@@ -1,5 +1,13 @@
 const DEFAULT_POLL_INTERVAL_MS = 250;
 
+function describeThrownValue(value) {
+  if (value instanceof Error) return value.message || value.name;
+  if (typeof value === 'string') return value;
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  return `non-Error rejection (${typeof value})`;
+}
+
 /**
  * A single FIFO queue of pending bot replies, shared across every
  * configured ChannelBot - "the local frequency" is one physical radio, so
@@ -125,7 +133,18 @@ export class ReplyQueue {
 
   #startTimer() {
     if (!this.#timer) {
-      this.#timer = setInterval(() => this.#tick(), this.#pollIntervalMs);
+      this.#timer = setInterval(() => {
+        void this.#tick().catch((err) => {
+          try {
+            this.#logger.error('bots.replyQueue', 'reply queue tick failed unexpectedly', {
+              error: describeThrownValue(err)
+            });
+          } catch {
+            // A timer callback must not create an unhandled rejection while
+            // reporting an already-caught queue failure.
+          }
+        });
+      }, this.#pollIntervalMs);
       this.#timer.unref();
     }
   }
@@ -180,10 +199,9 @@ export class ReplyQueue {
    * Marks one dispatched item resolved. A failure here is logged as loudly
    * as possible rather than silently swallowed: unlike the old separate
    * recordOutcome hook (purely a metrics side-channel), this call is what
-   * actually moves the row out of `status: 'pending'` - if it fails, the
-   * item stays pending and a future tick will pick it up again, which for
-   * a dispatch whose terminal write fails remains `dispatching`, so the
-   * current process cannot send it again. Startup recovery resolves it as
+   * commits the terminal result. A dispatch whose terminal write fails
+   * remains `dispatching`, so the current process cannot send it again.
+   * Startup recovery resolves it as
    * `delivery-unknown`; it is never replayed without evidence.
    */
   #resolve(item, status, occurredAt, reason) {
@@ -199,7 +217,7 @@ export class ReplyQueue {
         bot: item.botName,
         trigger: item.trigger,
         status,
-        error: err.message
+        error: describeThrownValue(err)
       });
     }
   }
@@ -257,15 +275,17 @@ export class ReplyQueue {
       const reason = ['scope-unavailable', 'unsupported-policy'].includes(err?.replyReason)
         ? err.replyReason
         : 'send-failed';
+      // Commit the outcome before logging so a logger failure cannot leave
+      // an otherwise resolved dispatch without its terminal result.
+      this.#resolve(next, 'failed', this.#now(), reason);
       this.#logger.warn('bots.replyQueue', 'failed to send a queued reply', {
         bot: next.botName,
         channel: next.channel,
         trigger: next.trigger,
         sender: next.sender,
-        error: err.message,
+        error: describeThrownValue(err),
         reason
       });
-      this.#resolve(next, 'failed', this.#now(), reason);
     } finally {
       this.#sending = false;
       if (this.#store.countPendingReplyItems() === 0 && this.#timer) {

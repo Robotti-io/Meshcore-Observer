@@ -45,6 +45,12 @@ const VALID_BROKER = {
   auth: { method: 'none' }
 };
 
+test('keepalive rejects values that overflow the native millisecond timer', () => {
+  const [valid] = withTempFile(JSON.stringify([{ ...VALID_BROKER, keepalive: 2147483 }]), loadBrokersConfig);
+  assert.equal(valid.keepalive, 2147483);
+  assert.throws(() => withTempFile(JSON.stringify([{ ...VALID_BROKER, keepalive: 2147484 }]), loadBrokersConfig), BrokersConfigError);
+});
+
 test('broker configuration example validates token, password, and anonymous auth examples', () => {
   const examplePath = fileURLToPath(new URL('../../brokers.config.example.json', import.meta.url));
   const brokers = loadBrokersConfig(examplePath);

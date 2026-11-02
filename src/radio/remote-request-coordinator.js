@@ -35,6 +35,7 @@ const binaryHeaderValid = compileSchema(remoteBinaryHeaderSchema);
 const preflightLimitsValid = compileSchema(remotePreflightLimitsSchema);
 const targetValid = compileSchema(regionQueryTargetSchema);
 const recoveryStatuses = new Set(['reset', 'stale-generation', 'close-failed', 'close-timeout']);
+const TRACE_BUDGET_CONTINUATION = Symbol('trace-budget-continuation');
 function synchronousPermission(callback, ...args) {
   const value = callback(...args);
   if (value && typeof value.then === 'function') Promise.resolve(value).catch(() => {});
@@ -42,8 +43,8 @@ function synchronousPermission(callback, ...args) {
 }
 
 /** One remote lease, separate from the command queue's short ACK transaction.
- * Anonymous contact preflight is read-only. No polls, automatic retries,
- * contact mutation or storage ownership here.
+ * Anonymous preflight is read-only; telemetry may reconcile a target contact
+ * from validated route evidence. Producers own polling and durable storage.
  */
 export class RemoteRequestCoordinator {
   #radio;
@@ -156,7 +157,11 @@ export class RemoteRequestCoordinator {
       && e.generation === snapshot.generation && e.observer === snapshot.observerPublicKey?.toUpperCase() ? e : null;
   }
 
-  #backgroundAllowed(current) { return Boolean(current.exchange) || this.#background.allowed(current.source); }
+  #backgroundAllowed(current) {
+    // A paced login completes the already-admitted trace operation. It keeps
+    // no extra RF credit and still yields to foreground work at every gate.
+    return Boolean(current.exchange || current.pacedTracePath) || this.#background.allowed(current.source);
+  }
 
   async tryGuestLogin(request, config, hooks) {
     assertOwner(ownerSchemas.telemetryGuestRequestSchema, request);
@@ -288,11 +293,15 @@ export class RemoteRequestCoordinator {
         if (!synchronousPermission(current.reserve, current.context))
           return { status: 'deferred', reason: 'reservation-unavailable' };
         current.traceReserved = true;
-        if (current.exchange && !this.#budget.recordAttempt(current.exchange.token))
+        if (!this.#budget.recordAttempt(current.exchange?.token))
           return { status: 'deferred', reason: 'rate-limited' };
+        if (current.source) this.#background.sent(current.source);
         current.traceDispatchedAt = this.#wallNow();
         timer = setTimeout(() => finish({ status: 'failed', reason: 'ack-timeout' }), this.#limits.ackTimeoutMs);
-        await connection.sendToRadioFrame(frame);
+        // The ACK deadline also owns a write promise that never settles.
+        // Do not let a stalled SDK write retain airtime after that deadline.
+        Promise.resolve(connection.sendToRadioFrame(frame)).catch(() =>
+          finish({ status: 'failed', reason: 'trace-write-error' }));
         return result;
       });
     } catch {
@@ -430,13 +439,51 @@ export class RemoteRequestCoordinator {
     this.#arm(current, this.#limits.ackTimeoutMs, () => this.#finish(current, 'deferred', 'queue-timeout'));
     this.#commandPending = true;
     // Observe both settlements even if queue expiry or stop already won.
-    Promise.resolve().then(() => this.#radio.runCommand((connection, transaction) =>
-      this.#dispatch(current, connection, transaction), { generation: context.generation, requireReady: true }
-    )).then(() => { this.#commandPending = false; }, () => {
+    Promise.resolve().then(() => this.#runOwnedCommand(current)).then(() => { this.#commandPending = false; }, () => {
       this.#commandPending = false;
       if (this.#current === current && current.phase !== 'recovery') this.#finish(current, 'failed', 'disconnected');
     });
     return completion;
+  }
+
+  async #runOwnedCommand(current) {
+    let result = await this.#radio.runCommand((connection, transaction) =>
+      this.#dispatch(current, connection, transaction),
+    { generation: current.context.generation, requireReady: true });
+    if (result !== TRACE_BUDGET_CONTINUATION) return;
+
+    // The trace consumed a normal RF turn. Wait outside the command queue so
+    // signing and foreground commands can progress while this remote lease
+    // retains only its target/generation/verified-path evidence.
+    const deadline = this.#time() + this.#limits.minIntervalMs + 60000;
+    while (this.#current === current) {
+      if (this.#stopped || !this.#currentScope(current)) {
+        this.#finish(current, 'failed', this.#stopped ? 'stopped' : 'disconnected'); return;
+      }
+      const admission = this.#admissionReason(current);
+      if (admission && admission !== 'rate-limited') {
+        this.#finish(current, 'deferred', admission); return;
+      }
+      if (!admission) break;
+      if (this.#time() >= deadline) {
+        this.#finish(current, 'deferred', 'rate-limited'); return;
+      }
+      await new Promise(resolve => {
+        current.resolvePacing = resolve;
+        current.pacingTimer = setTimeout(resolve, 100);
+      });
+      clearTimeout(current.pacingTimer);
+      current.resolvePacing = null;
+    }
+    if (this.#current !== current) return;
+    current.phase = 'queued';
+    this.#arm(current, this.#limits.ackTimeoutMs, () => this.#finish(current, 'deferred', 'queue-timeout'));
+    // The new transaction rereads the entire inventory and exact target.
+    // Expired inventory proof is never reused after the pacing delay.
+    result = await this.#radio.runCommand((connection, transaction) =>
+      this.#dispatch(current, connection, transaction),
+    { generation: current.context.generation, requireReady: true });
+    if (result === TRACE_BUDGET_CONTINUATION) throw new Error('Unexpected repeated trace continuation');
   }
 
   stop() {
@@ -538,7 +585,9 @@ export class RemoteRequestCoordinator {
     }
     if (current.telemetry) {
       this.#listen(current, connection, transaction);
-      if (!await this.#telemetryPreflight(current, connection)) return this.#awaitCommand(current, transaction);
+      const preflight = await this.#telemetryPreflight(current, connection);
+      if (preflight === TRACE_BUDGET_CONTINUATION) return preflight;
+      if (!preflight) return this.#awaitCommand(current, transaction);
       if (this.#current !== current) return;
       if (current.telemetry.login && current.traceOutcome === 'response') {
         current.phase = 'ready';
@@ -748,7 +797,12 @@ export class RemoteRequestCoordinator {
           if (inferredRoute && typeof inferredRoute.then === 'function') throw new Error('Contact route lookup must be synchronous');
           current.routeFailureReason = inferredRoute?.status === 'unavailable' ? inferredRoute.reason : null;
           current.routeEvidence = inferredRoute?.status === 'available' ? inferredRoute : null;
-          if (current.routeEvidence) {
+          if (current.pacedTracePath && (!current.routeEvidence
+            || current.routeEvidence.target?.publicKeyHex !== current.context.targetPublicKey
+            || JSON.stringify(current.routeEvidence.path) !== JSON.stringify(current.pacedTracePath))) {
+            this.#finish(current, 'deferred', 'contacts-changed'); return false;
+          }
+          if (current.routeEvidence && !current.pacedTracePath) {
             // From this point until contact proof completes, any NewAdvert
             // push invalidates the inventory proof and is drained safely.
             current.preflightKind = 'contact-sync';
@@ -770,10 +824,28 @@ export class RemoteRequestCoordinator {
               traced.reason === 'command-error' ? { errorCode: traced.errorCode, errorReason: traced.errorReason } : {});
               return false;
             }
+            if (!current.exchange) {
+              current.pacedTracePath = [...current.routeEvidence.path];
+              if (!this.#budget.canAttempt()) {
+                clearTimeout(current.timer);
+                current.timer = null;
+                current.phase = 'ready';
+                connection.off('rx', current.onFrame);
+                current.signal.removeEventListener('abort', current.onAbort);
+                current.onFrame = null;
+                current.onAbort = null;
+                return TRACE_BUDGET_CONTINUATION;
+              }
+            }
           }
           current.preflightKind = 'contact-sync';
+          current.preflightTimeoutMs = timeout;
+          current.preflightStarted = this.#now();
+          this.#arm(current, timeout, () => this.#recover(current, 'preflight-timeout', 'preflight-timeout'));
           const synced = await reconcileTelemetryContact({ connection, targetPublicKey: current.context.targetPublicKey,
-            contacts: current.inventoryProof.contacts, route: current.routeEvidence });
+            contacts: current.inventoryProof.contacts, route: current.routeEvidence, signal: current.signal });
+          if (this.#current !== current || current.phase === 'recovery' || current.signal?.aborted) return false;
+          clearTimeout(current.timer);
           current.contactSyncOutcome = synced.evicted ? 'added-evicted' : synced.status;
           current.contactSyncChanged = synced.status === 'added' || synced.status === 'updated';
           this.#logger[synced.status === 'deferred' ? 'warn' : 'info']('services.remoteRequests',
@@ -797,6 +869,7 @@ export class RemoteRequestCoordinator {
             this.#finish(current, 'deferred', reason); return false;
           }
         } catch {
+          if (this.#current !== current || current.phase === 'recovery' || current.signal?.aborted) return false;
           current.contactSyncOutcome = 'failed';
           this.#logger.warn('services.remoteRequests', 'Telemetry target contact could not be reconciled; poll deferred without reconnecting.', {
             requestId: current.context.requestId, operation: current.context.operation,
@@ -888,6 +961,9 @@ export class RemoteRequestCoordinator {
       current.inventoryInvalidated = true;
       return;
     }
+    // Reconciliation owns its SDK Ok/Err callbacks. They are not a target
+    // lookup response and must not complete or reject that later operation.
+    if (current.preflightKind === 'contact-sync') return;
     const parsed = parseTelemetryContactFrame({ targetPublicKey: current.context.targetPublicKey, bytes, radius: config.radius });
     if (parsed.status === 'ignored') return;
     if (parsed.status === 'malformed') { this.#recover(current, 'protocol-error', 'preflight-protocol-error'); return; }
@@ -1054,6 +1130,8 @@ export class RemoteRequestCoordinator {
 
   #detach(current) {
     clearTimeout(current.timer);
+    clearTimeout(current.pacingTimer);
+    current.resolvePacing?.();
     current.timer = null;
     this.#radio.off('radio.disconnected', current.onChange);
     this.#radio.off('radio.connected', current.onChange);

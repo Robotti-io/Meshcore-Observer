@@ -744,9 +744,19 @@ export class MetricsStore {
 
     try {
       this.#db = new DatabaseSync(dbPath);
+      const { user_version: currentVersion } = this.#db.prepare('PRAGMA user_version').get();
+      const supportedVersion = MIGRATIONS.at(-1).version;
+      if (currentVersion > supportedVersion) {
+        const error = new Error(
+          `Observer database schema ${currentVersion} is newer than supported schema ${supportedVersion}; ` +
+          'use a compatible Observer version or restore a compatible backup'
+        );
+        error.code = 'OBSERVER_DATABASE_NEWER_SCHEMA';
+        throw error;
+      }
       this.#db.exec('PRAGMA journal_mode = WAL');
       this.#db.exec('PRAGMA foreign_keys = ON');
-      this.#runMigrations();
+      this.#runMigrations(currentVersion);
       this.#topology = createTopologyHistory(this.#db, (runId) => {
         if (this.#activeRunId !== runId || this.getObserverRun({ runId })?.state !== 'running') {
           throw new Error('Topology writes require the active owned run');
@@ -876,9 +886,7 @@ export class MetricsStore {
     `);
   }
 
-  #runMigrations() {
-    const { user_version: currentVersion } = this.#db.prepare('PRAGMA user_version').get();
-
+  #runMigrations(currentVersion) {
     for (const migration of MIGRATIONS) {
       if (migration.version <= currentVersion) {
         continue;

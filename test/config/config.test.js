@@ -8,7 +8,7 @@ import { REMOTE_REQUEST_DEFAULTS, REMOTE_REQUEST_ENV_KEYS } from '../../src/radi
 import { REGION_ANSWER_FRESHNESS_ENV_KEY, REGION_ANSWER_FRESHNESS_DEFAULT_HOURS } from '../../src/regions/region-schemas.js';
 import { REGION_QUERY_DEFAULTS, REGION_QUERY_ENABLED_ENV_KEY, REGION_QUERY_NUMERIC_SETTINGS } from '../../src/regions/region-query-schemas.js';
 import { compileSchema } from '../../src/validation/ajv.js';
-import { configSchema } from '../../src/config/schema.js';
+import { configSchema, MAX_NATIVE_TIMER_DELAY_MS } from '../../src/config/schema.js';
 import { TELEMETRY_FRESHNESS_ENV_KEY, TELEMETRY_FRESHNESS_DEFAULT_HOURS } from '../../src/telemetry/telemetry-schemas.js';
 
 function withTempBotsFile(content, fn) {
@@ -731,4 +731,25 @@ test('rejects a negative botReplyQueue bound', () => {
     () => loadConfig(baseEnv({ PACKETCAPTURE_BOT_REPLY_QUIET_MS: '-1' })),
     ConfigError
   );
+});
+
+test('rejects native timer overflow while retaining representable timer boundaries', () => {
+  const keys = ['PACKETCAPTURE_METRICS_UI_SAMPLE_INTERVAL_MS',
+    'PACKETCAPTURE_CONNECTION_RETRY_DELAY', 'PACKETCAPTURE_CONNECTION_RETRY_DELAY_MAX'];
+  for (const key of keys) {
+    for (const value of [String(MAX_NATIVE_TIMER_DELAY_MS + 1), '9007199254740993', '9'.repeat(32)]) {
+      assert.throws(() => loadConfig(baseEnv({ [key]: value })), ConfigError, key);
+    }
+    assert.doesNotThrow(() => loadConfig(baseEnv({ [key]: String(MAX_NATIVE_TIMER_DELAY_MS) })), key);
+  }
+});
+
+test('durable reply deadlines need not fit a native timer but must remain safe integers', () => {
+  const longWindow = String(MAX_NATIVE_TIMER_DELAY_MS + 1);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_BOT_REPLY_TTL_MS: longWindow })).botReplyQueue.ttlMs,
+    MAX_NATIVE_TIMER_DELAY_MS + 1);
+  for (const key of ['PACKETCAPTURE_BOT_REPLY_QUIET_MS', 'PACKETCAPTURE_BOT_REPLY_TTL_MS',
+    'PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS']) {
+    assert.throws(() => loadConfig(baseEnv({ [key]: '9007199254740993' })), ConfigError, key);
+  }
 });

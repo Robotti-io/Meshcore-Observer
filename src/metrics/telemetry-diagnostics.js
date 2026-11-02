@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { assertTelemetryInput } from '../telemetry/telemetry-validation.js';
 import { telemetryRequestDiagnosticSchema, telemetryRequestDiagnosticPageSchema } from '../telemetry/telemetry-schemas.js';
 
@@ -11,15 +12,18 @@ export function createTelemetryDiagnostics(db, requireRun) {
   function record(input) {
     assertTelemetryInput(telemetryRequestDiagnosticSchema, input);
     requireRun(input.runId);
+    const diagnosticJson = JSON.stringify(input);
     const result = insert.run(input.requestId,input.runId,input.observerPublicKey,input.targetPublicKey,input.operation,
-      input.startedAt,input.completedAt,Number(input.clockAnomaly),input.status,input.reason,JSON.stringify(input));
+      input.startedAt,input.completedAt,Number(input.clockAnomaly),input.status,input.reason,diagnosticJson);
     const saved = byId.get(input.requestId);
     let prior;
     try {
       prior = JSON.parse(saved.diagnosticJson);
       assertTelemetryInput(telemetryRequestDiagnosticSchema, prior);
     } catch { throw new Error('Invalid stored telemetry request diagnostic'); }
-    if (JSON.stringify(prior) !== JSON.stringify(input)) throw new Error('Telemetry diagnostic request identity conflict');
+    // Compare persisted JSON values, ignoring object insertion order while
+    // retaining route/trace array order and the original omission semantics.
+    if (!isDeepStrictEqual(prior, JSON.parse(diagnosticJson))) throw new Error('Telemetry diagnostic request identity conflict');
     return { requestId: input.requestId, duplicate: result.changes === 0 };
   }
 

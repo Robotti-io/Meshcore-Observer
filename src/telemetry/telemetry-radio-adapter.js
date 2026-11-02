@@ -57,7 +57,7 @@ export function parseTelemetryContactFrame(input) {
   return result({ status: 'eligible', contact: { targetPublicKey, contactType: 2, route: decoded.route } });
 }
 
-/** Retains only full keys/type/path, discarding names, coordinates and raw frames. */
+/** Keeps validated contact metadata for ephemeral reconciliation, without retaining raw frames. */
 export function parseTelemetryInventoryFrame(input) {
   const result = value => checkedTelemetryRadioResult(schemas.telemetryInventoryFrameResultSchema, value);
   if (!isTelemetryRadioInput(schemas.telemetryRadioFrameSchema, input)) return result(malformed('invalid-contact-inventory-frame'));

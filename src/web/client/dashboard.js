@@ -10,6 +10,8 @@
 // built artifact - imports below resolve to sibling files served by
 // MetricsServer, exactly as authored, no build step.
 import { PACKET_TYPE_BUCKETS } from './packet-type-buckets.js';
+import { createNodeListController, loadDashboardReports, reportingDataForRange,
+  fetchDashboardJson as fetchJson } from './dashboard-requests.js';
 import {
   formatTimestamp,
   buildQueryString,
@@ -42,6 +44,7 @@ import {
 // scope rather than exposing every type here too.
 const NODE_TYPE = 'REPEATER';
 const NODES_PAGE_SIZE = 25;
+const NODES_LIVE_REFRESH_INTERVAL_MS = 30000;
 
 const RANGE_PRESETS = [
   { value: '1h', label: '1h' },
@@ -89,8 +92,9 @@ let lastLiveAnnouncementState = null;
 let uptimeHasRendered = false;
 const rangeSectionStateByView = new Map();
 const reportingSectionStateByKey = new Map();
-const reportingDataByKey = new Map();
+
 let lastNodesSuccessAt = null;
+let lastNodesLiveRefreshAt = 0;
 let repeaterProgressGeneration = 0;
 let repeaterHistoryTarget = null;
 let repeaterHistoryOffset = 0;
@@ -332,7 +336,10 @@ function renderPacketTypes(packetTypesResponse) {
   PACKET_TYPE_BUCKETS.forEach((bucket, idx) => {
     const row = body.insertRow();
     const swatchCell = row.insertCell();
-    swatchCell.innerHTML = '<span class="swatch" style="background:var(' + bucket.varName + ')"></span>';
+    const swatch = document.createElement('span');
+    swatch.className = 'swatch';
+    swatch.style.background = 'var(' + bucket.varName + ')';
+    swatchCell.append(swatch);
     row.insertCell().textContent = bucket.label;
     const countCell = row.insertCell();
     countCell.className = 'count';
@@ -520,23 +527,17 @@ function reportingRequestDefinitions(view, params) {
   return [];
 }
 
-async function fetchJson(path, signal) {
-  const response = await fetch(path, { signal });
-  if (!response.ok) throw new Error(path + ' failed (' + response.status + ')');
-  return response.json();
-}
-
-function renderReportingSection(view, results) {
-  for (const [key, data] of results) reportingDataByKey.set(key, data);
+function renderReportingSection(view, rangeKey) {
+  const data = key => reportingDataForRange(reportingSectionStateByKey.get(key), rangeKey);
   if (view === 'overview') {
-    renderOperationalReporting(reportingDataByKey.get('overview-process-history'), reportingDataByKey.get('overview-process-samples'),
-      reportingDataByKey.get('overview-runtime-events'), reportingDataByKey.get('overview-telemetry-observations'), reportingDataByKey.get('overview-telemetry-outcomes'));
+    renderOperationalReporting(data('overview-process-history'), data('overview-process-samples'),
+      data('overview-runtime-events'), data('overview-telemetry-observations'), data('overview-telemetry-outcomes'));
   } else if (view === 'bots') {
-    renderBotReporting(reportingDataByKey.get('bots-usage'), reportingDataByKey.get('bots-outcomes'));
+    renderBotReporting(data('bots-usage'), data('bots-outcomes'));
   } else if (view === 'repeaters') {
-    renderRepeaterReporting(reportingDataByKey.get('repeaters-adverts'), reportingDataByKey.get('repeaters-topology-paths'),
-      reportingDataByKey.get('repeaters-topology-coverage'), reportingDataByKey.get('repeaters-telemetry-observations'),
-      reportingDataByKey.get('repeaters-telemetry-outcomes'), reportingDataByKey.get('repeaters-telemetry-diagnostics'));
+    renderRepeaterReporting(data('repeaters-adverts'), data('repeaters-topology-paths'),
+      data('repeaters-topology-coverage'), data('repeaters-telemetry-observations'),
+      data('repeaters-telemetry-outcomes'), data('repeaters-telemetry-diagnostics'));
   }
 }
 
@@ -703,13 +704,15 @@ function formatPublicKeyCell(publicKeyHex) {
   return publicKeyHex.slice(0, 12) + '…';
 }
 
-function renderNodesList(nodesResponse) {
-  const signature = JSON.stringify({ nodes: nodesResponse.nodes, total: nodesResponse.total, offset: nodesOffset });
+function renderNodesList(nodesResponse, offset) {
+  // The store already defines page ordering, including unnamed records.
+  const nodes = nodesResponse.nodes;
+  const signature = JSON.stringify({ nodes, total: nodesResponse.total, offset: offset });
   if (signature !== lastNodesRenderSignature) {
     lastNodesRenderSignature = signature;
     const body = document.querySelector('#nodes-table tbody');
     body.innerHTML = '';
-    for (const node of nodesResponse.nodes) {
+    for (const node of nodes) {
       const row = body.insertRow();
       const nameCell = row.insertCell();
       const nameButton = document.createElement('button');
@@ -725,15 +728,13 @@ function renderNodesList(nodesResponse) {
         cell.dataset.targetPublicKey = node.publicKeyHex;
         cell.textContent = 'Loading…';
       }
-      const activityCell = row.insertCell();
-      activityCell.dataset.progressActivity = node.publicKeyHex;
-      activityCell.textContent = 'Loading…';
+      row.insertCell().textContent = formatTimestamp(node.lastHeardAt);
     }
   }
 
-  document.getElementById('nodes-page-note').textContent = formatNodePageRange(nodesOffset, NODES_PAGE_SIZE, nodesResponse.total);
-  document.getElementById('nodes-prev').disabled = nodesOffset === 0;
-  document.getElementById('nodes-next').disabled = nodesOffset + NODES_PAGE_SIZE >= nodesResponse.total;
+  document.getElementById('nodes-page-note').textContent = formatNodePageRange(offset, NODES_PAGE_SIZE, nodesResponse.total);
+  document.getElementById('nodes-prev').disabled = offset === 0;
+  document.getElementById('nodes-next').disabled = offset + NODES_PAGE_SIZE >= nodesResponse.total;
 }
 
 function latestBy(rows, predicate, timestampField) {
@@ -795,7 +796,6 @@ async function refreshVisibleRepeaterProgress(nodes) {
   const rangeParams = resolveRangeQuery({ range: currentRange, customStartMs, customEndMs });
   if (!rangeParams) {
     for (const cell of document.querySelectorAll('#nodes-table [data-progress-step]')) cell.textContent = 'Apply range';
-    for (const cell of document.querySelectorAll('#nodes-table [data-progress-activity]')) cell.textContent = 'Apply custom range';
     return;
   }
   await Promise.all(nodes.map(async (node) => {
@@ -837,16 +837,11 @@ async function refreshVisibleRepeaterProgress(nodes) {
           ? observation.data?.contactInfo || 'No contact info provided' : null;
         setProgressCell(cell, telemetryProgressText(componentName, latest, observation), at, progressKind(status), ownerInfo);
       }
-      const times = [...diagnostics.map(row => row.completedAt), ...outcomes.map(row => row.completedAt)].filter(Number.isFinite);
-      const activity = document.querySelector(`[data-progress-activity="${node.publicKeyHex}"]`);
-      if (activity) activity.textContent = times.length ? formatTimestamp(Math.max(...times)) : 'No activity in range';
     } catch {
       if (generation !== repeaterProgressGeneration) return;
       for (const cell of document.querySelectorAll(`[data-target-public-key="${node.publicKeyHex}"][data-progress-step]`)) {
         cell.textContent = 'Unavailable';
       }
-      const activity = document.querySelector(`[data-progress-activity="${node.publicKeyHex}"]`);
-      if (activity) activity.textContent = 'Unavailable';
     }
   }));
 }
@@ -927,36 +922,40 @@ function initRepeaterHistory() {
 // Fetches the current node-table page (search/type-filtered, paginated) -
 // deliberately separate from refreshRangeData()'s Promise.all batch, since
 // this reflects live current state (see MetricsStore#queryNodes), not a
-// history window, and isn't re-fetched on every SSE tick either (that
-// would reset pagination/clobber an in-progress search every few seconds).
-async function refreshNodesList() {
-  setDataStatus(
-    'nodes-data-status',
-    'loading',
-    lastNodesSuccessAt === null ? 'Loading current repeater list…' : 'Refreshing current repeater list.'
-  );
-  try {
-    const params = { type: NODE_TYPE, limit: NODES_PAGE_SIZE, offset: nodesOffset };
-    if (nodesSearchQuery) {
-      params.q = nodesSearchQuery;
-    }
-    const res = await fetch('/api/nodes?' + buildQueryString(params));
-    if (!res.ok) {
-      throw new Error('nodes query failed (' + res.status + ')');
-    }
-    const nodesResponse = await res.json();
-    renderNodesList(nodesResponse);
+// history window. Live refreshes are throttled so each stats tick doesn't
+// re-query repeater progress or interrupt a search/page change.
+const nodeListRequests = createNodeListController({
+  load: fetchJson,
+  onStart() {
+    repeaterProgressGeneration += 1;
+    lastNodesLiveRefreshAt = Date.now();
+    setDataStatus('nodes-data-status', 'loading', lastNodesSuccessAt === null
+      ? 'Loading current repeater list…' : 'Refreshing current repeater list.');
+  },
+  onSuccess(nodesResponse, params) {
+    renderNodesList(nodesResponse, params.offset);
     void refreshVisibleRepeaterProgress(nodesResponse.nodes);
     lastNodesSuccessAt = Date.now();
     setDataStatus('nodes-data-status', 'ready', 'Updated: ' + formatTimestamp(lastNodesSuccessAt));
-  } catch (err) {
-    console.error('failed to refresh the repeaters table', err);
-    setDataStatus(
-      'nodes-data-status',
-      'error',
-      'Unable to load current repeater list. ' + formatLastSuccess(lastNodesSuccessAt)
-    );
+  },
+  onError(error) {
+    console.error('failed to refresh the repeaters table', error);
+    setDataStatus('nodes-data-status', 'error',
+      'Unable to load current repeater list. ' + formatLastSuccess(lastNodesSuccessAt));
   }
+});
+
+function refreshNodesList() {
+  const params = { type: NODE_TYPE, limit: NODES_PAGE_SIZE, offset: nodesOffset };
+  if (nodesSearchQuery) params.q = nodesSearchQuery;
+  return nodeListRequests.refresh(params);
+}
+
+function refreshRepeatersWithLiveStats() {
+  if (currentView !== 'repeaters') return;
+  const now = Date.now();
+  if (now - lastNodesLiveRefreshAt < NODES_LIVE_REFRESH_INTERVAL_MS) return;
+  void refreshNodesList();
 }
 
 function initNodesSearch() {
@@ -1105,7 +1104,10 @@ function renderBotCommands(botCommandsResponse) {
     bot.commands.forEach((row, idx) => {
       const tr = entry.tbody.insertRow();
       const swatchCell = tr.insertCell();
-      swatchCell.innerHTML = '<span class="swatch" style="background:' + botCommandColor(idx) + '"></span>';
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.background = botCommandColor(idx);
+      swatchCell.append(swatch);
       tr.insertCell().textContent = row.trigger;
       const countCell = tr.insertCell();
       countCell.className = 'count';
@@ -1167,6 +1169,7 @@ function refreshRangeData({ supersede = false } = {}) {
   const params = resolveRangeQuery({ range: currentRange, customStartMs, customEndMs });
   if (!params) return; // custom range selected but not yet applied
   const view = currentView;
+  const rangeKey = buildQueryString(params);
   const viewLabel = VIEW_LABELS[view];
   const previousState = rangeSectionState(view);
   const lastSuccessAt = previousState.lastSuccessAt;
@@ -1184,62 +1187,72 @@ function refreshRangeData({ supersede = false } = {}) {
   const generation = rangeRefreshGeneration.begin();
   const controller = new AbortController();
   activeRangeController = controller;
-  rangeSectionStateByView.set(view, beginSectionRequest(previousState, generation));
+  rangeSectionStateByView.set(view, beginSectionRequest(previousState, generation, rangeKey));
 
   const request = (async () => {
     try {
       setRangeLoadingStatus(view, viewLabel, lastSuccessAt);
+      const priorRangeNote = previousState.data && previousState.dataRangeKey !== rangeKey
+        ? ' Showing last-good aggregate values from a different range.' : '';
+      if (priorRangeNote) setDataStatus('range-data-status', 'loading',
+        'Refreshing selected-range ' + viewLabel + '.' + priorRangeNote);
       const qs = buildQueryString({ ...params, view });
       const definitions = reportingRequestDefinitions(view, params);
       for (const definition of definitions) {
         const key = definition.key;
-        reportingSectionStateByKey.set(key, beginSectionRequest(reportingState(key), generation));
+        reportingSectionStateByKey.set(key, beginSectionRequest(reportingState(key), generation, buildQueryString(params)));
       }
       if (definitions.length > 0) {
         const statusId = view === 'overview' ? 'overview-reporting-status' : view === 'bots' ? 'bot-reporting-status' : 'repeater-reporting-status';
         setReportingStatus(statusId, 'loading', 'Refreshing selected-range reporting…');
       }
-      const dashboardResult = fetchJson('/api/metrics/dashboard?' + qs, controller.signal);
-      const focusedResults = await Promise.allSettled(definitions.map(async (definition) => ({
-        definition,
-        data: await fetchJson(definition.path, controller.signal)
-      })));
-      const result = await dashboardResult;
-      if (result.view !== view || !result.data) {
-        throw new Error('dashboard response did not match requested view');
-      }
-      if (controller.signal.aborted || !rangeRefreshGeneration.isCurrent(generation)) return;
-
-      renderDashboardView(view, result.data);
-      const focusedData = new Map();
-      let focusedFailures = 0;
-      for (const settled of focusedResults) {
-        if (settled.status === 'fulfilled') {
-          focusedData.set(settled.value.definition.key, settled.value.data);
-          const key = settled.value.definition.key;
-          const previous = reportingState(key);
-          reportingSectionStateByKey.set(key, completeSectionRequest(previous, generation, settled.value.data, Date.now()));
-        } else if (!controller.signal.aborted) {
-          focusedFailures += 1;
-          const failedDefinition = definitions[focusedResults.indexOf(settled)];
-          if (failedDefinition) {
-            const key = failedDefinition.key;
-            reportingSectionStateByKey.set(key, failSectionRequest(reportingState(key), generation, settled.reason));
-          }
+      const isCurrent = () => !controller.signal.aborted && rangeRefreshGeneration.isCurrent(generation);
+      const reportingStatusId = view === 'overview' ? 'overview-reporting-status'
+        : view === 'bots' ? 'bot-reporting-status' : 'repeater-reporting-status';
+      const updateFocusedStatus = () => {
+        if (!definitions.length) return;
+        const states = definitions.map(definition => reportingState(definition.key));
+        const loading = states.some(state => state.status === 'loading');
+        const failures = states.some(state => state.status === 'error');
+        setReportingStatus(reportingStatusId, failures ? 'error' : loading ? 'loading' : 'ready',
+          failures ? 'Some reports are unavailable. Only evidence for the selected range is shown; same-range last-good values may remain.'
+            : loading ? 'Refreshing selected-range reporting…' : 'Updated with retained-range evidence.');
+      };
+      // Hide any retained values whose provenance belongs to a different range
+      // immediately, rather than waiting for a failure or the slowest report.
+      renderReportingSection(view, rangeKey);
+      await loadDashboardReports({
+        aggregatePath: '/api/metrics/dashboard?' + qs,
+        definitions,
+        load: path => fetchJson(path, controller.signal),
+        isCurrent,
+        onAggregate(result) {
+          if (result.view !== view || !result.data) throw new Error('dashboard response did not match requested view');
+          renderDashboardView(view, result.data);
+          const updatedAt = Date.now();
+          rangeSectionStateByView.set(view,
+            completeSectionRequest(rangeSectionState(view), generation, result.data, updatedAt));
+          renderUpdatedRangeStatus(view, viewLabel, updatedAt);
+        },
+        onAggregateError(error) {
+          rangeSectionStateByView.set(view, failSectionRequest(rangeSectionState(view), generation, error));
+          console.error('failed to refresh range-aware metrics', error);
+          setDataStatus('range-data-status', 'error',
+            'Unable to load selected-range ' + viewLabel + '. ' + formatLastSuccess(lastSuccessAt) + priorRangeNote);
+        },
+        onReport(definition, data) {
+          reportingSectionStateByKey.set(definition.key,
+            completeSectionRequest(reportingState(definition.key), generation, data, Date.now()));
+          renderReportingSection(view, rangeKey);
+          updateFocusedStatus();
+        },
+        onReportError(definition, error) {
+          reportingSectionStateByKey.set(definition.key,
+            failSectionRequest(reportingState(definition.key), generation, error));
+          renderReportingSection(view, rangeKey);
+          updateFocusedStatus();
         }
-      }
-      if (focusedData.size > 0) renderReportingSection(view, focusedData);
-      if (definitions.length > 0) {
-        const statusId = view === 'overview' ? 'overview-reporting-status' : view === 'bots' ? 'bot-reporting-status' : 'repeater-reporting-status';
-        setReportingStatus(statusId, focusedFailures === 0 ? 'ready' : 'error',
-          focusedFailures === 0 ? 'Updated with retained-range evidence.' : 'Some retained-range reports are unavailable; successful sections remain visible.');
-      }
-      const updatedAt = Date.now();
-      rangeSectionStateByView.set(
-        view,
-        completeSectionRequest(rangeSectionState(view), generation, result.data, updatedAt)
-      );
-      renderUpdatedRangeStatus(view, viewLabel, updatedAt);
+      });
     } catch (err) {
       if (!controller.signal.aborted) {
         rangeSectionStateByView.set(view, failSectionRequest(rangeSectionState(view), generation, err));
@@ -1312,6 +1325,10 @@ function viewFromLocation() {
 }
 
 function showDashboardView(view, { focus = false } = {}) {
+  if (view !== 'repeaters') {
+    nodeListRequests.cancel();
+    repeaterProgressGeneration += 1;
+  }
   currentView = view;
   document.title = 'MeshCore Observer Metrics · ' + (VIEW_LABELS[view] ?? 'metrics');
   document.querySelectorAll('.dashboard-view').forEach((section) => {
@@ -1426,6 +1443,7 @@ function bootstrap() {
     // Refresh the active range view on the sample cadence so "now"-anchored
     // ranges stay current without querying hidden pages.
     refreshRangeData();
+    refreshRepeatersWithLiveStats();
   };
 
   // The stream sends the initial operational snapshot on connect. Activate

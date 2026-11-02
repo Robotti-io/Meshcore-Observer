@@ -53,6 +53,47 @@ test('diagnostics retain original attribution through replay, pagination and reo
   assert.equal(saved.coverage.historyCompleteness, 'unknown');
 });
 
+test('diagnostic replay ignores object key order through reopen but preserves nested values and route order', () => {
+  const f = fixture();
+  const original = telemetryDiagnostic(f.run, {
+    routeCandidatePath: ['ABCD', 'EF12'],
+    routeHopWeights: [
+      { position: 1, repeaterId: 'ABCD', anchorSuccessCount: 2, pathReceptionCount: 3 },
+      { position: 2, repeaterId: 'EF12', anchorSuccessCount: 4, pathReceptionCount: 5 }
+    ]
+  });
+  const reorder = object => Object.fromEntries(Object.entries(object).reverse());
+  const reconstructed = reorder({
+    ...original,
+    routeHopWeights: original.routeHopWeights.map(reorder)
+  });
+  assert.equal(f.store.recordTelemetryRequestDiagnostic(original).duplicate, false);
+  assert.equal(f.store.recordTelemetryRequestDiagnostic(reconstructed).duplicate, true);
+  assert.throws(() => f.store.recordTelemetryRequestDiagnostic({
+    ...reconstructed,
+    routeCandidatePath: [...original.routeCandidatePath].reverse()
+  }), /identity conflict/);
+  assert.throws(() => f.store.recordTelemetryRequestDiagnostic({
+    ...reconstructed,
+    routeHopWeights: [
+      { ...original.routeHopWeights[0], anchorSuccessCount: 99 },
+      original.routeHopWeights[1]
+    ]
+  }), /identity conflict/);
+  f.close();
+  f.open();
+  f.start(2000);
+  // Durable writes remain owned by the active run; replay equivalence does
+  // not grant a previous run permission after reopening.
+  assert.throws(() => f.store.recordTelemetryRequestDiagnostic(reconstructed), /active owned run/);
+  const saved = f.store.queryTelemetryRequestDiagnostics(range).diagnostics[0];
+  assert.deepEqual(saved, original);
+  const current = { ...original, requestId: randomUUID(), runId: f.run.runId, startedAt: 2000,
+    dispatchedAt: 2000, completedAt: 2001 };
+  assert.equal(f.store.recordTelemetryRequestDiagnostic(reorder(current)).duplicate, false);
+  assert.equal(f.store.recordTelemetryRequestDiagnostic(current).duplicate, true);
+});
+
 test('invalid, secret-bearing and foreign-run diagnostics fail before storage; malformed reads are rejected', () => {
   const f = fixture(), valid = telemetryDiagnostic(f.run);
   for (const changes of [{ password: 'NEVER-SAVED' }, { completedAt: -1 }, { routeCandidatePath: ['invalid'] },
@@ -63,4 +104,18 @@ test('invalid, secret-bearing and foreign-run diagnostics fail before storage; m
   for (const changes of [{ limit: 201 }, { offset: -1 }, { extra: true }, { start: 2001 }, { status: "' OR 1=1" }]) {
     assert.throws(() => f.store.queryTelemetryRequestDiagnostics({ ...range, ...changes }));
   }
+});
+
+test('stored diagnostics support the complete validated contact inventory capacity and reject overflow', () => {
+  const f = fixture();
+  for (const inventoryContactCount of [350, 351, 1024]) {
+    const input = telemetryDiagnostic(f.run, { inventoryContactCount });
+    assert.equal(f.store.recordTelemetryRequestDiagnostic(input).duplicate, false);
+  }
+  assert.throws(() => f.store.recordTelemetryRequestDiagnostic(
+    telemetryDiagnostic(f.run, { inventoryContactCount: 1025 })
+  ), /Invalid telemetry data/);
+  const saved = f.store.queryTelemetryRequestDiagnostics(range);
+  assert.equal(saved.total, 3, 'over-limit diagnostics fail before persistence');
+  assert.deepEqual(saved.diagnostics.map(row => row.inventoryContactCount).sort((a, b) => a - b), [350, 351, 1024]);
 });

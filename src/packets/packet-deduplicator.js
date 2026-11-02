@@ -4,9 +4,9 @@ const DEFAULT_TTL_MS = 5 * 60 * 1000;
 /**
  * Centralized duplicate detection for one canonical packet identifier.
  * Bounded by both entry count and age so memory cannot grow unbounded on a
- * long-running observer. A single instance must be shared by every consumer
- * (MQTT publisher, echo bot, ...) so the same physical packet arriving
- * through different event paths is only ever treated as "new" once.
+ * long-running observer. Each consumer owns its own duplicate policy: bots
+ * avoid repeated replies, while packet publication preserves every heard
+ * reception. Share an instance only between paths serving the same policy.
  */
 export class PacketDeduplicator {
   #maxEntries;

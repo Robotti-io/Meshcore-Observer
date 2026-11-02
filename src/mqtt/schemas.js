@@ -20,7 +20,8 @@ export const brokersConfigSchema = {
       transport: { enum: ['tcp', 'wss'] },
       tls: { type: 'boolean' },
       websocketPath: { type: 'string', minLength: 1 },
-      keepalive: { type: 'integer', minimum: 0 },
+      // Seconds become a native millisecond timer inside MQTT.js.
+      keepalive: { type: 'integer', minimum: 0, maximum: 2147483 },
       qos: { enum: [0, 1, 2] },
       retain: { type: 'boolean' },
       clientIdPrefix: { type: 'string', minLength: 1 },

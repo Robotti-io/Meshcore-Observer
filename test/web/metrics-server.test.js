@@ -1,6 +1,6 @@
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
@@ -8,12 +8,14 @@ import { MetricsServer } from '../../src/web/metrics-server.js';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { MetricsSampler } from '../../src/metrics/sampler.js';
 import { startTelemetryRun, telemetryDiagnostic } from '../fixtures/telemetry-store.js';
+import { EventEmitter } from 'node:events';
+import { createLogger } from '../../src/logging/logger.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'web');
 
 function fakeLogger() {
   const warnings = [];
-  return {
+  const logger = {
     debug() {},
     info() {},
     warn(source, message, meta) {
@@ -22,6 +24,8 @@ function fakeLogger() {
     error() {},
     warnings
   };
+  logger.forRequest = () => ({ ...logger, http() {} });
+  return logger;
 }
 
 function fakeServiceHealth(overrides = {}) {
@@ -950,5 +954,134 @@ test('the sample timer persists at least one packet sample once running (exact d
     const totals = metricsStore.queryPacketTypeTotals({ start: 0, end: Date.now() + 1000 });
     const advertTotal = totals.find((t) => t.packetTypeBucket === 'advert')?.total ?? 0;
     assert.ok(advertTotal > 0, 'expected at least one tick to have persisted a sample');
+  });
+});
+
+test('failed bind leaves no sampler listener and the same instance can retry cleanly', async () => {
+  const occupant = createServer();
+  await new Promise(resolve => occupant.listen(0, '127.0.0.1', resolve));
+  const sampler = new EventEmitter();
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const server = new MetricsServer({ serviceHealth: fakeServiceHealth(), metricsStore: store,
+    botsConfig: [], host: '127.0.0.1', port: occupant.address().port,
+    sampleIntervalMs: 60000, maxChartBuckets: 180, logger: fakeLogger(), sampler });
+  try {
+    await assert.rejects(server.start(), /EADDRINUSE/);
+    assert.equal(sampler.listenerCount('sample'), 0);
+    await new Promise(resolve => occupant.close(resolve));
+    await server.start();
+    assert.equal(sampler.listenerCount('sample'), 1);
+    await server.stop();
+    assert.equal(sampler.listenerCount('sample'), 0);
+  } finally {
+    await server.stop();
+    if (occupant.listening) await new Promise(resolve => occupant.close(resolve));
+    store.close();
+  }
+});
+
+test('every response has native security headers and valid requests emit linked application logs at error threshold', async () => {
+  const lines = [];
+  const originalLog = console.log, originalError = console.error;
+  console.log = line => lines.push(JSON.parse(line));
+  console.error = line => lines.push(JSON.parse(line));
+  try {
+    await withServer({ logger: createLogger({ level: 'error' }) }, async baseUrl => {
+      for (const path of ['/', '/dashboard.css', '/dashboard-requests.js', '/api/metrics?password=DO-NOT-LOG',
+        '/api/metrics/history?range=bad', '/unknown']) {
+        const response = await fetch(baseUrl + path, { headers: { Host: 'untrusted.example' } });
+        await response.text();
+        const csp = response.headers.get('content-security-policy');
+        assert.match(csp, /default-src 'none'/);
+        assert.match(csp, /script-src 'self' https:\/\/cdn\.jsdelivr\.net\/npm\/chart\.js@4\.4\.4\/dist\/chart\.umd\.js/);
+        assert.match(csp, /style-src 'self'/);
+        assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
+        assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+        assert.equal(response.headers.get('x-frame-options'), 'DENY');
+        assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+      }
+      const controller = new AbortController();
+      const stream = await fetch(baseUrl + '/api/metrics/stream', { signal: controller.signal });
+      await stream.body.getReader().read();
+      controller.abort();
+    });
+  } finally { console.log = originalLog; console.error = originalError; }
+  const requestRecords = lines.filter(line => line.level === 'http');
+  assert.equal(requestRecords.length, 7);
+  for (const record of requestRecords) {
+    assert.match(record.reqInfo.requestID, /^[0-9a-f-]{36}$/);
+    assert.notEqual(record.reqInfo.hostname, 'untrusted.example');
+    const linked = lines.filter(line => line.reqInfo?.requestID === record.reqInfo.requestID);
+    assert.equal(linked[0].level, 'http');
+    if (['/', '/dashboard.css', '/dashboard-requests.js', '/api/metrics'].includes(record.reqInfo.path)
+      && linked.length > 1) assert.equal(linked[1].level, 'info');
+  }
+  assert.equal(lines.filter(line => line.message === 'dashboard request processed').length, 5);
+  assert.doesNotMatch(JSON.stringify(lines), /DO-NOT-LOG|untrusted\.example/);
+});
+
+test('stream admission rejects clients beyond its fixed bound', async () => {
+  await withServer({}, async baseUrl => {
+    const controllers = [];
+    try {
+      for (let index = 0; index < 32; index += 1) {
+        const controller = new AbortController(); controllers.push(controller);
+        const response = await fetch(baseUrl + '/api/metrics/stream', { signal: controller.signal });
+        assert.equal(response.status, 200);
+        await response.body.getReader().read();
+      }
+      const rejected = await fetch(baseUrl + '/api/metrics/stream');
+      assert.equal(rejected.status, 503);
+      assert.match((await rejected.json()).error, /client limit/);
+    } finally { for (const controller of controllers) controller.abort(); }
+  });
+});
+
+test('blocked stream retains only the newest pending snapshot while a healthy stream continues', async () => {
+  const originalWrite = ServerResponse.prototype.write;
+  const responses = [];
+  const writes = new Map();
+  let blocked = false;
+  ServerResponse.prototype.write = function (chunk, ...args) {
+    if (this.getHeader('Content-Type') === 'text/event-stream') {
+      if (!responses.includes(this)) { responses.push(this); writes.set(this, []); }
+      writes.get(this).push(String(chunk));
+      if (this === responses[0] && blocked) return false;
+    }
+    return originalWrite.call(this, chunk, ...args);
+  };
+  try {
+    await withServer({}, async (baseUrl, { sampler }) => {
+      const controllers = [new AbortController(), new AbortController()];
+      try {
+        for (const controller of controllers) {
+          const response = await fetch(baseUrl + '/api/metrics/stream', { signal: controller.signal });
+          await response.body.getReader().read();
+        }
+        for (const response of responses) writes.set(response, []);
+        blocked = true;
+        for (let count = 1; count <= 200; count += 1) sampler.emit('sample', { packetsReceived: count });
+        assert.equal(writes.get(responses[0]).length, 1);
+        assert.equal(writes.get(responses[1]).length, 200);
+        blocked = false;
+        responses[0].emit('drain');
+        assert.equal(writes.get(responses[0]).length, 2);
+        assert.match(writes.get(responses[0])[1], /"packetsReceived":200/);
+        await sampler.emit('sample', { packetsReceived: 201 });
+        assert.equal(writes.get(responses[0]).length, 3);
+      } finally { for (const controller of controllers) controller.abort(); }
+    });
+  } finally { ServerResponse.prototype.write = originalWrite; }
+});
+
+test('oversized stream snapshot is rejected without affecting ordinary metrics requests', async () => {
+  const serviceHealth = fakeServiceHealth({ extra: 'x'.repeat(256 * 1024) });
+  await withServer({ serviceHealth }, async baseUrl => {
+    const stream = await fetch(baseUrl + '/api/metrics/stream');
+    assert.equal(stream.status, 503);
+    assert.match((await stream.json()).error, /snapshot limit/);
+    const metrics = await fetch(baseUrl + '/api/metrics');
+    assert.equal(metrics.status, 200);
+    await metrics.text();
   });
 });

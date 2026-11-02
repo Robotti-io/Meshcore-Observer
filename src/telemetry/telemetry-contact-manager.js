@@ -1,5 +1,6 @@
 import { compileSchema } from '../validation/ajv.js';
 import { Constants } from '@liamcottle/meshcore.js';
+import { TELEMETRY_CONTACT_INVENTORY_MAX } from './telemetry-radio-schemas.js';
 
 const key = { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9A-F]{64}$' };
 const uint32 = { type: 'integer', minimum: 0, maximum: 0xFFFFFFFF };
@@ -27,24 +28,39 @@ const route = { type: 'object', additionalProperties: false,
     } } } } };
 const inputSchema = { $id: 'meshcore-observer/telemetry/contact-sync-input', type: 'object', additionalProperties: false,
   required: ['targetPublicKey', 'contacts', 'route'], properties: { targetPublicKey: key,
-    contacts: { type: 'array', maxItems: 1024, items: contact }, route: { anyOf: [route, { type: 'null' }] } } };
+    contacts: { type: 'array', maxItems: TELEMETRY_CONTACT_INVENTORY_MAX, items: contact }, route: { anyOf: [route, { type: 'null' }] } } };
 const validate = compileSchema(inputSchema);
 
-async function withResponseError(connection, operation) {
+async function withResponseError(connection, operation, signal) {
+  signal?.throwIfAborted();
   let responseError = null;
+  let onAbort;
   const onError = event => { responseError = event?.errCode ?? null; };
   connection.once(Constants.ResponseCodes.Err, onError);
-  try { await operation(); }
+  const cancelled = new Promise((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([Promise.resolve().then(() => {
+      signal?.throwIfAborted();
+      return operation();
+    }), cancelled]);
+    signal?.throwIfAborted();
+  }
   catch (error) {
     const failure = error instanceof Error ? error : new Error('MeshCore contact command failed');
     failure.meshcoreErrorCode = responseError;
     throw failure;
   }
-  finally { connection.off(Constants.ResponseCodes.Err, onError); }
+  finally {
+    connection.off(Constants.ResponseCodes.Err, onError);
+    signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 /** Reconcile from fresh route evidence; only a confirmed TABLE_FULL may evict a contact. */
-export async function reconcileTelemetryContact({ connection, targetPublicKey, contacts, route: inferredRoute }) {
+export async function reconcileTelemetryContact({ connection, targetPublicKey, contacts, route: inferredRoute, signal }) {
   const input = { targetPublicKey, contacts, route: inferredRoute };
   if (!validate(input)) throw new Error('Invalid telemetry contact reconciliation input');
   if (inferredRoute === null || inferredRoute.target.publicKeyHex !== targetPublicKey) return { status: 'deferred', reason: 'route-unavailable' };
@@ -66,16 +82,17 @@ export async function reconcileTelemetryContact({ connection, targetPublicKey, c
   const paddedPath = new Uint8Array(64); paddedPath.set(pathBytes);
   const upsert = () => connection.addOrUpdateContact(Buffer.from(targetPublicKey, 'hex'), 2, targetFlags,
     encodedPathLength, paddedPath, targetName, targetLastAdvert, targetLat, targetLon);
-  try { await withResponseError(connection, upsert); }
+  try { await withResponseError(connection, upsert, signal); }
   catch (error) {
+    signal?.throwIfAborted();
     // MeshCore ERR_CODE_TABLE_FULL = 3. Never delete a contact on generic
     // transport, validation, unsupported-command, or filesystem failures.
     if (current || error.meshcoreErrorCode !== 3) throw error;
     const victim = contacts.filter(item => item.publicKey !== targetPublicKey && (item.flags & 0x01) === 0)
       .sort((a, b) => a.lastMod - b.lastMod || a.publicKey.localeCompare(b.publicKey))[0];
     if (!victim) throw error;
-    await withResponseError(connection, () => connection.removeContact(Buffer.from(victim.publicKey, 'hex')));
-    await withResponseError(connection, upsert);
+    await withResponseError(connection, () => connection.removeContact(Buffer.from(victim.publicKey, 'hex')), signal);
+    await withResponseError(connection, upsert, signal);
     return { status: 'added', hopCount: inferredRoute.path.length, evicted: true };
   }
   return { status: current ? 'updated' : 'added', hopCount: inferredRoute.path.length, evicted: false };

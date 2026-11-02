@@ -66,6 +66,26 @@ test('requests one startup flood advert after connection and waits for quiet air
   });
 });
 
+test('flood commands request the bounded radio transaction and preserve failure accounting on timeout', async () => {
+  await withRig({}, async rig => {
+    let timeoutMs;
+    rig.radioManager.runCommand = (_operation, options) => {
+      timeoutMs = options.timeoutMs;
+      return new Promise((_, reject) => setTimeout(() => {
+        rig.radioManager.emit('radio.disconnected');
+        reject(new Error('radio command timed out; generation retired'));
+      }, timeoutMs));
+    };
+    rig.scheduler.start();
+    rig.radioManager.emit('radio.connected');
+    await vi.advanceTimersByTimeAsync(5005);
+    assert.equal(timeoutMs, 5000);
+    assert.equal(rig.store.getFloodAdvertState().lastSentAt, null);
+    assert.notEqual(rig.store.getFloodAdvertState().status, 'sending');
+    await rig.scheduler.stop();
+  });
+});
+
 test('resumes one persisted pending request without creating a duplicate startup job', async () => {
   let sent = 0;
   await withRig({ sendFloodAdvert: async () => { sent += 1; } }, async (rig) => {

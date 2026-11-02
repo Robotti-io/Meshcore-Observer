@@ -18,6 +18,7 @@ export class RegionDiscoveryScheduler {
   #cursor = null; #observer = null; #pausedGeneration = null;
   #anchor = null; #lastMonotonic = 0; #highWater = 0; #clockPaused = false;
   #fault = null; #unsaved = null; #unconfirmed = false;
+  #phase = 'selection';
   #brokerIds;
 
   constructor({ config, store, runId, directHeardWindowMs, radio, coordinator, logger,
@@ -59,7 +60,7 @@ export class RegionDiscoveryScheduler {
     if (this.#stopped) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
-      this.#pending = this.#pass().catch(() => this.#warn(this.#unconfirmed ? 'completion' : 'selection')).finally(() => {
+      this.#pending = this.#pass().catch(() => this.#warn(this.#phase)).finally(() => {
         this.#pending = null;
         this.#arm(this.#config.queryTickIntervalMs);
       });
@@ -67,19 +68,23 @@ export class RegionDiscoveryScheduler {
     this.#timer.unref();
   }
 
-  #warn(reason) {
-    if (this.#fault === reason) return;
-    this.#fault = reason;
-    this.#logger.warn('services.regionDiscovery',
-      reason === 'persistence'
-        ? 'Region result could not be saved. Discovery is paused while this one result is retried locally; its durable cooldown remains in place.'
-        : reason === 'completion'
-          ? 'Region request reservation has no validated completion. Discovery is paused; clean shutdown cannot be confirmed.'
-          : 'Region discovery deferred because trusted scheduling data could not be read or validated; no new RF permission was granted.',
-      { outcome: reason });
+  #warn(phase) {
+    if (this.#fault === phase) return;
+    this.#fault = phase;
+    let message;
+    if (phase === 'completion-save') {
+      message = 'Region result could not be saved. Discovery is paused while this one result is retried locally; its durable cooldown remains in place.';
+    } else if (this.#unconfirmed) {
+      message = 'Region request reservation has no validated completion. Discovery is paused; clean shutdown cannot be confirmed.';
+    } else {
+      message = 'Region discovery deferred because trusted scheduling data could not be read or validated; no new RF permission was granted.';
+    }
+    // Only fixed operation phases reach logs; exception text may contain secrets.
+    this.#logger.warn('services.regionDiscovery', message, { outcome: phase });
   }
 
   #clock() {
+    this.#phase = 'clock';
     const sample = { wall: this.#wallNow(), monotonic: this.#monotonicNow() };
     assertRegionQueryInput(regionSchedulerClockSchema, sample);
     this.#lastMonotonic = Math.max(this.#lastMonotonic, sample.monotonic);
@@ -101,6 +106,7 @@ export class RegionDiscoveryScheduler {
   }
 
   #snapshot() {
+    this.#phase = 'snapshot';
     const snapshot = this.#radio.getConnectionSnapshot();
     assertRegionQueryInput(regionSchedulerSnapshotSchema, snapshot);
     return { ...snapshot, observerPublicKey: snapshot.observerPublicKey?.toUpperCase() ?? null };
@@ -114,11 +120,13 @@ export class RegionDiscoveryScheduler {
 
   #eligible(request, snapshot, admitted) {
     if (this.#stopped) return false;
+    this.#phase = 'snapshot';
     assertRegionQueryInput(regionSchedulerSnapshotSchema, snapshot);
     if (!snapshot.ready || snapshot.generation !== admitted.generation
       || snapshot.observerPublicKey?.toUpperCase() !== admitted.observerPublicKey) return false;
     const clock = this.#clock();
     if (clock.paused) return false;
+    this.#phase = 'candidate-read';
     if (!this.#store.queryDirectHeardEligibility({ publicKeyHex: request.targetPublicKey,
       now: clock.wall, windowMs: this.#window }).eligible) return false;
     const scope = { observerPublicKey: admitted.observerPublicKey, targetPublicKey: request.targetPublicKey };
@@ -137,6 +145,7 @@ export class RegionDiscoveryScheduler {
     }
     const clock = this.#clock();
     if (clock.paused) return;
+    this.#phase = 'candidate-read';
     const page = this.#store.queryRegionPollCandidates({ observerPublicKey: this.#observer,
       now: clock.wall, windowMs: this.#window, limit: 100,
       ...(this.#cursor ? { afterPublicKey: this.#cursor } : {}) }, this.#policy);
@@ -145,11 +154,13 @@ export class RegionDiscoveryScheduler {
     if (!candidate) { this.#cursor = null; return; }
     // Advance after the selected key, not the end of the unread page.
     this.#cursor = candidate.targetPublicKey;
+    this.#phase = 'request-build';
     const request = { requestId: this.#createId(), targetPublicKey: candidate.targetPublicKey,
       operation: 'anonymous-regions', params: {} };
     const identity = { observerPublicKey: snapshot.observerPublicKey,
       targetPublicKey: request.targetPublicKey, runId: this.#runId, requestId: request.requestId };
     let reservation = null;
+    this.#phase = 'request';
     const response = await this.#coordinator.tryRequest(request, { expectedRoute: 'direct' },
       (dto, current) => this.#eligible(dto, current, snapshot), context => {
         if (context.requestId !== request.requestId || context.targetPublicKey !== identity.targetPublicKey
@@ -157,12 +168,14 @@ export class RegionDiscoveryScheduler {
         if (!this.#eligible(request, this.#snapshot(), snapshot)) return false;
         const reservedAt = this.#clock().wall;
         try {
+          this.#phase = 'reservation';
           const input = { ...identity, reservedAt, policy: this.#policy, jitterRatio: this.#ratio() };
           if (this.#store.reserveRegionPoll(input).reserved !== true) return false;
           reservation = input; this.#unconfirmed = true; return true;
         } catch { this.#warn('reservation'); return false; }
       });
     // No identity is inferred from a binary body. Validate before mapping.
+    this.#phase = 'completion-validation';
     assertRegionQueryInput(regionSchedulerResponseSchema, response);
     if (response.context && (response.context.requestId !== identity.requestId
       || response.context.targetPublicKey !== identity.targetPublicKey
@@ -173,15 +186,19 @@ export class RegionDiscoveryScheduler {
         || response.recovery !== undefined) this.#pausedGeneration = snapshot.generation;
       if (REGION_PREFLIGHT_DEFERRALS.includes(response.reason) && !reservation) {
         const observed = this.#clock();
-        if (!observed.paused) this.#store.deferRegionPoll({ ...identityWithoutRequest(identity),
-          reason: response.reason, observedAt: observed.wall,
-          nextDueAt: Math.min(Number.MAX_SAFE_INTEGER, observed.wall + this.#policy.queryRetryBaseMs) }, this.#policy);
+        if (!observed.paused) {
+          this.#phase = 'deferral-save';
+          this.#store.deferRegionPoll({ ...identityWithoutRequest(identity),
+            reason: response.reason, observedAt: observed.wall,
+            nextDueAt: Math.min(Number.MAX_SAFE_INTEGER, observed.wall + this.#policy.queryRetryBaseMs) }, this.#policy);
+        }
       }
       this.#unconfirmed = false;
       return; // An unused saved reservation is a cooldown, not RF evidence.
     }
     if (!reservation || !response.context || !['failed', 'completed'].includes(response.status)) throw new Error('Invalid region dispatch evidence');
     const completed = this.#clock();
+    this.#phase = 'completion-validation';
     const parsed = response.status === 'completed' ? parseRegionResponseBody({ body: response.body }) : null;
     if (response.status === 'completed' && (response.receivedAt === undefined || response.route !== 'direct')) throw new Error('Invalid region receipt evidence');
     const answered = parsed?.status === 'accepted';
@@ -201,12 +218,13 @@ export class RegionDiscoveryScheduler {
 
   #persist() {
     if (!this.#unsaved) return;
+    this.#phase = 'completion-save';
     try {
       const saved = this.#store.completeRegionPoll(this.#unsaved);
       if (!saved.completed) this.#logger.warn('services.regionDiscovery',
         'Region completion no longer owns its durable reservation; retained history was not replaced.', { outcome: saved.reason });
       this.#unsaved = null; this.#unconfirmed = false; this.#fault = null;
-    } catch { this.#warn('persistence'); }
+    } catch { this.#warn('completion-save'); }
   }
 }
 

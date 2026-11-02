@@ -96,37 +96,35 @@ export class MqttManager extends EventEmitter {
    * delivery metrics) can't tell "skipped" apart from "sent" otherwise. A
    * broker whose publish call fails logs a warning, is reported as
    * "failed", but never affects the others.
+   * Ordinary packet outcomes also emit `broker.publishResult` individually;
+   * bounded status/region work uses its own completion accounting.
    *
    * @returns {Promise<{brokerId: string, outcome: 'sent'|'skipped'|'failed', error?: string}[]>}
    */
   async publish(topic, payload, options) {
     if (options?.timeoutMs !== undefined && !statusOptionsValid(options)) throw new Error('Invalid observer status publish options');
-    // Each connected broker's publish() is started here, synchronously,
-    // not deferred - Promise.allSettled below just waits for whichever
-    // ones were actually started.
-    const attempts = this.#brokers.map((broker) => ({
-      broker,
-      promise: broker.isConnected() ? options?.timeoutMs !== undefined
-        ? broker.publishBounded(topic, payload, options) : broker.publish(topic, payload, options) : null
-    }));
-
-    const settled = await Promise.allSettled(attempts.filter(({ promise }) => promise).map(({ promise }) => promise));
-
-    let settledIndex = 0;
-    return attempts.map(({ broker, promise }) => {
-      if (!promise) {
-        return { brokerId: broker.id, outcome: 'skipped' };
+    const bounded = options?.timeoutMs !== undefined;
+    // Start every broker independently. Promise.all preserves configured
+    // result order; events expose each ordinary outcome as soon as it settles
+    // so a slow broker cannot delay healthy-broker health accounting.
+    const attempts = this.#brokers.map(async broker => {
+      let result;
+      if (!broker.isConnected()) {
+        result = { brokerId: broker.id, outcome: 'skipped' };
+      } else {
+        try {
+          if (bounded) await broker.publishBounded(topic, payload, options);
+          else await broker.publish(topic, payload, options);
+          result = { brokerId: broker.id, outcome: 'sent' };
+        } catch (error) {
+          const message = error?.message;
+          this.#logger.warn('services.mqtt', 'publish to broker failed', { broker: broker.id, error: message });
+          result = { brokerId: broker.id, outcome: 'failed', error: message };
+        }
       }
-      const result = settled[settledIndex];
-      settledIndex += 1;
-      if (result.status === 'rejected') {
-        this.#logger.warn('services.mqtt', 'publish to broker failed', {
-          broker: broker.id,
-          error: result.reason?.message
-        });
-        return { brokerId: broker.id, outcome: 'failed', error: result.reason?.message };
-      }
-      return { brokerId: broker.id, outcome: 'sent' };
+      if (!bounded) this.emit('broker.publishResult', result);
+      return result;
     });
+    return Promise.all(attempts);
   }
 }

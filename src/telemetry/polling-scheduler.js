@@ -336,34 +336,9 @@ export class TelemetryPollingScheduler {
       || response.context.observerPublicKey !== admitted.observerPublicKey || response.context.targetPublicKey !== selected.target
       || response.context.generation !== admitted.generation))) throw new Error('Invalid telemetry owner completion');
     const detail = response.diagnostics ?? {};
-    const completedAt = this.#wall();
     const dispatchedAt = response.dispatchedAt ?? null;
-    const diagnostic = { requestId: request.requestId, runId: this.#runId, observerPublicKey: admitted.observerPublicKey,
-      targetPublicKey: selected.target, operation: login ? 'guest-login' : variant.component === 'sensors' ? 'telemetry' : variant.component,
-      startedAt: requestStartedAt, completedAt, dispatchedAt,
-      clockAnomaly: completedAt < requestStartedAt || (dispatchedAt !== null
-        && (dispatchedAt < requestStartedAt || dispatchedAt > completedAt)),
-      phase: detail.phase ?? 'admission', status: response.status, reason: response.reason ?? null,
-      targetName: detail.targetName ?? null,
-      routeCandidatePath: detail.routeCandidatePath ?? [], routeEvidenceSource: detail.routeEvidenceSource ?? null,
-      routeHopWeights: detail.routeHopWeights ?? [],
-      responseTimeoutMs: detail.responseTimeoutMs ?? null,
-      traceOutcome: detail.traceOutcome ?? null,
-      tracePathHashes: detail.tracePathHashes ?? [], traceSnrQuarterDb: detail.traceSnrQuarterDb ?? [],
-      traceTimeoutMs: detail.traceTimeoutMs ?? null,
-      routeFailureReason: detail.routeFailureReason ?? null, routeEvidenceAt: detail.routeEvidenceAt ?? null,
-      routeSupportCount: detail.routeSupportCount ?? null,
-      inventoryContactCount: detail.inventoryContactCount ?? null, inventoryOutcome: detail.inventoryOutcome ?? null,
-      contactSyncOutcome: detail.contactSyncOutcome ?? null, targetContactOutcome: detail.targetContactOutcome ?? null,
-      dispatchMode: detail.dispatchMode ?? response.route ?? null };
-    const persistDiagnostic = () => {
-      try { this.#store.recordTelemetryRequestDiagnostic(diagnostic); }
-      catch {
-        this.#logger.error('services.telemetryPolling', 'Telemetry request diagnostics could not be persisted.', {
-          requestId: request.requestId, targetPublicKey: selected.target, outcome: 'diagnostic-persistence'
-        });
-      }
-    };
+    const diagnostic = this.#buildRequestDiagnostic({ request, admitted, response, startedAt: requestStartedAt,
+      operation: login ? 'guest-login' : variant.component === 'sensors' ? 'telemetry' : variant.component });
     // A missed trace is the path-validation signal. A guest-login timeout can
     // also mean a slow or unavailable repeater/return path, so it must not
     // poison route selection on its own.
@@ -371,7 +346,7 @@ export class TelemetryPollingScheduler {
       this.#invalidateRoute(selected.target, routeCandidate.path, this.#wall());
     else if (routeCandidate && detail.traceOutcome === 'response') this.#confirmRoute(selected.target, routeCandidate.path);
     if (response.dispatchedAt === undefined) {
-      persistDiagnostic();
+      this.#recordRequestDiagnostic(diagnostic);
       // Reservation without physical dispatch remains a conservative block
       // until restart recovery. It is never written as a fabricated outcome.
       this.#unconfirmed = false;
@@ -385,7 +360,7 @@ export class TelemetryPollingScheduler {
     }
     if (!reservation) throw new Error('Telemetry dispatch lacks durable reservation');
     if (login) {
-      persistDiagnostic();
+      this.#recordRequestDiagnostic(diagnostic);
       if (this.#unconfirmed && !this.#unsaved) throw new Error('Telemetry authentication terminal was not captured');
       return response;
     }
@@ -405,10 +380,40 @@ export class TelemetryPollingScheduler {
     diagnostic.completedAt = sample.wall;
     diagnostic.clockAnomaly = sample.wall < requestStartedAt || (dispatchedAt !== null
       && (dispatchedAt < requestStartedAt || dispatchedAt > sample.wall));
-    persistDiagnostic();
+    this.#recordRequestDiagnostic(diagnostic);
     this.#unsaved = { kind: 'data', input: { policy: this.#policy, result } };
     this.#persist();
     return response;
+  }
+
+  #buildRequestDiagnostic({ request, admitted, response, startedAt, operation }) {
+    const detail = response.diagnostics ?? {};
+    const completedAt = this.#wall();
+    const dispatchedAt = response.dispatchedAt ?? null;
+    return { requestId: request.requestId, runId: this.#runId, observerPublicKey: admitted.observerPublicKey,
+      targetPublicKey: request.targetPublicKey, operation, startedAt, completedAt, dispatchedAt,
+      clockAnomaly: completedAt < startedAt || (dispatchedAt !== null
+        && (dispatchedAt < startedAt || dispatchedAt > completedAt)),
+      phase: detail.phase ?? 'admission', status: response.status, reason: response.reason ?? null,
+      targetName: detail.targetName ?? null,
+      routeCandidatePath: detail.routeCandidatePath ?? [], routeEvidenceSource: detail.routeEvidenceSource ?? null,
+      routeHopWeights: detail.routeHopWeights ?? [], responseTimeoutMs: detail.responseTimeoutMs ?? null,
+      traceOutcome: detail.traceOutcome ?? null, tracePathHashes: detail.tracePathHashes ?? [],
+      traceSnrQuarterDb: detail.traceSnrQuarterDb ?? [], traceTimeoutMs: detail.traceTimeoutMs ?? null,
+      routeFailureReason: detail.routeFailureReason ?? null, routeEvidenceAt: detail.routeEvidenceAt ?? null,
+      routeSupportCount: detail.routeSupportCount ?? null,
+      inventoryContactCount: detail.inventoryContactCount ?? null, inventoryOutcome: detail.inventoryOutcome ?? null,
+      contactSyncOutcome: detail.contactSyncOutcome ?? null, targetContactOutcome: detail.targetContactOutcome ?? null,
+      dispatchMode: detail.dispatchMode ?? response.route ?? null };
+  }
+
+  #recordRequestDiagnostic(diagnostic) {
+    try { this.#store.recordTelemetryRequestDiagnostic(diagnostic); }
+    catch {
+      this.#logger.error('services.telemetryPolling', 'Telemetry request diagnostics could not be persisted.', {
+        requestId: diagnostic.requestId, targetPublicKey: diagnostic.targetPublicKey, outcome: 'diagnostic-persistence'
+      });
+    }
   }
   #invalidRoutePaths(target, now) {
     const paths = [];

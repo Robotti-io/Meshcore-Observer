@@ -86,13 +86,14 @@ export function createSectionState() {
   return { status: 'idle', requestId: null, lastSuccessAt: null, error: null, data: null };
 }
 
-export function beginSectionRequest(state, requestId) {
-  return { ...state, status: 'loading', requestId, error: null };
+export function beginSectionRequest(state, requestId, rangeKey = null) {
+  return { ...state, status: 'loading', requestId, requestRangeKey: rangeKey, error: null };
 }
 
 export function completeSectionRequest(state, requestId, data, timestamp) {
   if (state.requestId !== requestId) return state;
-  return { ...state, status: 'ready', lastSuccessAt: timestamp, error: null, data };
+  return { ...state, status: 'ready', lastSuccessAt: timestamp, error: null, data,
+    dataRangeKey: state.requestRangeKey ?? null };
 }
 
 export function failSectionRequest(state, requestId, error) {

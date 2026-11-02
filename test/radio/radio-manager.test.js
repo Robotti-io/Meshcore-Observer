@@ -484,6 +484,54 @@ test('stop while handshake is pending cannot emit readiness or queue a later dev
   assert.equal(ready, 0); assert.equal(queries, 0); assert.equal(manager.isConnected(), false);
 });
 
+for (const command of ['getDeviceTime', 'setDeviceTime', 'deviceQuery']) {
+  test(`connected silence during startup ${command} retires the generation before replacement`, async () => {
+    vi.useFakeTimers();
+    const first = createFakeConnection(), second = createFakeConnection();
+    const gate = deferred();
+    if (command === 'setDeviceTime') first.getDeviceTime = async () => ({ epochSecs: 1 });
+    first[command] = () => gate.promise;
+    first.close = () => {}; // A resolved close call alone is not transport evidence.
+    let opens = 0, ready = 0;
+    const manager = makeManager({ config: { radio: baseRadioConfig() }, logger: silentLogger(),
+      closeTimeoutMs: 100, openTransport: async () => ++opens === 1 ? first : second });
+    manager.on('radio.connected', () => ready++);
+    manager.start();
+    await vi.advanceTimersByTimeAsync(5000);
+    assert.equal(manager.getConnectionSnapshot().generation, null);
+    assert.equal(ready, 0);
+    assert.equal(opens, 1);
+    await vi.advanceTimersByTimeAsync(20);
+    assert.equal(opens, 1, 'replacement cannot reuse uncertain transport ownership');
+    first.emit('disconnected');
+    await vi.advanceTimersByTimeAsync(5);
+    assert.equal(opens, 2);
+    assert.equal(ready, 1);
+    assert.equal(manager.getConnectionSnapshot().generation, 2);
+    gate.resolve(command === 'getDeviceTime' ? { epochSecs: 0 } : { manufacturerModel: 'Stale' });
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(ready, 1);
+    assert.notEqual(manager.getDeviceInfo().model, 'Stale');
+  });
+}
+
+test('bounded local command rejects queued old-generation work and fails closed without close evidence', async () => {
+  vi.useFakeTimers();
+  const connection = createFakeConnection();
+  const { manager, opens } = await connectedManager([connection], { closeTimeoutMs: 20 });
+  connection.close = () => {};
+  const command = assert.rejects(manager.runCommand(() => new Promise(() => {}), { timeoutMs: 10 }),
+    { code: 'command-timeout' });
+  let laterWrites = 0;
+  const queued = assert.rejects(manager.runCommand(() => { laterWrites++; }), { code: 'command-timeout' });
+  await vi.advanceTimersByTimeAsync(30);
+  await command; await queued;
+  assert.equal(laterWrites, 0);
+  assert.equal(opens(), 1);
+  await assert.rejects(manager.stop(), { code: 'close-timeout' });
+  managers.delete(manager);
+});
+
 test('retired packet/channel/disconnect callbacks are detached and harmless even if already scheduled', async () => {
   const first = createFakeConnection(), second = createFakeConnection(); const { manager } = await connectedManager([first, second]);
   const oldPacket = first.listeners(Constants.PushCodes.LogRxData)[0];

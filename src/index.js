@@ -87,7 +87,7 @@ async function main() {
   } catch (err) {
     logger.error(
       'services.metricsUi',
-      err.code === 'OBSERVER_DATABASE_IN_USE' ? err.message
+      ['OBSERVER_DATABASE_IN_USE', 'OBSERVER_DATABASE_NEWER_SCHEMA'].includes(err.code) ? err.message
         : 'failed to open the persisted data store - Node >=22.13.0 with node:sqlite support is now a hard requirement for this observer (see README\'s Requirements section)',
       { nodeVersion: process.version, dbPath: config.metricsUi.dbPath, error: err.message }
     );
@@ -308,14 +308,12 @@ async function main() {
   runtimeEvents.attachRadio(radioManager);
   runtimeEvents.observeSnapshot(serviceHealth.snapshot());
 
-  // Fed the actual per-broker outcome of every publish attempt (see
-  // MqttManager#publish), rather than serviceHealth inferring "published"
-  // from the packet pipeline alone (docs/Code Review - 2026-09-22.md item 4:
-  // entering the pipeline is not the same as reaching a broker).
+  // Record each broker as it settles; one slow broker must not delay healthy
+  // delivery accounting. Bounded observer-status/region sends are excluded.
+  mqttManager.on('broker.publishResult', result => serviceHealth.recordPublishResults([result]));
   packetPipeline.on('packet', (packet) => {
     observerPublisher
       .publishPacket(packet)
-      .then((results) => serviceHealth.recordPublishResults(results))
       .catch((err) => {
         logger.warn('services.mqtt', 'failed to publish packet', { error: err.message });
       });
@@ -385,6 +383,8 @@ async function main() {
 
   const shutdown = createRunShutdown({ logger, runHistory, metricsStore, timeoutMs: SHUTDOWN_TIMEOUT_MS,
     teardown: async () => {
+      // Fence renewal continuations before waiting on any other service.
+      for (const stop of stopTokenRefreshLoops) stop();
       const stoppingObserverStatus = observerStatusScheduler.stop();
       regionDiscovery?.stop();
       telemetryPolling?.stop();
@@ -411,7 +411,6 @@ async function main() {
       await replyQueue.stop();
 
       clearInterval(healthLogTimer);
-      for (const stop of stopTokenRefreshLoops) stop();
       if (metricsServer) await metricsServer.stop();
 
       const deviceInfo = radioManager.getDeviceInfo();

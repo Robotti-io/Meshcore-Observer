@@ -2,7 +2,9 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { renderDashboardHtml } from './dashboard-page.js';
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { renderDashboardHtml, CHARTJS_URL } from './dashboard-page.js';
 import { PACKET_TYPE_BUCKETS } from './packet-type-buckets.js';
 import {
   parseRangeQuery,
@@ -38,6 +40,16 @@ const validateTelemetryLatestQuery = compileSchema(telemetryLatestQuerySchema);
 
 const WEB_DIR = dirname(fileURLToPath(import.meta.url));
 const TEXT_JS = 'text/javascript; charset=utf-8';
+const MAX_STREAM_CLIENTS = 32;
+const MAX_STREAM_SNAPSHOT_BYTES = 256 * 1024;
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': `default-src 'none'; script-src 'self' ${CHARTJS_URL}; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()'
+};
 
 function packetTypeTotalsFromHistory(buckets) {
   const counts = new Map();
@@ -88,6 +100,7 @@ const STATIC_ASSETS = new Map(
     { route: '/dashboard.css', file: join(WEB_DIR, 'client', 'dashboard.css'), contentType: 'text/css; charset=utf-8' },
     { route: '/dashboard.js', file: join(WEB_DIR, 'client', 'dashboard.js'), contentType: TEXT_JS },
     { route: '/dashboard-logic.js', file: join(WEB_DIR, 'client', 'dashboard-logic.js'), contentType: TEXT_JS },
+    { route: '/dashboard-requests.js', file: join(WEB_DIR, 'client', 'dashboard-requests.js'), contentType: TEXT_JS },
     { route: '/packet-type-buckets.js', file: join(WEB_DIR, 'packet-type-buckets.js'), contentType: TEXT_JS }
   ].map(({ route, file, contentType }) => [route, { body: readFileSync(file, 'utf8'), contentType }])
 );
@@ -122,7 +135,7 @@ export class MetricsServer {
   #sampler;
   #onSample;
   #server = null;
-  #sseClients = new Set();
+  #sseClients = new Map();
 
   /**
    * @param {{serviceHealth: object, metricsStore: object, botsConfig: {name: string, commands: {trigger: string}[]}[], host: string, port: number, sampleIntervalMs: number, maxChartBuckets: number, logger: object, sampler?: import('node:events').EventEmitter}} options
@@ -165,11 +178,6 @@ export class MetricsServer {
       });
     }
 
-    if (this.#sampler) {
-      this.#onSample = (snapshot) => this.#broadcastSnapshot(snapshot);
-      this.#sampler.on('sample', this.#onSample);
-    }
-
     const server = createServer((req, res) => this.#handleRequest(req, res));
     this.#server = server;
 
@@ -187,6 +195,10 @@ export class MetricsServer {
       server.once('error', onStartupError);
       server.listen(this.#port, this.#host, () => {
         server.removeListener('error', onStartupError);
+        if (this.#sampler) {
+          this.#onSample = (snapshot) => this.#broadcastSnapshot(snapshot);
+          this.#sampler.on('sample', this.#onSample);
+        }
         server.on('error', (err) => {
           this.#logger.warn('services.metricsUi', 'metrics UI server error', { error: err.message });
         });
@@ -210,8 +222,9 @@ export class MetricsServer {
       this.#onSample = null;
     }
 
-    for (const res of this.#sseClients) {
-      res.end();
+    for (const res of this.#sseClients.keys()) {
+      // A slow reader must not hold shutdown while its buffered snapshot drains.
+      res.destroy();
     }
     this.#sseClients.clear();
 
@@ -227,9 +240,18 @@ export class MetricsServer {
 
   #broadcastSnapshot(snapshot) {
     const payload = `data: ${JSON.stringify(snapshot)}\n\n`;
-    for (const res of this.#sseClients) {
+    for (const [res, state] of this.#sseClients) {
       try {
-        res.write(payload);
+        if (Buffer.byteLength(payload) > MAX_STREAM_SNAPSHOT_BYTES) {
+          this.#sseClients.delete(res);
+          res.destroy();
+        } else if (state.blocked) {
+          // Snapshots represent current state, so retain just the newest
+          // unsent snapshot rather than buffering every intermediate tick.
+          state.pending = payload;
+        } else {
+          state.blocked = !res.write(payload);
+        }
       } catch (err) {
         // A client's connection can go bad between ticks before its own
         // 'close' event fires (see #handleStream) - isolate that here so
@@ -238,6 +260,7 @@ export class MetricsServer {
         // lives independently in MetricsSampler now regardless).
         this.#logger.warn('services.metricsUi', 'failed to write to an SSE client, removing it', { error: err.message });
         this.#sseClients.delete(res);
+        res.destroy();
       }
     }
   }
@@ -256,12 +279,28 @@ export class MetricsServer {
    * covers the whole request.
    */
   #handleRequest(req, res) {
+    let requestPath = 'unrecognized';
+    try {
+      const path = new URL(req.url, 'http://localhost').pathname;
+      if (path === '/' || STATIC_ASSETS.has(path) || path === '/api/nodes') requestPath = path;
+      else if (path === '/api/metrics' || path.startsWith('/api/metrics/')) requestPath = '/api/metrics';
+    } catch { /* Invalid URLs still receive an HTTP request record. */ }
+    const requestLogger = this.#logger.forRequest({
+      requestID: randomUUID(), hostname: hostname(), path: requestPath,
+      method: typeof req.method === 'string' && req.method.length <= 32 ? req.method : 'OTHER',
+      requestTime: new Date().toISOString()
+    });
+    requestLogger.debug('services.metricsUi');
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
     try {
       this.#dispatchRequest(req, res);
+      if (res.statusCode >= 200 && res.statusCode < 400) {
+        requestLogger.debug('services.metricsUi', 'dashboard request processed', { statusCode: res.statusCode });
+      } else if (res.statusCode >= 500) {
+        requestLogger.warn('services.metricsUi', 'dashboard request unavailable', { statusCode: res.statusCode });
+      }
     } catch (err) {
-      this.#logger.warn('services.metricsUi', 'unexpected error handling a dashboard request', {
-        method: req.method,
-        url: req.url,
+      requestLogger.warn('services.metricsUi', 'unexpected error handling a dashboard request', {
         error: err.message
       });
       try {
@@ -965,13 +1004,35 @@ export class MetricsServer {
   }
 
   #handleStream(res) {
+    if (this.#sseClients.size >= MAX_STREAM_CLIENTS) {
+      this.#sendJson(res, 503, { error: 'stream client limit reached' });
+      return;
+    }
+    const initialPayload = `data: ${JSON.stringify(this.#serviceHealth.snapshot())}\n\n`;
+    if (Buffer.byteLength(initialPayload) > MAX_STREAM_SNAPSHOT_BYTES) {
+      this.#sendJson(res, 503, { error: 'stream snapshot limit exceeded' });
+      return;
+    }
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive'
     });
-    res.write(`data: ${JSON.stringify(this.#serviceHealth.snapshot())}\n\n`);
-    this.#sseClients.add(res);
+    const state = { blocked: !res.write(initialPayload), pending: null };
+    this.#sseClients.set(res, state);
+    res.on('drain', () => {
+      if (!this.#sseClients.has(res)) return;
+      state.blocked = false;
+      if (state.pending !== null) {
+        const payload = state.pending;
+        state.pending = null;
+        try { state.blocked = !res.write(payload); }
+        catch {
+          this.#sseClients.delete(res);
+          res.destroy();
+        }
+      }
+    });
     res.on('close', () => {
       this.#sseClients.delete(res);
     });
@@ -983,6 +1044,7 @@ export class MetricsServer {
     res.on('error', (err) => {
       this.#logger.warn('services.metricsUi', 'SSE client connection error, removing it', { error: err.message });
       this.#sseClients.delete(res);
+      res.destroy();
     });
   }
 

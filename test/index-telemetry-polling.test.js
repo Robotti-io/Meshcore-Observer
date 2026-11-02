@@ -1,4 +1,5 @@
 import { test, afterEach } from 'vitest';
+import { Constants } from '@liamcottle/meshcore.js';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
@@ -139,7 +140,8 @@ test('default-off actual entrypoint captures verified direct evidence and duplic
 for (const profiles of [false, true]) test(`real opt-in entrypoint stores all four components with ${profiles ? 'established' : 'unknown'} profiles and original attribution`, async () => {
   const f = environment({ profiles }), child = await launch(f); await due(child);
   let saved;
-  for (let n = 0; n < 5; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
+  // Separate mode spends one turn on trace, one on login, then four on data.
+  for (let n = 0; n < 6; n++) saved = await child.ask({ action: 'tick', ms: 10000 });
   assert.deepEqual(physical(saved).map(w => w.component), ['guest-login', 'neighbours', 'status', 'sensors', 'owner-info'],
     JSON.stringify({ writes: saved.writes, diagnostics: saved.diagnostics }));
   assert.equal(saved.auth.outcomes[0].record.status, 'completed');
@@ -167,14 +169,14 @@ for (const profiles of [false, true]) test(`real opt-in entrypoint stores all fo
 });
 for (const mode of ['admin', 'read-write', 'legacy', 'denied', 'unsupported', 'flood-ack']) test(`real entrypoint ${mode} guest response never authorizes a data query`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { mode }); await due(child);
-  const saved = await child.ask({ action: 'tick', ms: 10000 }); const later = await child.ask({ action: 'tick', ms: 20000 });
+  const saved = await child.ask({ action: 'tick', ms: 20000 }); const later = await child.ask({ action: 'tick', ms: 20000 });
   assert.equal(physical(saved).length, 1); assert.equal(physical(later).length, 1);
   assert.equal(later.auth.outcomes.length, 1); assert.equal(later.auth.outcomes[0].record.status, 'failed');
   assert.equal(later.observations.total, 0); assert.equal(later.outcomes.total, 0); await child.stop();
 });
 for (const contact of ['flood', 'out-of-radius', 'collision', 'unsupported']) test(`real entrypoint ${contact} contact preflight defers without physical auth/data`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { contact }); await due(child);
-  const saved = await child.ask({ action: 'tick', ms: 10000 });
+  const saved = await child.ask({ action: 'tick', ms: 20000 });
   assert.equal(physical(saved).length, 0); assert.equal(saved.outcomes.total, 0);
   assert.equal(saved.auth.outcomes.length, ['flood', 'out-of-radius'].includes(contact) ? 1 : 0);
   for (const { record } of saved.auth.outcomes) {
@@ -196,7 +198,7 @@ test('stale and relayed-only adverts cannot create direct eligibility or blind p
 });
 test('held data reply keeps real capture, duplicate-filtered bot replies and local signing alive; wrong tags cannot complete it', async () => {
   const f = environment({ components: onlySensors, bots: true }), child = await launch(f); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'mode', value: 'hold' });
+  await child.ask({ action: 'tick', ms: 20000 }); await child.ask({ action: 'mode', value: 'hold' });
   const waiting = await child.ask({ action: 'tick', ms: 10000 }); assert.equal(physical(waiting).length, 2);
   const group = await child.ask({ action: 'group', count: 2 }); assert.equal(group.botUsage.accepted, 1);
   const signed = await child.ask({ action: 'sign' }); assert.deepEqual(signed.localCalls, ['sign']);
@@ -208,7 +210,7 @@ test('held data reply keeps real capture, duplicate-filtered bot replies and loc
 });
 test('reporter identity change cancels a held request and cannot inherit direct evidence or guest authority', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'mode', value: 'hold' });
+  await child.ask({ action: 'tick', ms: 20000 }); await child.ask({ action: 'mode', value: 'hold' });
   await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'disconnect', identity: 'BF'.repeat(32) });
   const changed = await child.ask({ action: 'tick', ms: 20 }); assert.equal(changed.radio.observerPublicKey.toUpperCase(), 'BF'.repeat(32));
   assert.equal(changed.outcomes.outcomes[0].reason, 'disconnected'); assert.equal(changed.observations.total, 0);
@@ -217,7 +219,7 @@ test('reporter identity change cancels a held request and cannot inherit direct 
 });
 for (const mode of ['unsupported', 'malformed', 'empty']) test(`owned ${mode} binary response preserves explicit outcome or empty observation without invented readings`, async () => {
   const f = environment({ components: { status: false, sensors: false, neighbours: true } }), child = await launch(f); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'mode', value: mode });
+  await child.ask({ action: 'tick', ms: 20000 }); await child.ask({ action: 'mode', value: mode });
   const saved = await child.ask({ action: 'tick', ms: 10000 }); assert.equal(saved.outcomes.total, 1);
   assert.equal(saved.outcomes.outcomes[0].status, mode === 'empty' ? 'answered' : mode === 'unsupported' ? 'unsupported' : 'failed');
   assert.equal(saved.observations.total, mode === 'empty' ? 1 : 0);
@@ -225,12 +227,12 @@ for (const mode of ['unsupported', 'malformed', 'empty']) test(`owned ${mode} bi
 });
 for (const phase of ['before-reservation', 'after-reservation', 'after-send', 'before-completion', 'after-completion']) test(`real crash ${phase} retains original reservation/outcome and restart creates no replay or fabricated completion`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { phase }); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); child.process.send({ action: 'tick', ms: 10000 });
+  await child.ask({ action: 'tick', ms: 20000 }); child.process.send({ action: 'tick', ms: 10000 });
   const ended = await child.exited; assert.equal(ended.code, 17, ended.output);
   const before = read(f, store => ({ state: store.getTelemetryPollState({ observerPublicKey: OBSERVER, targetPublicKey: f.targetPublicKey,
     variant: { component: 'sensors', params: { permissionMask: 0 } } }), outcomes: store.queryTelemetryOutcomes(range), observations: store.queryTelemetryObservations(range) }));
   assert.equal(before.outcomes.total, phase === 'after-completion' ? 1 : 0);
-  const next = await launch(f, { suffix: 'restart', startAt: START + 30000 });
+  const next = await launch(f, { suffix: 'restart', startAt: START + 40000 });
   const recovered = await next.ask({ action: 'tick', ms: 10000 });
   assert.equal(recovered.runs.runs.find(r => r.runId !== recovered.runId).state, 'unclean');
   assert.equal(recovered.outcomes.total, before.outcomes.total); assert.deepEqual(recovered.observations, before.observations);
@@ -239,18 +241,21 @@ for (const phase of ['before-reservation', 'after-reservation', 'after-send', 'b
 });
 for (const ending of ['clean', 'abrupt', 'backup']) test(`real ${ending} restart preserves collected data/deadlines/public replay evidence without restoring session authority`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); const before = await child.ask({ action: 'tick', ms: 10000 });
+  await child.ask({ action: 'tick', ms: 20000 }); const before = await child.ask({ action: 'tick', ms: 10000 });
   if (ending === 'abrupt') { child.process.kill('SIGKILL'); await child.exited; } else await child.stop();
   if (ending === 'backup') { const path = f.env.PACKETCAPTURE_METRICS_UI_DB_PATH, backup = join(f.dir, 'backup.sqlite3');
     assert.equal(existsSync(path + '-wal'), false); copyFileSync(path, backup); f.env.PACKETCAPTURE_METRICS_UI_DB_PATH = backup; }
-  const next = await launch(f, { suffix: 'restart', startAt: START + 30000 });
+  const next = await launch(f, { suffix: 'restart', startAt: START + 40000 });
   const after = await next.ask({ action: 'tick', ms: 10000 });
   assert.equal(after.instanceId, before.instanceId); assert.notEqual(after.runId, before.runId);
   assert.deepEqual(after.outcomes, before.outcomes); assert.deepEqual(after.observations, before.observations);
   assert.deepEqual(after.states, before.states); assert.equal(physical(after).length, 0);
   // Advance just past the saved component deadline with passive evidence still fresh.
   const dueAt = before.states.find(s => s?.variant.component === 'sensors').nextDueAt;
-  const authentication = await next.ask({ action: 'jump', ms: dueAt - after.now + 1000 });
+  const trace = await next.ask({ action: 'jump', ms: dueAt - after.now + 1000 });
+  assert.equal(physical(trace).length, 0);
+  assert.equal(trace.writes.filter(write => write.code === Constants.CommandCodes.SendTracePath).length, 1);
+  const authentication = await next.ask({ action: 'tick', ms: 10000 });
   assert.deepEqual(physical(authentication).map(w => w.component), ['guest-login']);
   // Synthetic old server time is rejected, proving durable replay protection.
   assert.equal(authentication.auth.outcomes.find(o => o.runId === authentication.runId).record.status, 'failed'); assert.equal(authentication.outcomes.total, 1);
@@ -258,7 +263,7 @@ for (const ending of ['clean', 'abrupt', 'backup']) test(`real ${ending} restart
 });
 test('failed terminal save pauses all collection, local retry retains original times, and shutdown saves before clean store close', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { writeFault: true }); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); const failed = await child.ask({ action: 'tick', ms: 10000 });
+  await child.ask({ action: 'tick', ms: 20000 }); const failed = await child.ask({ action: 'tick', ms: 10000 });
   assert.equal(failed.outcomes.total, 0); const paused = await child.ask({ action: 'tick', ms: 20000 }); assert.equal(physical(paused).length, 2);
   await child.ask({ action: 'mode', writeFault: false }); const saved = await child.ask({ action: 'tick', ms: 1000 });
   assert.equal(saved.outcomes.outcomes[0].completedAt, failed.now); assert.equal(saved.outcomes.outcomes[0].receivedAt, failed.now);
@@ -267,7 +272,7 @@ test('failed terminal save pauses all collection, local retry retains original t
 });
 test('persistent terminal save failure refuses clean run completion and leaves a recoverable reservation', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { writeFault: true }); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); const failed = await child.ask({ action: 'tick', ms: 10000 });
+  await child.ask({ action: 'tick', ms: 20000 }); const failed = await child.ask({ action: 'tick', ms: 10000 });
   child.process.send({ action: 'stop' }); const ended = await child.exited;
   assert.equal(ended.code, 1); assert.match(ended.output, /Telemetry terminal result was not persisted; clean shutdown cannot be confirmed/);
   assert.doesNotMatch(ended.output, /PRIVATE-ONLY7|meshcore-observer stopped/);
@@ -289,11 +294,15 @@ for (const kind of ['bad-setting', 'unsafe-secret', 'unknown-policy', 'missing-f
 
 for (const phase of ['before-reservation', 'after-reservation', 'after-send', 'before-completion', 'after-completion']) test(`real guest-login crash ${phase} never restores authority or fabricates an auth terminal`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { phase, crashComponent: 'guest-login' }); await due(child);
-  child.process.send({ action: 'tick', ms: 10000 }); const ended = await child.exited; assert.equal(ended.code, 17, ended.output);
+  child.process.send({ action: 'tick', ms: 20000 }); const ended = await child.exited; assert.equal(ended.code, 17, ended.output);
   const before = read(f, store => store.queryTelemetryAuthenticationOutcomes(range));
   assert.equal(before.outcomes.length, phase === 'after-completion' ? 1 : 0);
   const next = await launch(f, { suffix: 'restart', startAt: START + 30000 });
-  const recovered = await next.ask({ action: 'tick', ms: 10000 });
+  let recovered = await next.ask({ action: 'tick', ms: 10000 });
+  if (phase === 'before-reservation') {
+    assert.equal(physical(recovered).length, 0, 'a new trace is not restored guest authority');
+    recovered = await next.ask({ action: 'tick', ms: 10000 });
+  }
   assert.equal(recovered.outcomes.total, 0); assert.equal(recovered.observations.total, 0);
   assert.equal(recovered.runs.runs.find(r => r.runId !== recovered.runId).state, 'unclean');
   if (phase !== 'before-reservation') { assert.deepEqual(recovered.auth, before); assert.equal(physical(recovered).length, 0); }
@@ -301,7 +310,7 @@ for (const phase of ['before-reservation', 'after-reservation', 'after-send', 'b
 });
 for (const component of ['guest-login', 'sensors']) for (const mode of ['ack-wait', 'hold']) test(`real shutdown during ${component} ${mode} commits a stopped terminal before closing`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { mode: component === 'guest-login' ? mode : 'success' }); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 });
+  await child.ask({ action: 'tick', ms: 20000 });
   if (component === 'sensors') { await child.ask({ action: 'mode', value: mode }); await child.ask({ action: 'tick', ms: 10000 }); }
   await child.stop();
   read(f, store => {
@@ -312,7 +321,7 @@ for (const component of ['guest-login', 'sensors']) for (const mode of ['ack-wai
 });
 for (const recover of [true, false]) test(`real auth persistence failure ${recover ? 'retries locally without granting a session' : 'refuses clean shutdown'}`, async () => {
   const f = environment({ components: onlySensors }), child = await launch(f, { writeFault: true, faultComponent: 'guest-login' }); await due(child);
-  const failed = await child.ask({ action: 'tick', ms: 10000 }); assert.equal(failed.auth.outcomes.length, 0);
+  const failed = await child.ask({ action: 'tick', ms: 20000 }); assert.equal(failed.auth.outcomes.length, 0);
   const paused = await child.ask({ action: 'tick', ms: 20000 }); assert.equal(physical(paused).length, 1); assert.equal(paused.outcomes.total, 0);
   if (recover) {
     await child.ask({ action: 'mode', writeFault: false }); const saved = await child.ask({ action: 'tick', ms: 1000 });
@@ -334,7 +343,7 @@ test('real sustained busy-air receptions defer background work without losing ca
 });
 test('real unreachable data response consumes one attempt then durable backoff prevents rapid retries', async () => {
   const f = environment({ components: onlySensors }), child = await launch(f); await due(child);
-  await child.ask({ action: 'tick', ms: 10000 }); await child.ask({ action: 'mode', value: 'hold' });
+  await child.ask({ action: 'tick', ms: 20000 }); await child.ask({ action: 'mode', value: 'hold' });
   await child.ask({ action: 'tick', ms: 10000 }); const timedOut = await child.ask({ action: 'tick', ms: 2000 });
   assert.equal(timedOut.outcomes.outcomes[0].reason, 'response-timeout'); assert.equal(timedOut.observations.total, 0);
   const later = await child.ask({ action: 'tick', ms: 60000 }); assert.equal(physical(later).length, 2);

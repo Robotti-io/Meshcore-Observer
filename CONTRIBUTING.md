@@ -33,7 +33,7 @@ npm run test:ci
 
 `npm run test:ci` runs the suite with the repository's coverage thresholds.
 GitHub Actions runs lint separately and runs the coverage suite on Windows and
-Ubuntu with Node 22.x and 24.x for pull requests targeting `main`.
+Ubuntu with Node 22.x and 24.x for pushes/PRs on `main` and `release-*`.
 
 Add or update focused tests for behavior changes. Keep radio, broker, and
 filesystem interactions behind the existing seams; automated tests should not

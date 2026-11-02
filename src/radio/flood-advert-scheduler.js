@@ -1,5 +1,6 @@
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const HOUR_MS = 60 * 60 * 1000;
+const COMMAND_TIMEOUT_MS = 5000;
 
 /**
  * Sends the Companion's own flood advert once per process start and then
@@ -99,7 +100,7 @@ export class FloodAdvertScheduler {
       const attempt = this.#airtimeCoordinator.tryRunWhenQuiet(async () => {
         if (!this.#running || !this.#connected || !this.#store.startFloodAdvertAttempt(this.#now())) return;
         try {
-          await this.#radioManager.runCommand((connection) => connection.sendFloodAdvert());
+          await this.#radioManager.runCommand((connection) => connection.sendFloodAdvert(), { timeoutMs: COMMAND_TIMEOUT_MS });
           this.#store.resolveFloodAdvertAttempt({ resolvedAt: this.#now(), intervalMs: this.#intervalMs, sent: true });
           this.#logger.info('services.floodAdvert', 'flood advert accepted by Companion');
         } catch (err) {

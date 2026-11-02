@@ -97,7 +97,9 @@ export class ChannelBot {
   #replyQueue;
   #now;
   #onRadioConnected = null;
+  #onRadioDisconnected = null;
   #onRadioPacket = null;
+  #setupEpoch = 0;
   #replySuppression;
   #scopeCommandTimeoutMs;
 
@@ -191,12 +193,17 @@ export class ChannelBot {
     }
 
     this.#onRadioConnected = () => {
-      this.#setup().catch((err) => {
+      const epoch = ++this.#setupEpoch;
+      this.#setup(epoch).catch((err) => {
         this.#logger.warn('bots.channelBot', 'unexpected error during channel setup', {
           bot: this.#name,
           error: err.message
         });
       });
+    };
+    this.#onRadioDisconnected = () => {
+      this.#setupEpoch += 1;
+      this.#ready = false;
     };
     this.#onRadioPacket = (rawPush) => {
       this.#handleRawPacket(rawPush).catch((err) => {
@@ -207,6 +214,7 @@ export class ChannelBot {
       });
     };
     this.#radioManager.on('radio.connected', this.#onRadioConnected);
+    this.#radioManager.on('radio.disconnected', this.#onRadioDisconnected);
     this.#radioManager.on('radio.packet', this.#onRadioPacket);
   }
 
@@ -220,9 +228,14 @@ export class ChannelBot {
    * call more than once.
    */
   stop() {
+    this.#setupEpoch += 1;
     if (this.#onRadioConnected) {
       this.#radioManager.off('radio.connected', this.#onRadioConnected);
       this.#onRadioConnected = null;
+    }
+    if (this.#onRadioDisconnected) {
+      this.#radioManager.off('radio.disconnected', this.#onRadioDisconnected);
+      this.#onRadioDisconnected = null;
     }
     if (this.#onRadioPacket) {
       this.#radioManager.off('radio.packet', this.#onRadioPacket);
@@ -250,7 +263,7 @@ export class ChannelBot {
   }
 
   /** Applies this bot's tested handler matcher to one persisted reply candidate. */
-  isSatisfactoryResponse({ item, responseText }) {
+  isSatisfactoryResponse({ item, responseText, responseSender }) {
     if (item.botName !== this.#name || item.channel !== this.#channelName) return false;
     const command = this.#commands.get(item.trigger);
     if (command?.suppressIfAnswered !== true) return false;
@@ -259,6 +272,7 @@ export class ChannelBot {
       command,
       item,
       responseText,
+      responseSender,
       maxBytes: this.#maxMessageBytes
     }) === true;
   }
@@ -277,13 +291,22 @@ export class ChannelBot {
     return expired.length;
   }
 
-  async #setup() {
+  async #setup(epoch) {
     this.#ready = false;
+    const snapshot = this.#radioManager.getConnectionSnapshot?.();
     const result = await ensureChannel({
       runCommand: (fn) => this.#radioManager.runCommand(fn),
       channelName: this.#channelName,
       logger: this.#logger
     });
+
+    // Old setup can finish after stop, disconnect, or a newer connected
+    // event. Only the current lifecycle and radio generation may be ready.
+    if (epoch !== this.#setupEpoch) return;
+    if (snapshot) {
+      const current = this.#radioManager.getConnectionSnapshot();
+      if (!current.ready || current.generation !== snapshot.generation) return;
+    }
 
     if (!result) {
       this.#logger.warn('bots.channelBot', 'replies disabled: no channel available', {

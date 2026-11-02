@@ -135,7 +135,7 @@ async function idle(f) {
   let signal; await f.radio.runCommand((_, context) => { signal = context.signal; });
   assert.equal(getEventListeners(signal, 'abort').length, 0, 'owned cancellation listeners removed');
   assert.equal(f.radio.listenerCount('radio.connected'), f.bot ? 2 : 0);
-  assert.equal(f.radio.listenerCount('radio.disconnected'), f.scheduler ? 1 : 0);
+  assert.equal(f.radio.listenerCount('radio.disconnected'), (f.scheduler ? 1 : 0) + (f.bot ? 1 : 0));
   assert.equal(vi.getTimerCount(), f.scheduler ? 1 : 0);
 }
 afterEach(async () => {

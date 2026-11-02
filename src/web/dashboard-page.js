@@ -1,5 +1,5 @@
 const CHARTJS_VERSION = '4.4.4';
-const CHARTJS_URL = `https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.js`;
+export const CHARTJS_URL = `https://cdn.jsdelivr.net/npm/chart.js@${CHARTJS_VERSION}/dist/chart.umd.js`;
 // Pinned to the exact bytes of dist/chart.umd.js for that version (verified
 // against jsdelivr's own published hash before pinning). Deliberately NOT
 // chart.umd.min.js - jsdelivr generates that minified file on the fly per

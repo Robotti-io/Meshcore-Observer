@@ -65,7 +65,7 @@ async function rig({ kind = 'mock', policy = config(), budget = false, ...option
     hasForegroundWork: () => foreground.value, now: () => clock.value, wallNow: () => 100000 + clock.value,
     ackTimeoutMs: 1000, responseTimeoutMaxMs: 2000, minIntervalMs: 10000, maxPerMinute: 6,
     uniquenessBytes: () => [1, 2, 3, 4],
-    budget: budget === true ? new RemoteRequestBudget({ minIntervalMs: 10000, maxPerMinute: 6, now: () => clock.value - 10000 })
+    budget: budget === true ? new RemoteRequestBudget({ minIntervalMs: options.minIntervalMs ?? 10000, maxPerMinute: 6, now: () => clock.value - 10000 })
       : budget || { canAttempt: () => true, recordAttempt: () => true }, ...options });
   let highWater = null;
   const hooks = { isEligible: vi.fn(() => true), reserve: vi.fn(() => true), getReplayHighWater: () => highWater,
@@ -97,7 +97,12 @@ async function preflight(f, contacts = [contact()]) {
 }
 async function authenticated(f, response = login()) {
   const result = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
-  await preflight(f); assert.equal(f.writes.at(-1).bytes[0], 26);
+  await preflight(f);
+  if (f.writes.at(-1).bytes[0] === Constants.CommandCodes.SendTracePath) {
+    await f.tick(10000);
+    await preflight(f);
+  }
+  assert.equal(f.writes.at(-1).bytes[0], 26);
   await frame(f, ack()); await frame(f, response); return result;
 }
 async function data(f, operation = 'status', tag = 42) {
@@ -285,6 +290,41 @@ for (const kind of ['mock', 'serial', 'tcp']) test(`${kind}: two-byte routed tra
   clean(f);
 });
 
+test('silent contact mutation times out, retires the generation and ignores its late completion', async () => {
+  const f = await rig();
+  let finishAdd;
+  f.current().addOrUpdateContact = () => new Promise(resolve => { finishAdd = resolve; });
+  f.hooks.getContactRoute = () => ({ ...telemetryRoute(), evidenceSource: 'verified-advert' });
+  const old = f.current();
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  assert.equal(typeof finishAdd, 'function');
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  await f.tick(f.policy.preflightTimeoutMs);
+  const result = await pending;
+  assert.equal(result.reason, 'preflight-timeout');
+  assert.equal(result.recovery, 'reset');
+  finishAdd(); await flush();
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  assert.equal(old.listenerCount('rx'), 0);
+  assert.equal(old.listenerCount(Constants.ResponseCodes.Err), 0);
+});
+
+for (const count of [350, 351, 1024]) test(`complete ${count}-contact inventory remains valid through owner completion`, async () => {
+  const f = await rig();
+  f.traceMode = 'hold-ack';
+  const contacts = [contact(), ...Array.from({ length: count - 1 }, (_, index) => {
+    const key = Buffer.alloc(32, 0xEF); key.writeUInt32LE(index + 1);
+    return contact({ key: key.toString('hex').toUpperCase() });
+  })];
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f, contacts);
+  await frame(f, [1, 1]);
+  const result = await pending;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.diagnostics.inventoryContactCount, count);
+});
+
 for (const operation of ['status', 'telemetry', 'neighbours']) {
   for (const { hops, estimate, ceiling, expected } of [
     { hops: 0, estimate: 0, ceiling: 45000, expected: 4000 },
@@ -461,13 +501,103 @@ for (const broken of ['silent inventory', 'silent ACK', 'silent proof', 'flood A
   assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /PRIVATE-ONLY7/); clean(f);
 });
 
-test('guest and data use one shared physical budget; local preflight does not consume it', async () => {
+test('trace, guest and data use one shared physical budget; local inventory reads do not consume it', async () => {
   const f = await rig({ budget: true }); await f.tick(10000);
   assert.equal((await authenticated(f)).status, 'completed');
   const count = f.writes.length;
   assert.equal((await f.coordinator.tryTelemetryRequest(request(), f.policy, f.hooks)).reason, 'rate-limited'); assert.equal(f.writes.length, count);
   await f.tick(10000); assert.equal((await data(f)).status, 'completed');
   assert.equal(f.writes.filter(write => [26, 50].includes(write.bytes[0])).length, 2);
+});
+
+test('separate-request trace is charged even when the companion rejects it', async () => {
+  let charges = 0;
+  const f = await rig({ policy: config({ exchangeMaxRequests: 1 }),
+    budget: { canAttempt: () => charges === 0, recordAttempt: () => { charges += 1; return true; } } });
+  f.traceMode = 'hold-ack';
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f); await frame(f, [1, 1]);
+  assert.equal((await pending).reason, 'command-error');
+  assert.equal(charges, 1);
+  assert.equal(f.writes.filter(write => write.bytes[0] === Constants.CommandCodes.SendTracePath).length, 1);
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+});
+
+test('separate login waits outside the queue and refreshes inventory after a minute of RF pacing', async () => {
+  const f = await rig({ budget: true, minIntervalMs: 60000, policy: config({ exchangeMaxRequests: 1 }) });
+  await f.tick(60000);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  assert.equal(f.writes.at(-1).bytes[0], Constants.CommandCodes.SendTracePath);
+  assert.equal(await f.radio.runCommand(() => 'foreground command completed'), 'foreground command completed');
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  await f.tick(60000);
+  await preflight(f);
+  assert.equal(f.writes.at(-1).bytes[0], 26);
+  await frame(f, ack()); await frame(f, login());
+  assert.equal((await pending).status, 'completed');
+  const rf = f.writes.filter(write => [Constants.CommandCodes.SendTracePath, 26].includes(write.bytes[0]));
+  assert.equal(rf.length, 2);
+  assert.ok(rf[1].at - rf[0].at >= 60000);
+  assert.equal(f.writes.filter(write => write.bytes[0] === 4).length, 2);
+});
+
+test('changed route after separate-mode pacing refuses login without tracing or replaying again', async () => {
+  const f = await rig({ budget: true, policy: config({ exchangeMaxRequests: 1 }) });
+  let path = [];
+  f.hooks.getContactRoute = () => telemetryRoute(target, path);
+  await f.tick(10000);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  let terminal;
+  pending.then(result => { terminal = result; });
+  await preflight(f);
+  path = ['7702'];
+  await f.tick(10000); await preflight(f);
+  await flush();
+  assert.ok(terminal, JSON.stringify({ writes: f.writes, records: f.records, logs: f.logger.warn.mock.calls }));
+  assert.equal(terminal.reason, 'contacts-changed');
+  assert.equal(f.writes.filter(write => write.bytes[0] === Constants.CommandCodes.SendTracePath).length, 1);
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+});
+
+test('stopping a paced trace continuation cancels its timer and never dispatches login', async () => {
+  const f = await rig({ budget: true, policy: config({ exchangeMaxRequests: 1 }) });
+  await f.tick(10000);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  await f.coordinator.stop();
+  assert.equal((await pending).reason, 'stopped');
+  await f.tick(60000);
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  assert.equal(vi.getTimerCount(), 0);
+});
+
+test('foreground arrival cancels paced login before any dependent RF write', async () => {
+  const f = await rig({ budget: true, policy: config({ exchangeMaxRequests: 1 }) });
+  await f.tick(10000);
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f);
+  f.foreground.value = true;
+  await f.tick(100);
+  assert.equal((await pending).reason, 'foreground');
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
+  assert.equal(f.records.length, 1);
+  assert.equal(f.records[0].reason, 'trace-login-not-dispatched');
+});
+
+test('a trace write that never settles cannot retain the command lease past its ACK deadline', async () => {
+  const f = await rig(); f.traceMode = 'hold-ack';
+  const originalWrite = f.current().sendToRadioFrame;
+  f.current().sendToRadioFrame = async bytes => {
+    await originalWrite(bytes);
+    if (bytes[0] === Constants.CommandCodes.SendTracePath) await new Promise(() => {});
+  };
+  const pending = f.coordinator.tryGuestLogin(loginRequest(), f.policy, f.hooks);
+  await preflight(f); await f.tick(1000);
+  const result = await pending;
+  assert.equal(result.reason, 'ack-timeout');
+  assert.equal(result.recovery, 'reset');
+  assert.equal(f.writes.some(write => write.bytes[0] === 26), false);
 });
 
 test('changed contact route and known contact mutation deny data and invalidate guest reuse', async () => {
@@ -498,8 +628,8 @@ for (const kind of ['serial', 'tcp']) test(`${kind}: continuous region/telemetry
     await f.tick(10000); f.coordinator.noteBackgroundDemand({ source: 'regions' });
     assert.equal((await data(f, 'status', 2000 + n)).status, 'completed');
   }
-  const physical = f.writes.filter(write => [26, 50, 57].includes(write.bytes[0]));
-  assert.deepEqual(physical.map(write => write.bytes[0]), [26, ...Array.from({ length: 10 }, () => [57, 50]).flat()]);
+  const physical = f.writes.filter(write => [36, 26, 50, 57].includes(write.bytes[0]));
+  assert.deepEqual(physical.map(write => write.bytes[0]), [36, 26, ...Array.from({ length: 10 }, () => [57, 50]).flat()]);
   for (let n = 1; n < physical.length; n++) assert.ok(physical[n].at - physical[n - 1].at >= 10000);
   f.foreground.value = true; await f.tick(10000);
   assert.equal((await f.coordinator.tryTelemetryRequest(request(), f.policy, f.hooks)).reason, 'foreground');

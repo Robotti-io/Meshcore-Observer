@@ -2,6 +2,7 @@ import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { ensureChannel } from '../../src/bots/channel-setup.js';
 import { deriveHashtagChannelKey } from '../../src/bots/channel-key.js';
+import { CommandQueue } from '../../src/radio/command-queue.js';
 
 function silentLogger() {
   const calls = { info: [], warn: [] };
@@ -17,6 +18,78 @@ function silentLogger() {
 function runCommandOver(connection) {
   return (fn) => fn(connection);
 }
+
+test('channel enumeration completing after generation cancellation cannot create a slot', async () => {
+  const controller = new AbortController();
+  let finishEnumeration;
+  let writes = 0;
+  const connection = {
+    getChannels: () => new Promise(resolve => { finishEnumeration = resolve; }),
+    setChannel: async () => { writes += 1; }
+  };
+  const pending = ensureChannel({ channelName: '#cancelled', logger: silentLogger(),
+    runCommand: operation => operation(connection, { signal: controller.signal }) });
+  controller.abort(new Error('generation retired'));
+  finishEnumeration([{ channelIdx: 0, name: '', secret: Buffer.alloc(16) }]);
+  assert.equal(await pending, null);
+  assert.equal(writes, 0);
+});
+
+function sharedChannelDevice({ rejectChannel = null } = {}) {
+  const slots = [0, 1].map(channelIdx => ({ channelIdx, name: '', secret: Buffer.alloc(16) }));
+  const writes = [];
+  const queue = new CommandQueue();
+  const connection = {
+    getChannels: async () => slots.map(slot => ({ ...slot })),
+    setChannel: async (channelIdx, name, secret) => {
+      if (name === rejectChannel) throw new Error('device rejected channel creation');
+      writes.push({ channelIdx, name });
+      slots[channelIdx] = { channelIdx, name, secret: Buffer.from(secret) };
+    }
+  };
+  return { slots, writes, runCommand: fn => queue.run(() => fn(connection)) };
+}
+
+test('concurrent missing channels allocate distinct slots on the shared command queue', async () => {
+  const device = sharedChannelDevice();
+  const logger = silentLogger();
+  const [first, second] = await Promise.all([
+    ensureChannel({ runCommand: device.runCommand, channelName: '#one', logger }),
+    ensureChannel({ runCommand: device.runCommand, channelName: '#two', logger })
+  ]);
+
+  assert.equal(first.channelIdx, 0);
+  assert.equal(second.channelIdx, 1);
+  assert.deepEqual(device.slots.map(slot => slot.name), ['#one', '#two']);
+  assert.deepEqual(first.secret, device.slots[0].secret);
+  assert.deepEqual(second.secret, device.slots[1].secret);
+});
+
+test('concurrent setup of the same channel reuses the first created slot', async () => {
+  const device = sharedChannelDevice();
+  const logger = silentLogger();
+  const [first, second] = await Promise.all([
+    ensureChannel({ runCommand: device.runCommand, channelName: '#echo', logger }),
+    ensureChannel({ runCommand: device.runCommand, channelName: '#ECHO', logger })
+  ]);
+
+  assert.deepEqual(second, first);
+  assert.deepEqual(device.writes, [{ channelIdx: 0, name: '#echo' }]);
+});
+
+test('failed channel creation does not block another bot or consume its slot', async () => {
+  const device = sharedChannelDevice({ rejectChannel: '#one' });
+  const logger = silentLogger();
+  const [first, second] = await Promise.all([
+    ensureChannel({ runCommand: device.runCommand, channelName: '#one', logger }),
+    ensureChannel({ runCommand: device.runCommand, channelName: '#two', logger })
+  ]);
+
+  assert.equal(first, null);
+  assert.equal(second.channelIdx, 0);
+  assert.equal(device.slots[0].name, '#two');
+  assert.equal(logger.calls.warn[0].message, 'failed to create channel');
+});
 
 test('finds an existing channel by case-insensitive name match and reuses its index/secret', async () => {
   const existingSecret = Buffer.alloc(16, 0x11);

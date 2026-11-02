@@ -125,6 +125,7 @@ test('disconnected/not-ready/null or invalid full reporter cannot select targets
   f.snapshot = { generation: null, ready: true, observerPublicKey: null }; await f.tick(); assert.equal(f.calls.length, 0);
   f.snapshot = { generation: 1, ready: true, observerPublicKey: 'bad' }; await f.tick(); await f.tick();
   assert.equal(f.calls.length, 0); assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'snapshot' });
 });
 test('legacy, relayed, future, CHAT and expiry-at-equality inventory cannot qualify', async () => {
   const f = await fixture(); f.clock.wall = 100 * HOUR;
@@ -229,14 +230,30 @@ test('selection and non-RF deferral storage faults are bounded and never grant p
   const f = await fixture(); const query = f.store.queryRegionPollCandidates.bind(f.store);
   f.store.queryRegionPollCandidates = () => { throw Error('secret'); }; await f.launch(); await f.tick();
   assert.equal(f.sent, 0); assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'candidate-read' });
   f.store.queryRegionPollCandidates = query; f.preflight = 'contact-missing';
   f.store.deferRegionPoll = () => { throw Error('secret'); }; await f.tick(); await f.tick();
   assert.equal(f.sent, 0); assert.equal(outcomes(f.store).total, 0);
+  assert.deepEqual(f.logger.warn.mock.calls.map(([, , meta]) => meta.outcome), ['candidate-read', 'deferral-save']);
   assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /secret/);
 });
 test('clock source errors before scheduling cannot initiate a query or create state', async () => {
   const f = await fixture(); f.clock.monotonic = NaN; await f.launch(); await f.tick();
   assert.equal(f.calls.length, 0); assert.equal(outcomes(f.store).total, 0);
+  assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'clock' });
+});
+
+test('failed clock evidence is classified without exposing exception text or repeating warnings', async () => {
+  const f = await fixture();
+  f.store.getRegionPollHighWater = () => { throw Error('private clock database details'); };
+  await f.launch(); await f.tick(); await f.tick();
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.sent, 0);
+  assert.equal(outcomes(f.store).total, 0);
+  assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'clock' });
+  assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /private clock database details/);
 });
 test('rollback and frozen wall pause against monotonic progression until actual clock agreement', async () => {
   const f = await fixture(); f.scheduler.start(); f.clock.monotonic += 10000;
@@ -257,6 +274,7 @@ test('persistence failure holds one original result, blocks RF, retries locally 
   const f = await fixture(); const complete = f.store.completeRegionPoll.bind(f.store);
   f.store.completeRegionPoll = () => { throw Error('private body or credentials'); }; await f.launch(); await f.tick(); await f.tick();
   assert.equal(f.sent, 1); assert.equal(outcomes(f.store).total, 0); assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'completion-save' });
   const state = f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: TARGET });
   assert.equal(state.reason, 'reserved');
   f.store.completeRegionPoll = complete; await f.tick(); assert.equal(outcomes(f.store).total, 1); assert.equal(f.sent, 1);
@@ -297,6 +315,9 @@ test('untrusted completion fields after a reservation cannot be saved or silentl
   const f = await fixture(); f.beforeCompletion = response => { response.context.targetPublicKey = 'FF'.repeat(32); };
   await f.launch(); f.scheduler.stop(); await assert.rejects(f.scheduler.drain(), /not persisted/);
   assert.equal(outcomes(f.store).total, 0);
+  assert.equal(f.logger.warn.mock.calls.length, 1);
+  assert.deepEqual(f.logger.warn.mock.calls[0][2], { outcome: 'completion-validation' });
+  assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /Invalid region completion ownership/);
 });
 test('restart, shared pruning, discovery disabled and reporter change preserve saved cooldowns without RF replay', async () => {
   const f = await fixture(); await f.launch(); const saved = f.store.getRegionPollState({ observerPublicKey: OBSERVER, targetPublicKey: TARGET });

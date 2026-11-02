@@ -17,7 +17,7 @@ export function telemetryContactFrame({ key = telemetryRadioTarget, type = 2, en
   buffer[35] = encodedPathLength;
   buffer.set(path, 36);
   buffer.write('PRIVATE-NAME-NOT-RETURNED', 100, 'utf8');
-  buffer.fill(0xFE, 132); // Raw lastmod/location/advert bytes are never retained.
+  buffer.fill(0xFE, 132); // Parsed metadata may be used during contact reconciliation; raw frames are not retained.
   return [...buffer];
 }
 export function telemetryInventoryBoundary(code, value = 0) {

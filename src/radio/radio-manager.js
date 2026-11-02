@@ -202,7 +202,7 @@ export class RadioManager extends EventEmitter {
       return Promise.reject(new RadioConnectionError('stale-generation'));
     }
     if (options.requireReady && !session.ready) return Promise.reject(new RadioConnectionError('not-ready'));
-    return this.#queueCommand(session, fn, options.requireReady ?? false);
+    return this.#queueCommand(session, fn, options.requireReady ?? false, options.timeoutMs);
   }
 
   async invalidateConnection(request) {
@@ -240,21 +240,39 @@ export class RadioManager extends EventEmitter {
     if (!this.#isCurrent(session)) throw session.controller.signal.reason ?? new RadioConnectionError('stale-generation');
   }
 
-  #queueCommand(session, fn, requireReady = false) {
+  #queueCommand(session, fn, requireReady = false, timeoutMs) {
     return this.#commandQueue.run(() => {
       this.#assertCurrent(session);
       if (requireReady && !session.ready) throw new RadioConnectionError('not-ready');
       const signal = session.controller.signal;
       let onAbort;
+      let timer;
       const cancelled = new Promise((_, reject) => {
         onAbort = () => reject(signal.reason);
         signal.addEventListener('abort', onAbort, { once: true });
       });
       const operation = Promise.resolve().then(() => {
         this.#assertCurrent(session);
+        if (timeoutMs !== undefined) {
+          timer = setTimeout(() => {
+            if (!this.#isCurrent(session)) return;
+            // The SDK's untagged response listeners may outlive its promise.
+            // Retire the generation before releasing this queue transaction;
+            // a replacement cannot open until transport closure is confirmed.
+            this.#logger.warn('services.radio', 'Local Companion command timed out; retiring its connection generation.',
+              { generation: session.id, timeoutMs });
+            this.#retire(session, 'command-timeout');
+            this.#closeSession(session).then(status => {
+              if (status === 'closed') this.#scheduleRetry();
+            });
+          }, timeoutMs);
+        }
         return fn(session.connection, session.context);
       });
-      return Promise.race([operation, cancelled]).finally(() => signal.removeEventListener('abort', onAbort));
+      return Promise.race([operation, cancelled]).finally(() => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+      });
     });
   }
 
@@ -333,7 +351,9 @@ export class RadioManager extends EventEmitter {
       this.#deviceInfo = session.deviceInfo;
       this.#attempt = 0;
 
-      await syncDeviceClock({ connection, commandQueue: { run: (fn) => this.#queueCommand(session, fn) }, logger: this.#logger });
+      await syncDeviceClock({ connection, commandQueue: {
+        run: (fn) => this.#queueCommand(session, fn, false, HANDSHAKE_TIMEOUT_MS)
+      }, logger: this.#logger });
       this.#assertCurrent(session);
       await this.#fetchDeviceQuery(session);
       this.#assertCurrent(session);
@@ -363,7 +383,7 @@ export class RadioManager extends EventEmitter {
   async #fetchDeviceQuery(session) {
     try {
       const deviceInfoResponse = await this.#queueCommand(session, () =>
-        session.connection.deviceQuery(Constants.SupportedCompanionProtocolVersion)
+        session.connection.deviceQuery(Constants.SupportedCompanionProtocolVersion), false, HANDSHAKE_TIMEOUT_MS
       );
       this.#assertCurrent(session);
       Object.assign(session.deviceInfo, normalizeDeviceQuery(deviceInfoResponse));
