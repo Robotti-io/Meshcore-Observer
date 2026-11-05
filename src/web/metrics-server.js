@@ -290,12 +290,12 @@ export class MetricsServer {
       method: typeof req.method === 'string' && req.method.length <= 32 ? req.method : 'OTHER',
       requestTime: new Date().toISOString()
     });
-    requestLogger.debug('services.metricsUi');
+    requestLogger.http('services.metricsUi');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
     try {
       this.#dispatchRequest(req, res);
       if (res.statusCode >= 200 && res.statusCode < 400) {
-        requestLogger.debug('services.metricsUi', 'dashboard request processed', { statusCode: res.statusCode });
+        requestLogger.info('services.metricsUi', 'dashboard request processed', { statusCode: res.statusCode });
       } else if (res.statusCode >= 500) {
         requestLogger.warn('services.metricsUi', 'dashboard request unavailable', { statusCode: res.statusCode });
       }
