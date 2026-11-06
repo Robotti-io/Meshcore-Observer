@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { REGION_POLL_CANDIDATE_SQL } from '../../src/metrics/region-poll-state.js';
 import { OBSERVER,HOUR,POLICY,start,reservation,completion } from '../fixtures/region-poll.js';
+import { WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 
 const p95=values=>[...values].sort((a,b)=>a-b)[Math.ceil(values.length*.95)-1];
 const ms=value=>Number(value.toFixed(3));
@@ -77,8 +78,10 @@ test('20k nodes/scheduled pairs use indexed bounded keyset/due reads and durable
     console.info('Region poll cost fixture:',{nodes:20000,scheduledPairs:20000,pageLimit:200,
       reservationP95Ms:ms(p95(reserveTimes)),completionP95Ms:ms(p95(completionTimes)),readP95Ms:readCosts,
       allKeysVisited:seen.size,fixtureBytes:bytesBefore,measuredGrowthBytes:bytesAfter-bytesBefore,
-      platform:process.platform,node:process.version,targets:{writeP95Ms:10,readP95Ms:100}});
-    assert.ok(p95(reserveTimes)<10,'normal reservation p95 below 10ms');
-    assert.ok(p95(completionTimes)<10,'normal atomic completion p95 below 10ms');
+      platform:process.platform,node:process.version,targets:{writeP95Ms:WRITE_P95_TARGET_MS,readP95Ms:100}});
+    assert.ok(p95(reserveTimes)<WRITE_P95_TARGET_MS,
+      `normal reservation p95 below ${WRITE_P95_TARGET_MS}ms`);
+    assert.ok(p95(completionTimes)<WRITE_P95_TARGET_MS,
+      `normal atomic completion p95 below ${WRITE_P95_TARGET_MS}ms`);
   }finally{store?.close();rmSync(dir,{recursive:true,force:true});}
 },30000);

@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { topologyCanonical } from '../../src/metrics/topology-history.js';
+import { TOPOLOGY_PROXIMITY_P95_TARGET_MS, WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 
 const OBSERVER = 'CD'.repeat(32); const HOUR = 3600000;
 function start(store) {
@@ -23,9 +24,9 @@ const p95 = (values) => [...values].sort((a, b) => a - b)[Math.ceil(values.lengt
 // T5: human-authorized proximity-only adjustment after the unchanged query
 // measured 115–124ms under coverage (80–82ms without instrumentation).
 // Keep writes and simpler reads at their original targets; no CI exclusion.
-const WRITE_TARGET_MS = 10;
+const WRITE_TARGET_MS = WRITE_P95_TARGET_MS;
 const READ_TARGET_MS = 100;
-const PROXIMITY_TARGET_MS = 150;
+const PROXIMITY_TARGET_MS = TOPOLOGY_PROXIMITY_P95_TARGET_MS;
 
 test('20k paths/100k receptions/4k identities meet local write/read targets with indexed bounded queries', () => {
   const dir = mkdtempSync(join(tmpdir(), 'topology-cost-')); const path = join(dir, 'metrics.sqlite3');

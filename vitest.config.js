@@ -5,6 +5,10 @@ export default defineConfig({
     environment: 'node',
     pool: 'threads',
     include: ['test/**/*.test.js'],
+    // Windows-hosted runners are slower at process startup and synchronous
+    // SQLite work; allow those integration tests room to finish without
+    // weakening the timeout on Linux.
+    testTimeout: process.platform === 'win32' ? 15000 : 5000,
     // Cost gates assert wall-clock p95 targets. Run files one at a time so
     // other test workers do not add contention to their measurements.
     fileParallelism: false,
