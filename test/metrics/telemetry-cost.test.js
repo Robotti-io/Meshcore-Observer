@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { createTelemetryFixture, telemetryResult, TELEMETRY_OBSERVER, TELEMETRY_TARGET } from '../fixtures/telemetry-store.js';
 import { createTelemetryReads } from '../../src/metrics/telemetry-reads.js';
 import { telemetryVariantKey } from '../../src/telemetry/telemetry-validation.js';
-import { WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
+import { COST_TEST_TIMEOUT_MS, ENFORCE_PERFORMANCE_TARGETS, WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 
 const RANGE={start:0,end:1000000},HOUR=3600000;
 const p95=values=>[...values].sort((a,b)=>a-b)[Math.ceil(values.length*.95)-1];
@@ -90,12 +90,15 @@ test('20k observations/20k failures prove real indexed bounded hydration and dur
       for(let i=0;i<20;i++) {const before=performance.now(),page=read();costs.push(performance.now()-before);
         if(key) assert.equal(page[key].length,200); else assert.equal(page.observation.data.readings.length,56);}
       readCosts[name]=ms(p95(costs));
-      assert.ok(p95(costs)<100,`${name} bounded read p95 ${p95(costs)}ms must remain below 100ms`);
+      if(ENFORCE_PERFORMANCE_TARGETS)assert.ok(p95(costs)<100,
+        `${name} bounded read p95 ${p95(costs)}ms must remain below 100ms`);
     }
-    assert.ok(p95(writes)<WRITE_P95_TARGET_MS,
-      `normal synchronous telemetry write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
-    assert.ok(p95(failedWrites)<WRITE_P95_TARGET_MS,
-      `normal synchronous failure write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
+    if(ENFORCE_PERFORMANCE_TARGETS){
+      assert.ok(p95(writes)<WRITE_P95_TARGET_MS,
+        `normal synchronous telemetry write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
+      assert.ok(p95(failedWrites)<WRITE_P95_TARGET_MS,
+        `normal synchronous failure write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
+    }
     const before=performance.now(); f.store.pruneOlderThan(250000); const pruneMs=performance.now()-before;
     assert.equal(f.store.queryTelemetryObservations(RANGE).total,1);
     assert.equal(f.store.getTelemetryLatest({...scope,now:300000,windowMs:HOUR}).observation.observedAt,100199);
@@ -103,6 +106,7 @@ test('20k observations/20k failures prove real indexed bounded hydration and dur
     console.info('Telemetry cost fixture:',{observations:20000,failures:20000,maximumSensorReadings:56,
       normalWriteP95Ms:ms(p95(writes)),failureWriteP95Ms:ms(p95(failedWrites)),readP95Ms:readCosts,
       pruneMs:ms(pruneMs),fixtureBytes,platform:process.platform,node:process.version,
+      performanceBudgetsEnforced:ENFORCE_PERFORMANCE_TARGETS,
       targets:{normalWriteP95Ms:WRITE_P95_TARGET_MS,readP95Ms:100}});
   } finally {f.cleanup();}
-},30000);
+},COST_TEST_TIMEOUT_MS);

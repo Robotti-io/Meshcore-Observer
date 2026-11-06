@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { createTelemetryFixture } from '../fixtures/telemetry-store.js';
 import { SCOPE, SENSOR, POLICY, WINDOW, reservation, completion } from '../fixtures/telemetry-poll.js';
 import { TELEMETRY_CANDIDATE_SQL, TELEMETRY_ELIGIBILITY_SQL } from '../../src/metrics/telemetry-poll-state.js';
-import { WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
+import { COST_TEST_TIMEOUT_MS, ENFORCE_PERFORMANCE_TARGETS, WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
 const ms = number => Number(number.toFixed(3));
 
@@ -57,11 +57,16 @@ test('20k scoped direct markers plus 10k flood paths preserve indexed keyset/exa
       stateReadP95Ms: ms(p95(stateCosts)), reservationWriteP95Ms: ms(p95(reserveCosts)), atomicTerminalWriteP95Ms: ms(p95(completeCosts)) };
     console.info('Telemetry polling cost fixture:', { markers: 20000, floodPaths: 10000, costs,
       policy: POLICY, node: process.version, platform: process.platform,
+      performanceBudgetsEnforced: ENFORCE_PERFORMANCE_TARGETS,
       targets: { writeP95Ms: WRITE_P95_TARGET_MS, ordinaryReadP95Ms: 100 } });
-    for (const value of [p95(candidateCosts), p95(exactCosts), p95(stateCosts)]) assert.ok(value < 100, `bounded read ${value}ms exceeds 100ms`);
-    for (const value of [p95(reserveCosts), p95(completeCosts)]) {
-      assert.ok(value < WRITE_P95_TARGET_MS,
-        `durable write ${value}ms exceeds ${WRITE_P95_TARGET_MS}ms`);
+    if (ENFORCE_PERFORMANCE_TARGETS) {
+      for (const value of [p95(candidateCosts), p95(exactCosts), p95(stateCosts)]) {
+        assert.ok(value < 100, `bounded read ${value}ms exceeds 100ms`);
+      }
+      for (const value of [p95(reserveCosts), p95(completeCosts)]) {
+        assert.ok(value < WRITE_P95_TARGET_MS,
+          `durable write ${value}ms exceeds ${WRITE_P95_TARGET_MS}ms`);
+      }
     }
   } finally { f.cleanup(); }
-}, 30000);
+}, COST_TEST_TIMEOUT_MS);

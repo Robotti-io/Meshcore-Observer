@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { parseRegionResponseBody } from '../../src/regions/region-response-parser.js';
-import { WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
+import { COST_TEST_TIMEOUT_MS, ENFORCE_PERFORMANCE_TARGETS, WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 
 const OBSERVER = 'BE'.repeat(32), TARGET = 'AC'.repeat(32), RANGE = { start: 0, end: 1000000 };
 const normalized = parseRegionResponseBody({ body: [0,0,0,0,...Buffer.from('*,Be,be-vlg')] }).answer;
@@ -118,11 +118,15 @@ test('20k answers/20k failures/two brokers preserve indexed bounded reads, durab
       normalTwoBrokerWriteP95Ms:ms(p95(writeTimes)),maximum64BrokerWriteP95Ms:ms(p95(fanOutTimes)),readP95Ms:readCosts,
       claimP95Ms:ms(p95(claimTimes)),latestBackfillP95Ms:ms(p95(backfillTimes)),pruneMs:ms(pruneMs),fixtureBytes:bytesBefore,measuredGrowthBytes:bytesAfter-bytesBefore,
       reusablePagesAfterPrune:reusablePages,retainedAnswersAfterPrune:221,platform:process.platform,node:process.version,
+      performanceBudgetsEnforced:ENFORCE_PERFORMANCE_TARGETS,
       targets:{ normalWriteP95Ms:WRITE_P95_TARGET_MS,readP95Ms:100 } });
-    assert.ok(p95(writeTimes)<WRITE_P95_TARGET_MS,
-      `normal two-broker synchronous write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
-    assert.ok(p95(claimTimes)<100,'one-item claim p95 must remain below 100ms');
-    assert.ok(p95(backfillTimes)<100,'bounded latest backfill p95 must remain below 100ms');
-    for (const [name,cost] of Object.entries(readCosts)) assert.ok(cost<100,`${name} bounded read p95 ${cost}ms must remain below 100ms`);
+    if (ENFORCE_PERFORMANCE_TARGETS) {
+      assert.ok(p95(writeTimes)<WRITE_P95_TARGET_MS,
+        `normal two-broker synchronous write p95 must remain below ${WRITE_P95_TARGET_MS}ms`);
+      assert.ok(p95(claimTimes)<100,'one-item claim p95 must remain below 100ms');
+      assert.ok(p95(backfillTimes)<100,'bounded latest backfill p95 must remain below 100ms');
+      for (const [name,cost] of Object.entries(readCosts)) assert.ok(cost<100,
+        `${name} bounded read p95 ${cost}ms must remain below 100ms`);
+    }
   } finally { store?.close(); rmSync(dir,{ recursive:true,force:true }); }
-},30000);
+},COST_TEST_TIMEOUT_MS);

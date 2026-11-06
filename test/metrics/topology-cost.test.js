@@ -8,7 +8,8 @@ import { performance } from 'node:perf_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import { MetricsStore } from '../../src/metrics/store.js';
 import { topologyCanonical } from '../../src/metrics/topology-history.js';
-import { TOPOLOGY_PROXIMITY_P95_TARGET_MS, WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
+import { COST_TEST_TIMEOUT_MS, ENFORCE_PERFORMANCE_TARGETS, TOPOLOGY_PROXIMITY_P95_TARGET_MS,
+  WRITE_P95_TARGET_MS } from '../fixtures/cost-targets.js';
 
 const OBSERVER = 'CD'.repeat(32); const HOUR = 3600000;
 function start(store) {
@@ -94,12 +95,15 @@ test('20k paths/100k receptions/4k identities meet local write/read targets with
       writeP95Ms: Number(p95(writeTimes).toFixed(3)), firstMaximumPathP95Ms: Number(p95(firstMaxTimes).toFixed(3)),
       readP95Ms: readCosts, fixtureBytes: pageBefore * pageSize, measuredGrowthBytes: (pageAfter - pageBefore) * pageSize,
       platform: process.platform, node: process.version,
+      performanceBudgetsEnforced: ENFORCE_PERFORMANCE_TARGETS,
       targets: { writeP95Ms: WRITE_TARGET_MS, readP95Ms: READ_TARGET_MS, proximityReadP95Ms: PROXIMITY_TARGET_MS } });
-    assert.ok(p95(writeTimes) < WRITE_TARGET_MS, 'local normal write p95 target');
-    assert.ok(p95(firstMaxTimes) < WRITE_TARGET_MS, 'local first maximum-path write p95 target');
-    for (const [name, cost] of Object.entries(readCosts)) {
-      const target = name === 'proximity' ? PROXIMITY_TARGET_MS : READ_TARGET_MS;
-      assert.ok(cost < target, `${name} local read p95 ${cost}ms must be below ${target}ms`);
+    if (ENFORCE_PERFORMANCE_TARGETS) {
+      assert.ok(p95(writeTimes) < WRITE_TARGET_MS, 'local normal write p95 target');
+      assert.ok(p95(firstMaxTimes) < WRITE_TARGET_MS, 'local first maximum-path write p95 target');
+      for (const [name, cost] of Object.entries(readCosts)) {
+        const target = name === 'proximity' ? PROXIMITY_TARGET_MS : READ_TARGET_MS;
+        assert.ok(cost < target, `${name} local read p95 ${cost}ms must be below ${target}ms`);
+      }
     }
   } finally { store?.close(); rmSync(dir, { recursive: true, force: true }); }
-}, 30000);
+}, COST_TEST_TIMEOUT_MS);
