@@ -1,4 +1,5 @@
 import { Packet } from '@liamcottle/meshcore.js';
+import { randomUUID } from 'node:crypto';
 import { normalizeRawPacketEvent } from '../packets/packet-normalizer.js';
 import { calculatePacketHash } from '../packets/packet-hash.js';
 import { PacketDeduplicator } from '../packets/packet-deduplicator.js';
@@ -11,6 +12,7 @@ import { isReplyPolicyAllowedByBot, ReplyPolicyError, resolveReplyDeliveryPolicy
 import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
 import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.js';
+import { ONBOARDING_TRIGGER } from './command-handlers/onboarding.js';
 
 const PAYLOAD_TYPE_GRP_TXT = 0x05;
 const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
@@ -84,6 +86,10 @@ export class ChannelBot {
   #maxMessageBytes;
   #commands;
   #commandHandlers;
+  #store;
+  #lookupContactByAdvertisedName;
+  #onboarding;
+  #promptedSenders = new Map();
   #logger;
   #deduplicator;
   #repeatCheckTracker;
@@ -131,6 +137,8 @@ export class ChannelBot {
     scopeCommandTimeoutMs = DEFAULT_SCOPE_COMMAND_TIMEOUT_MS,
     nodeRegistry,
     statsReporter,
+    store,
+    lookupContactByAdvertisedName,
     commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter })
   }) {
     this.#radioManager = radioManager;
@@ -147,7 +155,13 @@ export class ChannelBot {
     this.#minHops = botConfig.minHops;
     this.#maxMessageBytes = botConfig.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
     this.#commands = new Map(botConfig.commands.map((command) => [command.trigger, command]));
+    this.#onboarding = botConfig.onboarding ?? null;
+    if (this.#onboarding) {
+      this.#commands.set(ONBOARDING_TRIGGER, { trigger: ONBOARDING_TRIGGER, kind: 'onboarding' });
+    }
     this.#commandHandlers = commandHandlers;
+    this.#store = store;
+    this.#lookupContactByAdvertisedName = lookupContactByAdvertisedName;
     this.#now = now;
     this.#logger = logger;
     this.#deduplicator = deduplicator;
@@ -177,6 +191,17 @@ export class ChannelBot {
           this.sendQueuedReply(item).catch((err) => {
             this.#logger.warn('bots.channelBot', 'failed to send reply', { bot: this.#name, error: err.message });
           });
+        },
+        enqueueCommandList: (items) => {
+          for (const item of items) {
+            this.sendQueuedReply(item).catch((err) => {
+              this.#logger.warn('bots.channelBot', 'failed to send command-list page', {
+                bot: this.#name,
+                error: err.message
+              });
+            });
+          }
+          return { allowed: true };
         }
       };
     this.#replySuppression = replySuppression;
@@ -184,6 +209,24 @@ export class ChannelBot {
 
   get name() {
     return this.#name;
+  }
+
+  /** Queues a private-challenge milestone as an internal channel reply. */
+  announceChallengeEvent({ message, sender }) {
+    if (!this.#enabled || !this.#onboarding || !this.#ready) return false;
+
+    const { message: renderedMessage } = renderResponse({
+      template: message,
+      values: { sender },
+      maxBytes: this.#maxMessageBytes
+    });
+    return this.#enqueueInternalMessage({
+      message: renderedMessage,
+      sender,
+      hash: randomUUID().replaceAll('-', ''),
+      hopCount: 0,
+      path: 'direct'
+    });
   }
 
   start() {
@@ -437,10 +480,14 @@ export class ChannelBot {
     }
     const commandText = parsedTarget.commandText;
 
+    if (await this.#promptNewParticipant(decrypted.sender, packet, hash)) return;
+
     let match = null;
+    let matchedHandler = null;
     for (const handler of this.#commandHandlers.values()) {
       match = handler?.match({ commands: [...this.#commands.values()], text: commandText }) ?? null;
       if (match) {
+        matchedHandler = handler;
         break;
       }
     }
@@ -454,7 +501,8 @@ export class ChannelBot {
       });
       return;
     }
-    const { command, state: handlerStateJson } = match;
+    const { command } = match;
+    let handlerStateJson = match.state;
 
     if (command.requiresTarget === true && !hasMatchingTarget) {
       this.#logger.debug('bots.channelBot', 'ignored command that requires an explicit Companion target', {
@@ -530,6 +578,44 @@ export class ChannelBot {
       return;
     }
 
+    if (matchedHandler?.prepare) {
+      const commandList = matchedHandler.prepare({ command, now: this.#now() });
+      const listItems = commandList.states.map((state) => ({
+        botName: this.#name,
+        channel: this.#channelName,
+        regionScope: scopeResolution.regionScope,
+        deliveryPolicy: scopeResolution.deliveryPolicy,
+        trigger: command.trigger,
+        sender: decrypted.sender,
+        hopCount,
+        path: formatPath(packet),
+        hash: hash.toLowerCase(),
+        handlerStateJson: state
+      }));
+      const listResult = this.#replyQueue.enqueueCommandList(listItems, {
+        channel: this.#channelName,
+        trigger: command.trigger,
+        requestedAt: commandList.requestedAt,
+        cooldownMs: commandList.cooldownMs
+      });
+      if (listResult.allowed) return;
+      if (listResult.stopped) return;
+
+      handlerStateJson = matchedHandler.createCooldownState({
+        command,
+        retryAfterMs: listResult.retryAfterMs,
+        remainingCommands: commandList.remainingCommands
+      });
+    }
+
+    if (matchedHandler?.prepareReply) {
+      handlerStateJson = matchedHandler.prepareReply({
+        command,
+        commands: [...this.#commands.values()],
+        now: this.#now()
+      });
+    }
+
     // Queued rather than sent immediately: the shared ReplyQueue holds
     // this until a quiet window is observed on the physical RF channel,
     // in FIFO order across every bot (see reply-queue.js). Enqueued after
@@ -562,6 +648,71 @@ export class ChannelBot {
       hash: hash.toLowerCase(),
       handlerStateJson
     });
+  }
+
+  async #promptNewParticipant(sender, packet, hash) {
+    if (!this.#onboarding || !this.#lookupContactByAdvertisedName || !this.#store) return false;
+    if (hopCountFor(packet) < this.#minHops) return false;
+    const { generation } = this.#radioManager.getConnectionSnapshot();
+    const contact = await this.#lookupContactByAdvertisedName(sender, generation);
+    if (contact.status === 'unavailable') return false;
+
+    let prompt;
+    if (contact.status === 'ambiguous') {
+      prompt = this.#onboarding.ambiguousMessage ?? this.#onboarding.advertiseMessage;
+    } else if (contact.status === 'not-found') {
+      prompt = this.#onboarding.advertiseMessage;
+    } else if (!this.#store.getDirectChallengeProgress(contact.contactFingerprint)) {
+      prompt = this.#onboarding.dmMessage;
+    } else {
+      return false;
+    }
+
+    const now = this.#now();
+    const lastPromptAt = this.#promptedSenders.get(sender);
+    if (lastPromptAt !== undefined && now - lastPromptAt < 60 * 60 * 1000) return false;
+    this.#promptedSenders.set(sender, now);
+    if (this.#promptedSenders.size > 2048) {
+      const oldestSender = this.#promptedSenders.keys().next().value;
+      this.#promptedSenders.delete(oldestSender);
+    }
+
+    this.#enqueueInternalMessage({
+      message: prompt,
+      sender,
+      hopCount: hopCountFor(packet),
+      path: formatPath(packet),
+      hash: hash.toLowerCase()
+    });
+    return true;
+  }
+
+  #enqueueInternalMessage({ message, sender, hopCount, path, hash }) {
+    const handler = this.#commandHandlers.get('onboarding');
+    if (!handler || !this.#ready) return false;
+
+    const interactionId = this.#replyQueue.enqueue({
+      botName: this.#name,
+      // Internal notices are not public command discoveries, so persist
+      // them as channel-less queue items while retaining the channel
+      // transport policy used by this ChannelBot at dispatch time.
+      channel: null,
+      regionScope: null,
+      deliveryPolicy: {
+        version: 1,
+        transport: 'channel',
+        scope: this.#configuredRegionScope ? { mode: 'region', region: this.#configuredRegionScope } : { mode: 'device-default' },
+        fallback: { mode: 'none' },
+        maxAttempts: 1
+      },
+      trigger: ONBOARDING_TRIGGER,
+      sender,
+      hopCount,
+      path,
+      hash,
+      handlerStateJson: handler.prepare(message)
+    });
+    return interactionId !== null;
   }
 
   /**
@@ -623,19 +774,28 @@ export class ChannelBot {
       now: this.#now(),
     });
 
-    const { message, degraded } = renderResponse({
-      template: actionResult.template,
-      overflowTemplate: actionResult.overflowTemplate,
-      values: {
-        sender,
-        hopCount,
-        path,
-        trigger,
-        hash,
-        ...actionResult.values
-      },
-      maxBytes: this.#maxMessageBytes
-    });
+    let message;
+    let degraded = false;
+    if (typeof actionResult.message === 'string') {
+      if (Buffer.byteLength(actionResult.message, 'utf8') > this.#maxMessageBytes) {
+        throw new Error('Prepared command response exceeds the configured message byte limit');
+      }
+      message = actionResult.message;
+    } else {
+      ({ message, degraded } = renderResponse({
+        template: actionResult.template,
+        overflowTemplate: actionResult.overflowTemplate,
+        values: {
+          sender,
+          hopCount,
+          path,
+          trigger,
+          hash,
+          ...actionResult.values
+        },
+        maxBytes: this.#maxMessageBytes
+      }));
+    }
 
     const transaction = { failure: null };
     try {

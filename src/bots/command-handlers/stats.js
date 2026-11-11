@@ -1,5 +1,6 @@
 import { resolveStatsRange } from '../stats-range.js';
 import { createHandlerStateCodec } from './handler-state.js';
+import { matchCommandPrefix } from './command-matching.js';
 
 const stateCodec = createHandlerStateCodec({
   kind: 'stats',
@@ -17,12 +18,8 @@ export function createStatsCommandHandler({ statsReporter }) {
     match({ commands, text }) {
       for (const command of commands.filter((candidate) => candidate.kind === 'stats')) {
         const { trigger } = command;
-        if (text === trigger) {
-          return { command, state: stateCodec.serialize({ query: '' }) };
-        }
-        if (text.startsWith(`${trigger} `)) {
-          return { command, state: stateCodec.serialize({ query: text.slice(trigger.length + 1).trim() }) };
-        }
+        const match = matchCommandPrefix(trigger, text);
+        if (match) return { command, state: stateCodec.serialize({ query: match.argument }) };
       }
       return null;
     },

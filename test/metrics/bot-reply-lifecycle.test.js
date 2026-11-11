@@ -109,7 +109,7 @@ test('schema v23 suppression index migration rolls back cleanly and can be retri
   const migrated = f.reopen();
   assert.equal(migrated.getReplyById(1), null);
   const versionDb = new DatabaseSync(f.dbPath);
-  assert.equal(versionDb.prepare('PRAGMA user_version').get().user_version, 23);
+  assert.equal(versionDb.prepare('PRAGMA user_version').get().user_version, 26);
   assert.equal(versionDb.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_bot_replies_pending_channel'").get().n, 1);
   versionDb.close();
 }));
@@ -169,7 +169,7 @@ test('migration 22 preserves legacy rows and gives them channel/device-default d
   assert.equal(migrated.getReplyById(sentId).deliveryPolicy.transport, 'channel');
   assert.deepEqual(migrated.queryReplyOutcomeTotals({ start: 0, end: 10000 }), { sent: 1, failed: 0, expired: 0, cancelled: 0 });
   const versionDb = new DatabaseSync(f.dbPath);
-  try { assert.equal(versionDb.prepare('PRAGMA user_version').get().user_version, 23); } finally { versionDb.close(); }
+  try { assert.equal(versionDb.prepare('PRAGMA user_version').get().user_version, 26); } finally { versionDb.close(); }
 }));
 
 test('invalid persisted delivery policy data is rejected before enqueue side effects', () => {

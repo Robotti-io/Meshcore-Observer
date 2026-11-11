@@ -1806,3 +1806,32 @@ test('a !stats command on one bot does not affect an unrelated exact command on 
   assert.equal(radioManager.commandCalls[0].message, 'pong Jeymz');
   assert.equal(statsReporter.summarizeCalls.length, 0);
 });
+
+test('routes a first-time sender to the advert prompt through the shared quiet-air reply queue', async () => {
+  const radioManager = fakeRadioManager();
+  const replyQueue = fakeReplyQueue();
+  const onboarding = {
+    advertiseMessage: 'Send an advert, then DM me.',
+    dmMessage: 'DM me to start.',
+    ambiguousMessage: 'Use a unique advert name.'
+  };
+  const bot = new ChannelBot({
+    radioManager,
+    replyQueue,
+    store: { getDirectChallengeProgress: () => null },
+    lookupContactByAdvertisedName: async () => ({ status: 'not-found' }),
+    botConfig: baseBotConfig({ channel: '#thetomb', minHops: 0, onboarding }),
+    logger: silentLogger()
+  });
+  await startAndConnect(bot, radioManager);
+
+  const channelKey = deriveHashtagChannelKey('#thetomb');
+  radioManager.emitPacket(buildGrpTxtFrame({ channelKey, hops: [], text: 'QCC-Player: hello' }));
+  await flush();
+
+  assert.equal(replyQueue.enqueued.length, 1);
+  assert.equal(replyQueue.enqueued[0].channel, null, 'internal onboarding notices are not command discoveries');
+  assert.equal(replyQueue.enqueued[0].trigger, '__qcc_onboarding__');
+  await bot.sendQueuedReply(replyQueue.enqueued[0]);
+  assert.equal(radioManager.commandCalls[0].message, 'Send an advert, then DM me.');
+});

@@ -11,6 +11,7 @@ import { resolveTopic, STATUS_TOPIC_TEMPLATE } from './mqtt/topic-resolver.js';
 import { LetsMeshAuth } from './mqtt/letsmesh-auth.js';
 import { startTokenRefreshLoop } from './mqtt/token-refresh-loop.js';
 import { ChannelBot } from './bots/channel-bot.js';
+import { DirectMessageBot } from './bots/direct-message-bot.js';
 import { createDefaultCommandHandlers } from './bots/command-handlers/index.js';
 import { RepeatCheckSweeper } from './bots/repeat-check-sweeper.js';
 import { ReplyQueue } from './bots/reply-queue.js';
@@ -18,6 +19,7 @@ import { createReplyDispatcher } from './bots/reply-dispatcher.js';
 import { createReplySuppressionCoordinator } from './bots/reply-suppression.js';
 import { AirtimeCoordinator } from './radio/airtime-coordinator.js';
 import { FloodAdvertScheduler } from './radio/flood-advert-scheduler.js';
+import { ZeroHopAdvertScheduler } from './radio/zero-hop-advert-scheduler.js';
 import { RemoteRequestCoordinator } from './radio/remote-request-coordinator.js';
 import { RegionDiscoveryScheduler } from './regions/region-discovery-scheduler.js';
 import { TelemetryPollingScheduler } from './telemetry/polling-scheduler.js';
@@ -159,6 +161,14 @@ async function main() {
   });
   floodAdvertScheduler.start();
 
+  const zeroHopAdvertScheduler = new ZeroHopAdvertScheduler({
+    radioManager,
+    airtimeCoordinator,
+    logger,
+    intervalMinutes: config.zeroHopAdvert.intervalMinutes
+  });
+  zeroHopAdvertScheduler.start();
+
   // One owner shared by discovery and telemetry producers. Pending
   // durable foreground work wins every admission.
   const remoteRequestCoordinator = new RemoteRequestCoordinator({
@@ -273,19 +283,69 @@ async function main() {
   // this quiet-window clock and outbound reservation.
   radioManager.on('radio.packet', () => replyQueue.noteActivity());
 
-  const bots = config.bots.map((botConfig) => {
-    const bot = new ChannelBot({
+  const channelCommandCatalogs = new Map();
+  for (const botConfig of config.bots) {
+    if (botConfig.type === 'direct' || !botConfig.enabled) continue;
+    const triggers = channelCommandCatalogs.get(botConfig.channel) ?? [];
+    triggers.push(...botConfig.commands.map((command) => command.trigger));
+    channelCommandCatalogs.set(botConfig.channel, [...new Set(triggers)]);
+  }
+
+  const directBotsByName = new Map();
+  for (const botConfig of config.bots.filter((candidate) => candidate.type === 'direct')) {
+    const commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter });
+    directBotsByName.set(botConfig.name, new DirectMessageBot({
       radioManager,
       botConfig,
       logger,
-      replyQueue,
-      replySuppression,
-      getKnownRegionScopes: () => [...config.knownRegionScopes, ...metricsStore.getKnownRegionScopes()],
-      nodeRegistry,
-      statsReporter,
-      commandHandlers: createDefaultCommandHandlers({ nodeRegistry, statsReporter }),
-      repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
-    });
+      store: metricsStore,
+      commandHandlers,
+      announceChannelMessage: ({ message, sender }) => {
+        const challengeBot = botsByName.get('qcc-secret-bot');
+        return challengeBot?.announceChallengeEvent({ message, sender }) ?? false;
+      }
+    }));
+  }
+  const directBotForLookup = directBotsByName.get('direct');
+
+  const bots = config.bots.map((botConfig) => {
+    const commandDiscovery = botConfig.type !== 'direct'
+      && botConfig.commands.some((command) => command.kind === 'discovery')
+      ? {
+        store: metricsStore,
+        channel: botConfig.channel,
+        commandTriggers: channelCommandCatalogs.get(botConfig.channel) ?? [],
+        maxMessageBytes: botConfig.maxMessageBytes
+      }
+      : undefined;
+    const hintChallenge = botConfig.type !== 'direct'
+      && botConfig.commands.some((command) => command.kind === 'hint')
+      ? {
+        store: metricsStore,
+        channel: botConfig.channel,
+        commandTriggers: channelCommandCatalogs.get(botConfig.channel) ?? [],
+        maxMessageBytes: botConfig.maxMessageBytes
+      }
+      : undefined;
+    const commandHandlers = createDefaultCommandHandlers({ nodeRegistry, statsReporter, commandDiscovery, hintChallenge });
+    const bot = botConfig.type === 'direct'
+      ? directBotsByName.get(botConfig.name)
+      : new ChannelBot({
+        radioManager,
+        botConfig,
+        logger,
+        replyQueue,
+        replySuppression,
+        store: metricsStore,
+        lookupContactByAdvertisedName: directBotForLookup
+          ? (name, generation) => directBotForLookup.lookupContactByAdvertisedName(name, generation)
+          : undefined,
+        getKnownRegionScopes: () => [...config.knownRegionScopes, ...metricsStore.getKnownRegionScopes()],
+        nodeRegistry,
+        statsReporter,
+        commandHandlers,
+        repeatCheckTimeoutMs: config.botReplyQueue.repeatCheckTimeoutMs
+      });
     botsByName.set(botConfig.name, bot);
     return { name: botConfig.name, enabled: botConfig.enabled, bot };
   });
@@ -407,6 +467,7 @@ async function main() {
       // remains available to work already in progress.
       repeatCheckSweeper.stop();
       for (const { bot } of bots) bot.stop();
+      await zeroHopAdvertScheduler.stop();
       await floodAdvertScheduler.stop();
       await replyQueue.stop();
 

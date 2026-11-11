@@ -18,7 +18,11 @@
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup, !stats" },
+      {
+        "trigger": "!commands",
+        "kind": "discovery",
+        "response": "Command list is available once an hour. {remainingCommands} remain; wait {retryMinutes}m."
+      },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
       { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
       {
@@ -35,6 +39,52 @@
         "response": "📊 {range}: {packetsReceived} pkts, {packetsDecoded} decoded, {repliesSent} replies, {repeatersHeard} repeaters",
         "usageResponse": "⚠️ usage: !stats <1h|6h|1d|3d|all>"
       }
+    ]
+  },
+  {
+    "name": "qcc-secret-bot",
+    "channel": "#thetomb",
+    "enabled": true,
+    "minHops": 0,
+    "maxMessageBytes": 120,
+    "onboarding": {
+      "advertiseMessage": "☥ The tomb taunts you with secret layers and hidden rooms. Announce your name with an advert, then DM me to enter.",
+      "dmMessage": "☥ I know your name, scribe. DM me to enter the tomb's secret layer, then return to the team hunt."
+    },
+    "commands": [
+      { "trigger": "!help", "response": "☥ Send an advert, then DM the bot to enter the tomb." },
+      {
+        "trigger": "!commands",
+        "kind": "discovery",
+        "response": "☥ The scribes reveal the list once an hour. {remainingCommands} commands remain; wait {retryMinutes}m."
+      },
+      {
+        "trigger": "!hint",
+        "kind": "hint",
+        "response": "☥ The oracle is silent for {retryMinutes}m.",
+        "notFoundResponse": "☥ Every clue has been found."
+      },
+      { "trigger": "!cleopatra", "hint": "This queen's cipher is the theme of QCC 0x4.", "response": "Cleopatra hears your answer." },
+      { "trigger": "!cfs", "hint": "Three initials name the organization behind QCC.", "response": "Cannon Fodder Security puts on Queen City Con." },
+      { "trigger": "!2019", "hint": "The year when the QCC origin story begins.", "response": "The QCC origin story begins in 2019." }
+    ]
+  },
+  {
+    "name": "direct",
+    "type": "direct",
+    "enabled": true,
+    "welcomeMessage": "Welcome to QCC 0x4.",
+    "challenge": {
+      "questions": [
+        { "prompt": "What Egyptian queen's cipher is the QCC 0x4 theme?", "answers": ["Cleopatra"] },
+        { "prompt": "Which organization puts on Queen City Con?", "answers": ["Cannon Fodder Security", "CFS"] },
+        { "prompt": "What year does QCC's origin story begin?", "answers": ["2019"] }
+      ],
+      "incorrectResponse": "☥ Not quite. Try the current scroll again:",
+      "completeResponse": "☥ The scrolls are yours. Explore #thetomb and help the group find its commands."
+    },
+    "commands": [
+      { "trigger": "!help", "response": "Enter #thetomb channel." }
     ]
   }
 ]

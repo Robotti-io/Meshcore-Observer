@@ -6,8 +6,8 @@ A Node.js observer for a Heltec V3 (or compatible) radio running MeshCore
 Companion firmware. It connects over USB serial (or TCP, for a
 bridged/containerized deployment), captures RF packets, publishes them and
 an observer status heartbeat to one or more MQTT brokers, and can run any
-number of independently-configured channel bots that reply to trigger
-commands on public hashtag channels.
+number of independently-configured bots that reply to commands on public
+hashtag channels or through direct messages.
 
 ## Requirements
 
@@ -183,7 +183,11 @@ response-template commands:
         "overflowResponse": "🔁 @[{sender}]! {hopCount} hops - 🔗 https://map.okimesh.org/#/packets/{hash}"
       },
       { "trigger": "!about", "response": "🤖 Robotti is a mesh network bot that can echo messages, and provide packet links. Use !commands to see commands."},
-      { "trigger": "!commands", "response": "Available commands: !about, !commands, !echo, !packet, !link, !lookup, !stats" },
+      {
+        "trigger": "!commands",
+        "kind": "discovery",
+        "response": "Command list is available once an hour. {remainingCommands} remain; wait {retryMinutes}m."
+      },
       { "trigger": "!packet", "response": "🔗 @[{sender}] - https://map.okimesh.org/#/packets/{hash}"},
       { "trigger": "!link", "response": "🔗 https://github.com/Robotti-io/Meshcore-Observer" },
       {
@@ -204,6 +208,82 @@ response-template commands:
   }
 ]
 ```
+
+To make `!commands` a cumulative CTF discovery list, configure it with
+`"kind": "discovery"` and use `response` as the cooldown message. The bot
+tracks each configured trigger used in the channel, returns only discovered
+triggers, and includes the number still undiscovered. Distinct triggers are
+counted separately, including aliases, and the list combines active bots on
+that channel. It is split into message-sized pages; each page goes through the
+shared quiet-air reply queue.
+Only one full list is queued per channel per hour. During the cooldown,
+`response` may use `{remainingCommands}` and `{retryMinutes}`. Discovery state
+and the channel-wide cooldown persist in SQLite and survive history retention;
+the migration also seeds discoveries from retained accepted command history.
+
+For a group puzzle, configure one `"kind": "hint"` command with trigger
+`!hint`, a cooldown `response`, and a `notFoundResponse` for when all clue
+commands have been found. Add a `hint` string to any exact, lookup, or stats
+command that should be eligible for a clue. `!hint` picks one randomly from
+eligible commands that have not yet been used in that channel. Its one-hour
+channel cooldown is stored in
+SQLite and is shared across restarts.
+
+A channel bot can also define `onboarding` with `advertiseMessage` and
+`dmMessage`; an optional `ambiguousMessage` can override the default invitation
+for contacts with duplicate advertised names. The bot compares a channel sender label to
+the exact advertised name in the Companion contact list. When there is no
+unique match, it asks the attendee to send an advert so the Observer can add
+them, then DM the bot; regular Observer adverts provide its contact details.
+Advertised names are not authentication and duplicate names cannot be linked
+safely. An onboarding prompt is rate-limited per displayed sender for an hour.
+
+The bot list may also contain one direct-message declaration named `direct`:
+
+```jsonc
+{
+  "name": "direct",
+  "type": "direct",
+  "enabled": true,
+  "welcomeMessage": "Welcome to QCC 0x4.",
+  "challenge": {
+    "questions": [
+      { "prompt": "What Egyptian queen's cipher is the QCC 0x4 theme?", "answers": ["Cleopatra"] },
+      { "prompt": "Which organization puts on Queen City Con?", "answers": ["Cannon Fodder Security", "CFS"] }
+    ],
+    "incorrectResponse": "☥ Not quite. Try the current scroll again:",
+    "completeResponse": "☥ The scrolls are yours. Explore #thetomb."
+  },
+  "commands": [
+    { "trigger": "!help", "response": "Try !qcc or !commands." },
+    { "trigger": "!commands", "response": "Direct commands: !help, !qcc" },
+    { "trigger": "!qcc", "response": "Welcome to Queen City Con 0x4." }
+  ]
+}
+```
+
+The first valid direct message from a uniquely-resolved Companion contact
+receives `welcomeMessage`; the Observer records completion only after the
+Companion accepts the send. When `challenge` is configured, the next direct
+message starts the Q&A, correct answers advance one question, and incorrect
+answers repeat the current question. Progress is keyed by the SHA-256 contact
+fingerprint and survives app restarts and removal/re-addition of that contact.
+After the first welcome is accepted, the Observer announces the player's
+arrival in `#thetomb`; after the final correct answer is saved, it announces
+completion there as well. These notices use the shared channel reply queue and
+do not count as discovered commands. The private Q&A progress stays per player,
+while command discoveries in `#thetomb` remain a shared team challenge.
+After the final question, later direct messages use the declaration's
+configured commands. Without `challenge`, later messages use those commands
+as before. Contact resolution uses the full key from the Companion contact
+list and rejects missing or ambiguous six-byte prefixes. The SQLite store
+retains only a SHA-256 fingerprint of the contact key, not the key or private
+message text. Because sending and recording completion cannot be one atomic
+operation, a crash after Companion send acceptance but before the SQLite write
+can cause the welcome to be repeated on that contact's next message. Direct
+responses are serialized with other radio commands but do not use the
+public-channel quiet-window queue, and this flow does not track destination
+ACKs.
 
 Response templates can use `{sender}`, `{hopCount}`, `{path}`, `{trigger}`,
 and `{hash}` (the same packet hash published to MQTT, lowercased - handy
@@ -479,9 +559,16 @@ busy coalesce into one pending advert. Pending work survives process
 restarts, and an interrupted command is deferred because the device may
 already have accepted it. Flood adverts can be retransmitted by repeaters.
 
+Zero-hop adverts use an independent cadence. The Companion is asked to send
+one after the first radio connection, then after each configured interval.
+Due work waits for the shared quiet-air window and coalesces while disconnected
+or busy. Its due time is in memory, so a process restart sends a new startup
+zero-hop advert.
+
 | Variable | Purpose |
 | --- | --- |
-| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert and observer-status refresh interval in whole hours; default and local community recommendation `47`, valid values `47` through `168`. Set to `0` for startup/connect-only. Status refreshes read firmware/relay settings and local battery, device uptime, and noise floor without RF traffic. One-hour zero-hop adverts are a separate mode. |
+| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert and observer-status refresh interval in whole hours; default and local community recommendation `47`, valid values `1` through `168`. Set to `0` for startup/connect-only. Status refreshes read firmware/relay settings and local battery, device uptime, and noise floor without RF traffic. Zero-hop adverts use a separate interval setting. |
+| `PACKETCAPTURE_ZERO_HOP_ADVERT_INTERVAL_MINUTES` | Zero-hop advert interval in whole minutes; default `30`, valid values `1` through `10080`. Set to `0` to send once after the first radio connection, then disable recurring zero-hop adverts. This separate scheduler uses the shared quiet-air window and coalesces overdue work while disconnected or busy. |
 
 ### 3. Metrics UI (optional)
 

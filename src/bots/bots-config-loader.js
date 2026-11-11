@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botsConfigSchema, LOOKUP_RESPONSE_FIELDS, STATS_RESPONSE_FIELDS } from './schemas.js';
 import { validateCommandScopeCompatibility } from './reply-scope-policy.js';
+import { ONBOARDING_TRIGGER } from './command-handlers/onboarding.js';
 
 const validate = compileSchema(botsConfigSchema);
 
@@ -32,16 +33,16 @@ function validateTargetCommandOverlaps(bots, filePath) {
 }
 
 /**
- * A command can't mix response shapes across kinds AJV's schema alone can't
- * cleanly enforce (see schemas.js): a 'lookup' command needs all four
- * outcome-specific templates and must not carry `response`/
- * `overflowResponse`; a 'stats' command needs `response` and
- * `usageResponse` and must not carry any lookup-only field; an 'exact'
- * command (the default - `kind` omitted) needs `response` and must not
- * carry any lookup-only field or `usageResponse`.
+ * Validates kind-specific template combinations that AJV's shared property
+ * schema can't express cleanly: lookup needs outcome templates, stats needs
+ * a success and usage template, discovery needs the !commands cooldown
+ * template, and exact commands use a single response template.
  */
 function validateCommandFieldsForKind(command, botName, filePath) {
   const context = `command "${command.trigger}" for bot "${botName}" in "${filePath}"`;
+  if ('hint' in command && ['discovery', 'hint'].includes(command.kind)) {
+    throw new BotsConfigError(`${context} has a hint but is not a discoverable command`);
+  }
   if (command.suppressIfAnswered === true) {
     const responseFields = [command.response, command.overflowResponse].filter((value) => value !== undefined);
     if ((command.kind ?? 'exact') !== 'exact') {
@@ -75,6 +76,50 @@ function validateCommandFieldsForKind(command, botName, filePath) {
     return;
   }
 
+  if (command.kind === 'discovery') {
+    if (command.trigger !== '!commands') {
+      throw new BotsConfigError(`${context} is kind "discovery" and must use the trigger "!commands"`);
+    }
+    if (!('response' in command)) {
+      throw new BotsConfigError(`${context} is kind "discovery" but is missing the cooldown response template`);
+    }
+    const unsupportedFields = [
+      ...LOOKUP_RESPONSE_FIELDS,
+      'usageResponse',
+      'requiresTarget',
+      'suppressIfAnswered',
+      'scope',
+      'fallback'
+    ].filter((field) => field in command);
+    if (unsupportedFields.length > 0) {
+      throw new BotsConfigError(`${context} is kind "discovery" and must not have ${unsupportedFields.join(', ')}`);
+    }
+    return;
+  }
+
+  if (command.kind === 'hint') {
+    if (command.trigger !== '!hint') {
+      throw new BotsConfigError(`${context} is kind "hint" and must use the trigger "!hint"`);
+    }
+    if (!('response' in command) || !('notFoundResponse' in command)) {
+      throw new BotsConfigError(`${context} is kind "hint" but is missing the cooldown or completed-challenge response`);
+    }
+    const unsupportedFields = [
+      ...LOOKUP_RESPONSE_FIELDS.filter((field) => field !== 'notFoundResponse'),
+      'usageResponse',
+      'overflowResponse',
+      'hint',
+      'requiresTarget',
+      'suppressIfAnswered',
+      'scope',
+      'fallback'
+    ].filter((field) => field in command);
+    if (unsupportedFields.length > 0) {
+      throw new BotsConfigError(`${context} is kind "hint" and must not have ${unsupportedFields.join(', ')}`);
+    }
+    return;
+  }
+
   if (!('response' in command)) {
     throw new BotsConfigError(`${context} is missing a response template`);
   }
@@ -89,9 +134,9 @@ function validateCommandFieldsForKind(command, botName, filePath) {
 }
 
 /**
- * Loads, parses, and validates the channel bots config file: a JSON array
- * of independent bot definitions, each naming the channel it listens on
- * and its own set of trigger -> response-template commands. Returns an
+ * Loads, parses, and validates the bot config file: a JSON array of
+ * independent channel or direct-message bot definitions with their own
+ * trigger -> response-template commands. Returns an
  * empty array (not an error) if the file simply doesn't exist - callers
  * that require the file to exist (an explicitly configured path) should
  * check that themselves before calling this.
@@ -137,11 +182,47 @@ export function loadBotsConfig(filePath) {
   }
 
   const names = new Set();
+  const discoveryCommandsByChannel = new Map();
+  const hintCommandsByChannel = new Map();
+  const onboardingBotsByChannel = new Map();
   for (const bot of parsed) {
     if (names.has(bot.name)) {
       throw new BotsConfigError(`Duplicate bot name "${bot.name}" in bots config file "${filePath}"`);
     }
     names.add(bot.name);
+
+    if (bot.type !== 'direct' && bot.onboarding
+      && bot.commands.some((command) => command.trigger === ONBOARDING_TRIGGER)) {
+      throw new BotsConfigError(`Bot "${bot.name}" in "${filePath}" uses the reserved internal onboarding trigger`);
+    }
+
+    if (bot.type !== 'direct' && bot.enabled) {
+      if (bot.onboarding) {
+        const count = (onboardingBotsByChannel.get(bot.channel) ?? 0) + 1;
+        onboardingBotsByChannel.set(bot.channel, count);
+        if (count > 1) {
+          throw new BotsConfigError(`Only one onboarding bot may be configured for channel "${bot.channel}" in "${filePath}"`);
+        }
+      }
+
+      const discoveryCommands = bot.commands.filter((command) => command.kind === 'discovery');
+      if (discoveryCommands.length > 0) {
+        const existing = discoveryCommandsByChannel.get(bot.channel) ?? 0;
+        discoveryCommandsByChannel.set(bot.channel, existing + discoveryCommands.length);
+        if (discoveryCommandsByChannel.get(bot.channel) > 1) {
+          throw new BotsConfigError(`Only one discovery command may be configured for channel "${bot.channel}" in "${filePath}"`);
+        }
+      }
+
+      const hintCommands = bot.commands.filter((command) => command.kind === 'hint');
+      if (hintCommands.length > 0) {
+        const existing = hintCommandsByChannel.get(bot.channel) ?? 0;
+        hintCommandsByChannel.set(bot.channel, existing + hintCommands.length);
+        if (hintCommandsByChannel.get(bot.channel) > 1) {
+          throw new BotsConfigError(`Only one hint command may be configured for channel "${bot.channel}" in "${filePath}"`);
+        }
+      }
+    }
 
     const triggers = new Set();
     for (const command of bot.commands) {
@@ -153,6 +234,56 @@ export function loadBotsConfig(filePath) {
       validateCommandFieldsForKind(command, bot.name, filePath);
       const scopeError = validateCommandScopeCompatibility(bot.regionScope, command);
       if (scopeError) throw new BotsConfigError(`${scopeError} for bot "${bot.name}" in "${filePath}"`);
+    }
+  }
+
+  const enabledDirectBot = parsed.some((bot) => bot.type === 'direct' && bot.enabled);
+  for (const bot of parsed) {
+    if (bot.type === 'direct') {
+      if (!bot.challenge) continue;
+      const maxMessageBytes = bot.maxMessageBytes ?? 512;
+      const challengeMessages = [bot.challenge.incorrectResponse, bot.challenge.completeResponse,
+        ...bot.challenge.questions.map((question) => question.prompt)];
+      if (challengeMessages.some((message) => Buffer.byteLength(message, 'utf8') > maxMessageBytes)) {
+        throw new BotsConfigError(`Direct challenge message for bot "${bot.name}" in "${filePath}" exceeds maxMessageBytes`);
+      }
+      continue;
+    }
+    if (bot.onboarding && !enabledDirectBot) {
+      throw new BotsConfigError(`Bot "${bot.name}" in "${filePath}" has onboarding messages but no enabled direct bot`);
+    }
+    if (bot.onboarding && bot.regionScope !== undefined) {
+      throw new BotsConfigError(`Bot "${bot.name}" in "${filePath}" cannot use onboarding messages with regionScope`);
+    }
+    if (!bot.commands.some((command) => command.kind === 'hint')) continue;
+    const commandsOnChannel = parsed
+      .filter((candidate) => candidate.type !== 'direct' && candidate.enabled && candidate.channel === bot.channel)
+      .flatMap((candidate) => candidate.commands);
+    if (!commandsOnChannel.some((command) => typeof command.hint === 'string')) {
+      throw new BotsConfigError(`Hint command for bot "${bot.name}" in "${filePath}" requires at least one command with a hint`);
+    }
+    const maxMessageBytes = bot.maxMessageBytes ?? 120;
+    for (const command of commandsOnChannel.filter((candidate) => candidate.hint !== undefined)) {
+      if (Buffer.byteLength(command.hint, 'utf8') > maxMessageBytes) {
+        throw new BotsConfigError(`Hint for command "${command.trigger}" in bot "${bot.name}" exceeds maxMessageBytes`);
+      }
+    }
+  }
+
+  for (const bot of parsed) {
+    if (bot.type === 'direct' || !bot.commands.some((command) => command.kind === 'discovery')) continue;
+    const maxMessageBytes = bot.maxMessageBytes ?? 120;
+    if (maxMessageBytes < 32) {
+      throw new BotsConfigError(`Discovery command for bot "${bot.name}" in "${filePath}" requires maxMessageBytes of at least 32`);
+    }
+    const channelCommands = parsed
+      .filter((candidate) => candidate.type !== 'direct' && candidate.enabled && candidate.channel === bot.channel)
+      .flatMap((candidate) => candidate.commands);
+    for (const command of channelCommands) {
+      const minimumListMessage = `☥ + ${command.trigger}`;
+      if (Buffer.byteLength(minimumListMessage, 'utf8') > maxMessageBytes) {
+        throw new BotsConfigError(`Command "${command.trigger}" for bot "${bot.name}" in "${filePath}" is too long for its discovered-command list`);
+      }
     }
   }
 

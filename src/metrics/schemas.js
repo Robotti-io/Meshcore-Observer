@@ -1,5 +1,88 @@
 const epochMs = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 
+export const directWelcomeCompletionSchema = {
+  $id: 'meshcore-observer/metrics/direct-welcome-completion',
+  type: 'object', additionalProperties: false,
+  required: ['contactFingerprint', 'completedAt'],
+  properties: {
+    contactFingerprint: { type: 'string', pattern: '^[0-9A-F]{64}$' },
+    completedAt: epochMs
+  }
+};
+
+export const directWelcomeLookupSchema = {
+  $id: 'meshcore-observer/metrics/direct-welcome-lookup',
+  type: 'object', additionalProperties: false,
+  required: ['contactFingerprint'],
+  properties: { contactFingerprint: { type: 'string', pattern: '^[0-9A-F]{64}$' } }
+};
+
+export const botCommandDiscoverySchema = {
+  $id: 'meshcore-observer/metrics/bot-command-discovery',
+  type: 'object', additionalProperties: false,
+  required: ['channel', 'trigger', 'discoveredAt'],
+  properties: {
+    channel: { type: 'string', minLength: 1 },
+    trigger: { type: 'string', minLength: 1 },
+    discoveredAt: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER }
+  }
+};
+
+export const botCommandDiscoveryQuerySchema = {
+  $id: 'meshcore-observer/metrics/bot-command-discovery-query',
+  type: 'object', additionalProperties: false,
+  required: ['channel'],
+  properties: { channel: { type: 'string', minLength: 1 } }
+};
+
+export const botCommandListRequestSchema = {
+  $id: 'meshcore-observer/metrics/bot-command-list-request',
+  type: 'object', additionalProperties: false,
+  required: ['channel', 'trigger', 'requestedAt', 'cooldownMs'],
+  properties: {
+    channel: { type: 'string', minLength: 1 },
+    trigger: { type: 'string', minLength: 1 },
+    requestedAt: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    cooldownMs: { type: 'integer', minimum: 1, maximum: 86400000 }
+  }
+};
+
+export const directChallengeProgressSchema = {
+  $id: 'meshcore-observer/metrics/direct-challenge-progress',
+  type: 'object', additionalProperties: false,
+  required: ['contactFingerprint', 'questionIndex', 'updatedAt', 'completedAt'],
+  properties: {
+    contactFingerprint: { type: 'string', pattern: '^[0-9A-F]{64}$' },
+    questionIndex: { type: 'integer', minimum: 0, maximum: 64 },
+    updatedAt: epochMs,
+    completedAt: { anyOf: [epochMs, { type: 'null' }] }
+  }
+};
+
+export const directChallengeProgressUpdateSchema = {
+  $id: 'meshcore-observer/metrics/direct-challenge-progress-update',
+  type: 'object', additionalProperties: false,
+  required: ['contactFingerprint', 'expectedQuestionIndex', 'nextQuestionIndex', 'updatedAt', 'completedAt'],
+  properties: {
+    contactFingerprint: { type: 'string', pattern: '^[0-9A-F]{64}$' },
+    expectedQuestionIndex: { type: 'integer', minimum: 0, maximum: 64 },
+    nextQuestionIndex: { type: 'integer', minimum: 1, maximum: 64 },
+    updatedAt: epochMs,
+    completedAt: { anyOf: [epochMs, { type: 'null' }] }
+  }
+};
+
+export const botHintCooldownRequestSchema = {
+  $id: 'meshcore-observer/metrics/bot-hint-cooldown-request',
+  type: 'object', additionalProperties: false,
+  required: ['channel', 'requestedAt', 'cooldownMs'],
+  properties: {
+    channel: { type: 'string', minLength: 1, maxLength: 128 },
+    requestedAt: epochMs,
+    cooldownMs: { type: 'integer', minimum: 1, maximum: 86400000 }
+  }
+};
+
 const scopePolicySchema = { oneOf: [
   { type: 'object', additionalProperties: false, required: ['mode'], properties: { mode: { const: 'device-default' } } },
   { type: 'object', additionalProperties: false, required: ['mode','region'], properties: {

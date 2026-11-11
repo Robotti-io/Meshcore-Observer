@@ -1,7 +1,7 @@
 import { compileSchema } from '../validation/ajv.js';
 import { requestInfoSchema } from './schemas.js';
 
-const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const LEVELS = { debug: 10, http: 15, info: 20, warn: 30, error: 40 };
 const validateRequestInfo = compileSchema(requestInfoSchema);
 
 const REDACTED = '[REDACTED]';
@@ -48,10 +48,7 @@ export function createLogger({ level = 'info' } = {}) {
   const threshold = LEVELS[level] ?? LEVELS.info;
 
   function write(logLevel, source, message, meta, reqInfo) {
-    // Required HTTP/application pairs must survive an operator's log-level
-    // filter. Standalone events and optional request debug details retain it.
-    const requiredRequestRecord = reqInfo && logLevel !== 'debug';
-    if (!requiredRequestRecord && LEVELS[logLevel] < threshold) {
+    if (LEVELS[logLevel] < threshold) {
       return;
     }
 
@@ -67,6 +64,8 @@ export function createLogger({ level = 'info' } = {}) {
     const output = JSON.stringify(line);
     if (logLevel === 'error' || logLevel === 'warn') {
       console.error(output);
+    } else if (logLevel === 'http') {
+      console.debug(output);
     } else {
       console.log(output);
     }

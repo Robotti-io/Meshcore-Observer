@@ -283,3 +283,62 @@ test('rejects an exact (non-stats) command that carries usageResponse', () => {
     /has usageResponse/
   );
 });
+
+test('validates QCC onboarding, hint commands, and a private challenge declaration', () => {
+  const direct = {
+    name: 'direct', type: 'direct', enabled: true, welcomeMessage: 'Welcome to QCC 0x4.',
+    challenge: {
+      questions: [{ prompt: 'Who puts on QCC?', answers: ['Cannon Fodder Security', 'CFS'] }],
+      incorrectResponse: 'Try again:', completeResponse: 'Challenge complete.'
+    },
+    commands: []
+  };
+  const tomb = {
+    name: 'qcc-secret-bot', channel: '#thetomb', enabled: true, minHops: 0,
+    onboarding: {
+      advertiseMessage: 'Send an advert, then DM the bot.',
+      dmMessage: 'DM the bot to start.',
+      ambiguousMessage: 'Use a unique advert name.'
+    },
+    commands: [
+      { trigger: '!commands', kind: 'discovery', response: 'Wait {retryMinutes}m.' },
+      { trigger: '!hint', kind: 'hint', response: 'Wait {retryMinutes}m.', notFoundResponse: 'No clues remain.' },
+      { trigger: '!cleopatra', hint: 'This queen guards the cipher.', response: 'Solved.' }
+    ]
+  };
+  const result = withTempFile(JSON.stringify([direct, tomb]), (filePath) => loadBotsConfig(filePath));
+  assert.equal(result[0].challenge.questions[0].answers[1], 'CFS');
+  assert.equal(result[1].commands[1].kind, 'hint');
+});
+
+test('allows a clue on a stats command', () => {
+  const direct = {
+    name: 'direct', type: 'direct', enabled: true, welcomeMessage: 'Welcome.', commands: []
+  };
+  const tomb = {
+    name: 'qcc-secret-bot', channel: '#thetomb', enabled: true, minHops: 0,
+    commands: [
+      { trigger: '!hint', kind: 'hint', response: 'Wait {retryMinutes}.', notFoundResponse: 'Done.' },
+      { trigger: '!census', kind: 'stats', hint: 'The pharaoh wants a count.', response: 'Counted.', usageResponse: 'Usage.' }
+    ]
+  };
+
+  assert.doesNotThrow(() => withTempFile(JSON.stringify([direct, tomb]), (filePath) => loadBotsConfig(filePath)));
+});
+
+test('requires an enabled direct bot and at least one clue for onboarding and hint commands', () => {
+  const tomb = {
+    name: 'qcc-secret-bot', channel: '#thetomb', enabled: true, minHops: 0,
+    onboarding: {
+      advertiseMessage: 'Advertise.', dmMessage: 'DM me.', ambiguousMessage: 'Use a unique name.'
+    },
+    commands: [
+      { trigger: '!hint', kind: 'hint', response: 'Wait {retryMinutes}.', notFoundResponse: 'Done.' }
+    ]
+  };
+  assert.throws(() => withTempFile(JSON.stringify([tomb]), (filePath) => loadBotsConfig(filePath)), /no enabled direct bot/);
+  const direct = {
+    name: 'direct', type: 'direct', enabled: true, welcomeMessage: 'Welcome.', commands: []
+  };
+  assert.throws(() => withTempFile(JSON.stringify([direct, tomb]), (filePath) => loadBotsConfig(filePath)), /requires at least one command with a hint/);
+});

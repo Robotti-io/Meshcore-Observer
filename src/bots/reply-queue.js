@@ -131,6 +131,22 @@ export class ReplyQueue {
     return interactionId;
   }
 
+  /** Atomically reserves the hourly channel list and queues all of its pages. */
+  enqueueCommandList(items, { channel, trigger, requestedAt, cooldownMs }) {
+    if (this.#stopped) return { allowed: false, stopped: true, retryAfterMs: 0 };
+    const enqueuedAt = this.#now();
+    const replyItems = items.map((item) => ({
+      ...item,
+      enqueuedAt,
+      expiresAt: enqueuedAt + this.#ttlMs
+    }));
+    const result = this.#store.enqueueBotCommandListReplyItems(replyItems, {
+      channel, trigger, requestedAt, cooldownMs
+    });
+    if (result.allowed) this.#startTimer();
+    return result;
+  }
+
   #startTimer() {
     if (!this.#timer) {
       this.#timer = setInterval(() => {

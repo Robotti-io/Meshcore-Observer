@@ -68,82 +68,91 @@ export const satisfactoryChannelResponseSchema = {
   }
 };
 
-export const botConfigSchema = {
-  type: 'object',
-  additionalProperties: false,
+const commandProperties = {
+  trigger: { type: 'string', minLength: 1 },
+  requiresTarget: { type: 'boolean' },
+  suppressIfAnswered: { type: 'boolean' },
+  scope: commandScopeSchema,
+  fallback: commandFallbackSchema,
+  kind: { enum: ['exact', 'lookup', 'stats', 'discovery', 'hint'] },
+  hint: { type: 'string', minLength: 1, maxLength: 160, pattern: '^[^\\u0000-\\u001F\\u007F]+$' },
+  response: { type: 'string', minLength: 1 },
+  overflowResponse: { type: 'string', minLength: 1 },
+  foundResponse: { type: 'string', minLength: 1 },
+  notFoundResponse: { type: 'string', minLength: 1 },
+  ambiguousResponse: { type: 'string', minLength: 1 },
+  invalidResponse: { type: 'string', minLength: 1 },
+  usageResponse: { type: 'string', minLength: 1 }
+};
+const commandSchema = (properties) => ({
+  type: 'object', additionalProperties: false, required: ['trigger'], properties
+});
+
+const channelBotConfigSchema = {
+  type: 'object', additionalProperties: false,
   required: ['name', 'channel', 'enabled', 'minHops', 'commands'],
   properties: {
     name: { type: 'string', minLength: 1 },
     channel: { type: 'string', minLength: 1 },
-    // A string fixes every reply to one region. An array allows replies only
-    // to commands scoped to one of those case-sensitive regions.
     regionScope: {
       oneOf: [
-        {
-          type: 'string',
-          minLength: 1,
-          maxLength: 30,
+        { type: 'string', minLength: 1, maxLength: 30,
           pattern: '^[^\\u0000-\\u001F\\u007F]+$',
-          not: { anyOf: [{ pattern: '^\\s+$' }, { pattern: '^\\*?$|^\\$' }] }
-        },
-        {
-          type: 'array',
-          minItems: 1,
-          maxItems: 256,
-          uniqueItems: true,
-          items: configuredRegionScopesSchema.items
-        }
+          not: { anyOf: [{ pattern: '^\\s+$' }, { pattern: '^\\*?$|^\\$' }] } },
+        { type: 'array', minItems: 1, maxItems: 256, uniqueItems: true, items: configuredRegionScopesSchema.items }
       ]
     },
     enabled: { type: 'boolean' },
     minHops: { type: 'integer', minimum: 0 },
     maxMessageBytes: { type: 'integer', minimum: 1 },
-    commands: {
-      type: 'array',
-      minItems: 1,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['trigger'],
-        properties: {
-          trigger: { type: 'string', minLength: 1 },
-          // Opt-in only: when true, this command requires a leading
-          // @[Companion name] selector matching the current radio identity.
-          requiresTarget: { type: 'boolean' },
-          // Opt-in only: exact commands with a sender-addressed response can
-          // suppress a matching durable reply while it is still pending.
-          suppressIfAnswered: { type: 'boolean' },
-          // Omitted/inherit preserves bot-level and incoming-scope behavior.
-          scope: commandScopeSchema,
-          // Omitted fallback is none; explicit fallback stays within any
-          // fixed bot scope or region allowlist.
-          fallback: commandFallbackSchema,
-          // Defaults to 'exact' (today's only behavior - a plain trigger
-          // -> single response template). 'lookup' opts a command into
-          // argument parsing (see channel-bot.js) and requires the four
-          // outcome-specific templates below instead. 'stats' also opts
-          // into argument parsing (a range token - see stats-range.js)
-          // but only needs `response` (the success case) plus
-          // `usageResponse` (missing/unrecognized range). Which fields are
-          // actually required/forbidden per `kind` is enforced in
-          // bots-config-loader.js, not here - AJV's strict mode (see
-          // src/validation/ajv.js) can't express an if/kind-then-required
-          // conditional without also duplicating every field's type
-          // schema into each branch, which was worse than one plain JS
-          // check.
-          kind: { enum: ['exact', 'lookup', 'stats'] },
-          response: { type: 'string', minLength: 1 },
-          overflowResponse: { type: 'string', minLength: 1 },
-          foundResponse: { type: 'string', minLength: 1 },
-          notFoundResponse: { type: 'string', minLength: 1 },
-          ambiguousResponse: { type: 'string', minLength: 1 },
-          invalidResponse: { type: 'string', minLength: 1 },
-          usageResponse: { type: 'string', minLength: 1 }
-        }
+    type: { const: 'channel' },
+    onboarding: {
+      type: 'object', additionalProperties: false, required: ['advertiseMessage', 'dmMessage'],
+      properties: {
+        advertiseMessage: { type: 'string', minLength: 1, maxLength: 512 },
+        dmMessage: { type: 'string', minLength: 1, maxLength: 512 },
+        ambiguousMessage: { type: 'string', minLength: 1, maxLength: 512 }
       }
+    },
+    commands: { type: 'array', minItems: 1, items: commandSchema(commandProperties) }
+  }
+};
+
+const directCommandProperties = Object.fromEntries(Object.entries(commandProperties)
+  .filter(([name]) => !['requiresTarget', 'suppressIfAnswered', 'scope', 'fallback', 'hint'].includes(name)));
+directCommandProperties.kind = { enum: ['exact', 'lookup', 'stats'] };
+const directChallengeQuestionSchema = {
+  type: 'object', additionalProperties: false, required: ['prompt', 'answers'],
+  properties: {
+    prompt: { type: 'string', minLength: 1, maxLength: 480 },
+    answers: {
+      type: 'array', minItems: 1, maxItems: 8, uniqueItems: true,
+      items: { type: 'string', minLength: 1, maxLength: 80 }
     }
   }
 };
+const directBotConfigSchema = {
+  type: 'object', additionalProperties: false,
+  required: ['name', 'type', 'enabled', 'welcomeMessage', 'commands'],
+  properties: {
+    name: { const: 'direct' },
+    type: { const: 'direct' },
+    enabled: { type: 'boolean' },
+    welcomeMessage: { type: 'string', minLength: 1, maxLength: 160 },
+    maxMessageBytes: { type: 'integer', minimum: 1, maximum: 512 },
+    challenge: {
+      type: 'object', additionalProperties: false, required: ['questions', 'incorrectResponse', 'completeResponse'],
+      properties: {
+        questions: { type: 'array', minItems: 1, maxItems: 64, items: directChallengeQuestionSchema },
+        incorrectResponse: { type: 'string', minLength: 1, maxLength: 512 },
+        completeResponse: { type: 'string', minLength: 1, maxLength: 512 }
+      }
+    },
+    commands: { type: 'array', items: commandSchema(directCommandProperties) }
+  }
+};
+
+export const botConfigSchema = { oneOf: [channelBotConfigSchema, directBotConfigSchema] };
 
 // Validates the bots config file's parsed JSON content (an array of
 // independent channel bot definitions - see bots-config-loader.js).

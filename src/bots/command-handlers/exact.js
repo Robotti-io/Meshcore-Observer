@@ -1,4 +1,5 @@
 import { createHandlerStateCodec } from './handler-state.js';
+import { matchesCommandTrigger } from './command-matching.js';
 import { renderResponse } from '../response-template.js';
 
 const stateCodec = createHandlerStateCodec({
@@ -10,7 +11,8 @@ export function createExactCommandHandler() {
   return {
     kind: 'exact',
     match({ commands, text }) {
-      const command = commands.find((candidate) => (candidate.kind ?? 'exact') === 'exact' && candidate.trigger === text);
+      const command = commands.find((candidate) => (candidate.kind ?? 'exact') === 'exact'
+        && matchesCommandTrigger(candidate.trigger, text));
       return command ? { command, state: stateCodec.serialize({}) } : null;
     },
     restore: stateCodec.restore,

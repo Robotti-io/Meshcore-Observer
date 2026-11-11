@@ -336,6 +336,7 @@ export class RadioManager extends EventEmitter {
       const disconnectedEvidence = new Promise((resolve) => { confirmDisconnected = resolve; });
       session = { id: ++this.#generation, connection, controller, ready: false, deviceInfo: null,
         disconnected: false, disconnectedEvidence, confirmDisconnected, closePromise: null, listeners: [],
+        messageDrainPromise: null, messageDrainRequested: false,
         context: Object.freeze({ generation: this.#generation, signal: controller.signal }) };
       if (!this.#running || epoch !== this.#epoch || this.#unsafeClose) {
         await this.#closeSession(session);
@@ -443,6 +444,50 @@ export class RadioManager extends EventEmitter {
     });
     listen(Constants.ResponseCodes.ChannelMsgRecv, (message) => {
       if (this.#isCurrent(session) && session.deviceInfo) this.emit('radio.channelMessage', message);
+    });
+    const directBotEnabled = this.#config.bots?.some((bot) => bot.type === 'direct' && bot.enabled) ?? false;
+    if (directBotEnabled) {
+      listen(Constants.PushCodes.MsgWaiting, () => this.#drainWaitingMessages(session));
+    }
+  }
+
+  #drainWaitingMessages(session) {
+    session.messageDrainRequested = true;
+    if (session.messageDrainPromise || !this.#isCurrent(session)) return;
+
+    session.messageDrainPromise = this.#queueCommand(session, async (connection) => {
+      while (session.messageDrainRequested && this.#isCurrent(session)) {
+        session.messageDrainRequested = false;
+        const waitingMessages = await connection.getWaitingMessages();
+        if (!this.#isCurrent(session)) return;
+
+        for (const waitingMessage of waitingMessages) {
+          if (!waitingMessage.contactMessage) continue;
+          const message = waitingMessage.contactMessage;
+          const prefix = message.pubKeyPrefix;
+          this.emit('radio.contactMessage', {
+            generation: session.id,
+            pubKeyPrefixHex: prefix instanceof Uint8Array
+              ? Buffer.from(prefix).toString('hex').toUpperCase() : null,
+            pathLen: message.pathLen,
+            txtType: message.txtType,
+            senderTimestamp: message.senderTimestamp,
+            text: message.text
+          });
+        }
+      }
+    }, true, 30000).catch((error) => {
+      if (this.#isCurrent(session)) {
+        this.#logger.warn('services.radio', 'failed to retrieve pending Companion messages', {
+          generation: session.id,
+          error: error.message
+        });
+      }
+    }).finally(() => {
+      session.messageDrainPromise = null;
+      if (session.messageDrainRequested && this.#isCurrent(session)) {
+        this.#drainWaitingMessages(session);
+      }
     });
   }
 }

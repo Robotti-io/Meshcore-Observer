@@ -294,9 +294,7 @@ export class MetricsServer {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
     try {
       this.#dispatchRequest(req, res);
-      if (res.statusCode >= 200 && res.statusCode < 400) {
-        requestLogger.info('services.metricsUi', 'dashboard request processed', { statusCode: res.statusCode });
-      } else if (res.statusCode >= 500) {
+      if (res.statusCode >= 500) {
         requestLogger.warn('services.metricsUi', 'dashboard request unavailable', { statusCode: res.statusCode });
       }
     } catch (err) {

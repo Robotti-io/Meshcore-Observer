@@ -1016,7 +1016,6 @@ test('every response has native security headers and valid requests emit linked 
     if (['/', '/dashboard.css', '/dashboard-requests.js', '/api/metrics'].includes(record.reqInfo.path)
       && linked.length > 1) assert.equal(linked[1].level, 'info');
   }
-  assert.equal(lines.filter(line => line.message === 'dashboard request processed').length, 5);
   assert.doesNotMatch(JSON.stringify(lines), /DO-NOT-LOG|untrusted\.example/);
 });
 

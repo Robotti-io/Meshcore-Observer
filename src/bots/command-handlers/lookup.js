@@ -1,4 +1,5 @@
 import { createHandlerStateCodec } from './handler-state.js';
+import { matchCommandPrefix } from './command-matching.js';
 
 const stateCodec = createHandlerStateCodec({
   kind: 'lookup',
@@ -70,16 +71,10 @@ export function createLookupCommandHandler({ nodeRegistry }) {
     match({ commands, text }) {
       for (const command of commands.filter((candidate) => candidate.kind === 'lookup')) {
         const { trigger } = command;
-        let query;
-        if (text === trigger) {
-          query = '';
-        } else if (text.startsWith(`${trigger} `)) {
-          query = text.slice(trigger.length + 1).trim();
-        } else {
-          continue;
-        }
+        const match = matchCommandPrefix(trigger, text);
+        if (!match) continue;
 
-        return { command, state: stateCodec.serialize({ query }) };
+        return { command, state: stateCodec.serialize({ query: match.argument }) };
       }
       return null;
     },

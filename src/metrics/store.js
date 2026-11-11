@@ -8,7 +8,10 @@ import { botInteractionSchema, botReplyDeliveryPolicySchema, botReplyAcknowledge
   botReplySuppressionCandidatesSchema,
   botReplySuppressionSchema,
   botReplyLifecycleRangeSchema,
-  botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema } from './schemas.js';
+  botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema,
+  directWelcomeCompletionSchema, directWelcomeLookupSchema,
+  botCommandDiscoverySchema, botCommandDiscoveryQuerySchema, botCommandListRequestSchema,
+  directChallengeProgressSchema, directChallengeProgressUpdateSchema, botHintCooldownRequestSchema } from './schemas.js';
 import { verifiedAdvertSchema, advertRangeSchema, advertPageSchema, directHeardQuerySchema,
   verifiedAdvertRouteQuerySchema, fingerprintPruneSchema } from '../nodes/schemas.js';
 import { runStartSchema, runCheckpointSchema, runEndSchema, runIdentitySchema, runPageSchema } from './run-schemas.js';
@@ -31,6 +34,9 @@ import { createTelemetryDiagnostics } from './telemetry-diagnostics.js';
 import { telemetryOwnerInfoMigration } from './telemetry-owner-info-migration.js';
 import { botReplyLifecycleMigration } from './bot-reply-lifecycle-migration.js';
 import { botReplySuppressionMigration } from './bot-reply-suppression-migration.js';
+import { directWelcomeMigration } from './direct-welcome-migration.js';
+import { botCommandDiscoveryMigration } from './bot-command-discovery-migration.js';
+import { qccTombChallengeMigration } from './qcc-tomb-challenge-migration.js';
 
 const validateProcessSample = compileSchema(processSampleSchema);
 const validateProcessPage = compileSchema(processPageSchema);
@@ -80,6 +86,14 @@ function explainDatabaseLock(error) {
 
 const validateBotInteraction = compileSchema(botInteractionSchema);
 const validateBotReplyDeliveryPolicy = compileSchema(botReplyDeliveryPolicySchema);
+const validateDirectWelcomeCompletion = compileSchema(directWelcomeCompletionSchema);
+const validateDirectWelcomeLookup = compileSchema(directWelcomeLookupSchema);
+const validateBotCommandDiscovery = compileSchema(botCommandDiscoverySchema);
+const validateBotCommandDiscoveryQuery = compileSchema(botCommandDiscoveryQuerySchema);
+const validateBotCommandListRequest = compileSchema(botCommandListRequestSchema);
+const validateDirectChallengeProgress = compileSchema(directChallengeProgressSchema);
+const validateDirectChallengeProgressUpdate = compileSchema(directChallengeProgressUpdateSchema);
+const validateBotHintCooldownRequest = compileSchema(botHintCooldownRequestSchema);
 const validateBotReplyAcknowledgement = compileSchema(botReplyAcknowledgementSchema);
 const validateBotReplyResolution = compileSchema(botReplyResolutionSchema);
 const validateBotReplyDispatchClaim = compileSchema(botReplyDispatchClaimSchema);
@@ -89,6 +103,42 @@ const validateBotReplySuppression = compileSchema(botReplySuppressionSchema);
 const validateBotReplyLifecycleRange = compileSchema(botReplyLifecycleRangeSchema);
 const validateKnownRegionScopes = compileSchema(knownRegionScopesSchema);
 const validateBotUsageFilters = compileSchema(botUsageFiltersSchema);
+
+function normalizeBotInteraction(item) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) {
+    throw new Error('Invalid bot interaction: expected an object');
+  }
+  const deliveryPolicy = item.deliveryPolicy ?? { version: 1, transport: 'channel',
+    scope: item.regionScope ? { mode: 'region', region: item.regionScope } : { mode: 'device-default' },
+    fallback: { mode: 'none' }, maxAttempts: 1 };
+  const interaction = {
+    ...item,
+    handlerStateJson: item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
+    regionScope: item.regionScope ?? null,
+    senderIdentifier: item.senderIdentifier ?? null,
+    senderIdentifierKind: item.senderIdentifierKind ?? null,
+    senderIdentifierSource: item.senderIdentifierSource ?? null,
+    deliveryPolicy,
+    recipientPublicKey: item.recipientPublicKey ?? null
+  };
+  if (!validateBotInteraction(interaction)) {
+    throw new Error(`Invalid bot interaction: ${formatErrors(validateBotInteraction.errors)}`);
+  }
+  if (!validateBotReplyDeliveryPolicy(interaction.deliveryPolicy)) {
+    throw new Error(`Invalid bot reply delivery policy: ${formatErrors(validateBotReplyDeliveryPolicy.errors)}`);
+  }
+  if (interaction.channel !== null) {
+    const discovery = {
+      channel: interaction.channel,
+      trigger: interaction.trigger,
+      discoveredAt: interaction.enqueuedAt
+    };
+    if (!validateBotCommandDiscovery(discovery)) {
+      throw new Error(`Invalid bot command discovery: ${formatErrors(validateBotCommandDiscovery.errors)}`);
+    }
+  }
+  return interaction;
+}
 const validateBotUsageRange = compileSchema(botUsageRangeSchema);
 const validateBotUsagePage = compileSchema(botUsagePageSchema);
 const validateAdvert = compileSchema(verifiedAdvertSchema);
@@ -619,7 +669,10 @@ const MIGRATIONS = [
   ] },
   telemetryOwnerInfoMigration,
   botReplyLifecycleMigration,
-  botReplySuppressionMigration
+  botReplySuppressionMigration,
+  directWelcomeMigration,
+  botCommandDiscoveryMigration,
+  qccTombChallengeMigration
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -735,6 +788,17 @@ export class MetricsStore {
   #startFloodAdvertAttemptStmt;
   #resolveFloodAdvertAttemptStmt;
   #recoverFloodAdvertAttemptStmt;
+  #hasDirectWelcomeStmt;
+  #completeDirectWelcomeStmt;
+  #recordBotCommandDiscoveryStmt;
+  #getBotCommandDiscoveriesStmt;
+  #getBotCommandListCooldownStmt;
+  #setBotCommandListCooldownStmt;
+  #getDirectChallengeProgressStmt;
+  #startDirectChallengeStmt;
+  #advanceDirectChallengeStmt;
+  #getBotHintCooldownStmt;
+  #setBotHintCooldownStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -877,6 +941,48 @@ export class MetricsStore {
           last_sent_at = CASE WHEN ? = 1 THEN ? ELSE last_sent_at END,
           next_due_at = ?
       WHERE id = 1 AND status = 'sending'
+    `);
+    this.#hasDirectWelcomeStmt = this.#db.prepare(
+      'SELECT 1 AS completed FROM direct_welcome_contacts WHERE contact_fingerprint = ?'
+    );
+    this.#completeDirectWelcomeStmt = this.#db.prepare(
+      'INSERT OR IGNORE INTO direct_welcome_contacts (contact_fingerprint, completed_at) VALUES (?, ?)'
+    );
+    this.#recordBotCommandDiscoveryStmt = this.#db.prepare(`
+      INSERT INTO bot_command_discoveries (channel, trigger, discovered_at) VALUES (?, ?, ?)
+      ON CONFLICT(channel, trigger) DO NOTHING
+    `);
+    this.#getBotCommandDiscoveriesStmt = this.#db.prepare(
+      'SELECT trigger FROM bot_command_discoveries WHERE channel = ? ORDER BY trigger COLLATE BINARY'
+    );
+    this.#getBotCommandListCooldownStmt = this.#db.prepare(
+      'SELECT last_requested_at AS lastRequestedAt FROM bot_command_list_cooldowns WHERE channel = ?'
+    );
+    this.#setBotCommandListCooldownStmt = this.#db.prepare(`
+      INSERT INTO bot_command_list_cooldowns (channel, last_requested_at) VALUES (?, ?)
+      ON CONFLICT(channel) DO UPDATE SET last_requested_at = excluded.last_requested_at
+    `);
+    this.#getDirectChallengeProgressStmt = this.#db.prepare(`
+      SELECT contact_fingerprint AS contactFingerprint, question_index AS questionIndex,
+             updated_at AS updatedAt, completed_at AS completedAt
+      FROM qcc_tomb_players WHERE contact_fingerprint = ?
+    `);
+    this.#startDirectChallengeStmt = this.#db.prepare(`
+      INSERT OR IGNORE INTO qcc_tomb_players
+        (contact_fingerprint, question_index, updated_at, completed_at)
+      VALUES (?, 0, ?, NULL)
+    `);
+    this.#advanceDirectChallengeStmt = this.#db.prepare(`
+      UPDATE qcc_tomb_players
+      SET question_index = ?, updated_at = ?, completed_at = ?
+      WHERE contact_fingerprint = ? AND question_index = ? AND completed_at IS NULL
+    `);
+    this.#getBotHintCooldownStmt = this.#db.prepare(
+      'SELECT last_hint_at AS lastHintAt FROM bot_hint_cooldowns WHERE channel = ?'
+    );
+    this.#setBotHintCooldownStmt = this.#db.prepare(`
+      INSERT INTO bot_hint_cooldowns (channel, last_hint_at) VALUES (?, ?)
+      ON CONFLICT(channel) DO UPDATE SET last_hint_at = excluded.last_hint_at
     `);
     this.#recoverFloodAdvertAttemptStmt = this.#db.prepare(`
       UPDATE flood_advert_state
@@ -1961,6 +2067,136 @@ export class MetricsStore {
     return rows.map((row) => ({ ...row, firstHeardAt: Number(row.firstHeardAt), lastHeardAt: Number(row.lastHeardAt) }));
   }
 
+  /** A contact fingerprint is a one-way key digest; raw public keys are never retained here. */
+  hasCompletedDirectWelcome(contactFingerprint) {
+    const input = { contactFingerprint };
+    if (!validateDirectWelcomeLookup(input)) {
+      throw new Error(`Invalid direct welcome lookup: ${formatErrors(validateDirectWelcomeLookup.errors)}`);
+    }
+    return this.#hasDirectWelcomeStmt.get(contactFingerprint) !== undefined;
+  }
+
+  /** Records completion only after the Companion accepts the welcome send. */
+  markDirectWelcomeCompleted(input) {
+    if (!validateDirectWelcomeCompletion(input)) {
+      throw new Error(`Invalid direct welcome completion: ${formatErrors(validateDirectWelcomeCompletion.errors)}`);
+    }
+    const result = this.#completeDirectWelcomeStmt.run(input.contactFingerprint, input.completedAt);
+    return result.changes === 1;
+  }
+
+  /** Returns a player's durable private-challenge position, or null before they start. */
+  getDirectChallengeProgress(contactFingerprint) {
+    if (!validateDirectWelcomeLookup({ contactFingerprint })) {
+      throw new Error(`Invalid direct challenge lookup: ${formatErrors(validateDirectWelcomeLookup.errors)}`);
+    }
+    const row = this.#getDirectChallengeProgressStmt.get(contactFingerprint);
+    if (!row) return null;
+    const result = {
+      contactFingerprint: row.contactFingerprint,
+      questionIndex: Number(row.questionIndex),
+      updatedAt: Number(row.updatedAt),
+      completedAt: row.completedAt === null ? null : Number(row.completedAt)
+    };
+    if (!validateDirectChallengeProgress(result)) {
+      throw new Error(`Invalid stored direct challenge progress: ${formatErrors(validateDirectChallengeProgress.errors)}`);
+    }
+    return result;
+  }
+
+  /** Initializes progress only after the first question was accepted for sending. */
+  startDirectChallenge({ contactFingerprint, startedAt }) {
+    const progress = { contactFingerprint, questionIndex: 0, updatedAt: startedAt, completedAt: null };
+    if (!validateDirectChallengeProgress(progress)) {
+      throw new Error(`Invalid direct challenge progress: ${formatErrors(validateDirectChallengeProgress.errors)}`);
+    }
+    return this.#startDirectChallengeStmt.run(contactFingerprint, startedAt).changes === 1;
+  }
+
+  /** Advances exactly one saved question position, preventing duplicate answers from skipping questions. */
+  advanceDirectChallengeProgress(input) {
+    if (!validateDirectChallengeProgressUpdate(input)) {
+      throw new Error(`Invalid direct challenge progress update: ${formatErrors(validateDirectChallengeProgressUpdate.errors)}`);
+    }
+    return this.#advanceDirectChallengeStmt.run(
+      input.nextQuestionIndex,
+      input.updatedAt,
+      input.completedAt,
+      input.contactFingerprint,
+      input.expectedQuestionIndex
+    ).changes === 1;
+  }
+
+  /** Atomically reserves the channel hint cooldown. */
+  reserveBotHintCooldown(input) {
+    if (!validateBotHintCooldownRequest(input)) {
+      throw new Error(`Invalid bot hint cooldown request: ${formatErrors(validateBotHintCooldownRequest.errors)}`);
+    }
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const previous = this.#getBotHintCooldownStmt.get(input.channel);
+      const retryAfterMs = previous
+        ? Math.max(0, Number(previous.lastHintAt) + input.cooldownMs - input.requestedAt)
+        : 0;
+      if (retryAfterMs > 0) {
+        this.#db.exec('COMMIT');
+        return { allowed: false, retryAfterMs };
+      }
+      this.#setBotHintCooldownStmt.run(input.channel, input.requestedAt);
+      this.#db.exec('COMMIT');
+      return { allowed: true, retryAfterMs: 0 };
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /** Returns configured command triggers previously used in this channel. */
+  getDiscoveredBotCommands(input) {
+    if (!validateBotCommandDiscoveryQuery(input)) {
+      throw new Error(`Invalid bot command discovery query: ${formatErrors(validateBotCommandDiscoveryQuery.errors)}`);
+    }
+    return this.#getBotCommandDiscoveriesStmt.all(input.channel).map((row) => row.trigger);
+  }
+
+  /** Atomically queues every list page and reserves its channel-wide cooldown. */
+  enqueueBotCommandListReplyItems(items, input) {
+    if (!validateBotCommandListRequest(input)) {
+      throw new Error(`Invalid bot command list request: ${formatErrors(validateBotCommandListRequest.errors)}`);
+    }
+    if (!Array.isArray(items) || items.length === 0 || items.length > 512) {
+      throw new Error('Invalid bot command list reply batch: expected between 1 and 512 pages');
+    }
+    const discovery = { channel: input.channel, trigger: input.trigger, discoveredAt: input.requestedAt };
+    if (!validateBotCommandDiscovery(discovery)) {
+      throw new Error(`Invalid bot command discovery: ${formatErrors(validateBotCommandDiscovery.errors)}`);
+    }
+    const interactions = items.map((item) => normalizeBotInteraction(item));
+    if (interactions.some((item) => item.channel !== input.channel || item.trigger !== input.trigger)) {
+      throw new Error('Invalid bot command list reply batch: all pages must match its channel and trigger');
+    }
+
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#recordBotCommandDiscoveryStmt.run(input.channel, input.trigger, input.requestedAt);
+      const previous = this.#getBotCommandListCooldownStmt.get(input.channel);
+      const retryAfterMs = previous
+        ? Math.max(0, Number(previous.lastRequestedAt) + input.cooldownMs - input.requestedAt)
+        : 0;
+      if (retryAfterMs > 0) {
+        this.#db.exec('COMMIT');
+        return { allowed: false, retryAfterMs };
+      }
+      this.#setBotCommandListCooldownStmt.run(input.channel, input.requestedAt);
+      const ids = this.#insertBotReplyItems(interactions);
+      this.#db.exec('COMMIT');
+      return { allowed: true, retryAfterMs: 0, ids };
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   /**
    * Inserts one reply as `status = 'pending'` (see reply-queue.js's
    * enqueue()). Every field ChannelBot#sendQueuedReply and ReplyQueue's own
@@ -1971,44 +2207,52 @@ export class MetricsStore {
    * @param {{botName: string, channel: string, trigger: string, sender: string, hopCount: number, path: string, hash: string, regionScope?: string|null, handlerStateJson?: string, enqueuedAt: number, expiresAt: number}} item
    */
   enqueueReplyItem(item) {
-    const deliveryPolicy = item.deliveryPolicy ?? { version: 1, transport: 'channel',
-      scope: item.regionScope ? { mode: 'region', region: item.regionScope } : { mode: 'device-default' },
-      fallback: { mode: 'none' }, maxAttempts: 1 };
-    const interaction = {
-      ...item,
-      handlerStateJson: item.handlerStateJson ?? '{"kind":"exact","version":1,"data":{}}',
-      regionScope: item.regionScope ?? null,
-      senderIdentifier: item.senderIdentifier ?? null,
-      senderIdentifierKind: item.senderIdentifierKind ?? null,
-      senderIdentifierSource: item.senderIdentifierSource ?? null,
-      deliveryPolicy,
-      recipientPublicKey: item.recipientPublicKey ?? null
-    };
-    if (!validateBotInteraction(interaction)) {
-      throw new Error(`Invalid bot interaction: ${formatErrors(validateBotInteraction.errors)}`);
+    return this.enqueueReplyItems([item])[0];
+  }
+
+  enqueueReplyItems(items) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > 512) {
+      throw new Error('Invalid bot reply batch: expected between 1 and 512 items');
     }
-    if (!validateBotReplyDeliveryPolicy(interaction.deliveryPolicy)) {
-      throw new Error(`Invalid bot reply delivery policy: ${formatErrors(validateBotReplyDeliveryPolicy.errors)}`);
+    const interactions = items.map((item) => normalizeBotInteraction(item));
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const ids = this.#insertBotReplyItems(interactions);
+      this.#db.exec('COMMIT');
+      return ids;
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
     }
-    const { lastInsertRowid } = this.#insertBotReplyStmt.run(
-      interaction.botName,
-      interaction.channel,
-      interaction.trigger,
-      interaction.sender,
-      interaction.hopCount,
-      interaction.path,
-      interaction.hash,
-      interaction.regionScope,
-      interaction.handlerStateJson,
-      interaction.enqueuedAt,
-      interaction.expiresAt,
-      interaction.senderIdentifier,
-      interaction.senderIdentifierKind,
-      interaction.senderIdentifierSource,
-      JSON.stringify(interaction.deliveryPolicy),
-      interaction.recipientPublicKey
-    );
-    return Number(lastInsertRowid);
+  }
+
+  #insertBotReplyItems(interactions) {
+    const ids = [];
+    for (const interaction of interactions) {
+      const { lastInsertRowid } = this.#insertBotReplyStmt.run(
+        interaction.botName,
+        interaction.channel,
+        interaction.trigger,
+        interaction.sender,
+        interaction.hopCount,
+        interaction.path,
+        interaction.hash,
+        interaction.regionScope,
+        interaction.handlerStateJson,
+        interaction.enqueuedAt,
+        interaction.expiresAt,
+        interaction.senderIdentifier,
+        interaction.senderIdentifierKind,
+        interaction.senderIdentifierSource,
+        JSON.stringify(interaction.deliveryPolicy),
+        interaction.recipientPublicKey
+      );
+      if (interaction.channel !== null) {
+        this.#recordBotCommandDiscoveryStmt.run(interaction.channel, interaction.trigger, interaction.enqueuedAt);
+      }
+      ids.push(Number(lastInsertRowid));
+    }
+    return ids;
   }
 
   /** How many replies are pending or dispatching - see ReplyQueue#getStats(). */

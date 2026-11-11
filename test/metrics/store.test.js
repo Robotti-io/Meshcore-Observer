@@ -479,6 +479,28 @@ test('enqueueReplyItem persists a pending item, reflected in countPendingReplyIt
   store.close();
 });
 
+test('stores hostile attendee names, command text, and answer text as inert SQL values', () => {
+  const store = openStore();
+  const trigger = "!'; DROP TABLE bot_replies;--";
+  const sender = "Attendee'); DELETE FROM bot_command_discoveries;--";
+  const answerText = "'); DROP TABLE direct_welcome_contacts;--";
+
+  store.enqueueReplyItem(baseReplyQueueItem({
+    trigger,
+    sender,
+    handlerStateJson: JSON.stringify({ kind: 'exact', version: 1, data: { answerText } })
+  }));
+
+  const pending = store.peekOldestPendingReplyItem();
+  assert.equal(pending.trigger, trigger);
+  assert.equal(pending.sender, sender);
+  assert.deepEqual(JSON.parse(pending.handlerStateJson).data, { answerText });
+  assert.deepEqual(store.getDiscoveredBotCommands({ channel: '#echo' }), [trigger]);
+  assert.equal(store.countPendingReplyItems(), 1);
+  assert.equal(store.hasCompletedDirectWelcome('A'.repeat(64)), false);
+  store.close();
+});
+
 test('peekOldestPendingReplyItem returns null and changes nothing when the table is empty', () => {
   const store = openStore();
   assert.equal(store.peekOldestPendingReplyItem(), null);
@@ -749,6 +771,50 @@ test('creates the db file\'s parent directory, and reopening it later re-runs mi
   }
 });
 
+test('persists direct challenge progress and the hourly hint cooldown across store restarts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'meshcore-tomb-challenge-'));
+  const dbPath = join(dir, 'metrics.db');
+  const contactFingerprint = 'A'.repeat(64);
+  let store;
+  try {
+    store = new MetricsStore({ dbPath });
+    assert.equal(store.getDirectChallengeProgress(contactFingerprint), null);
+    assert.equal(store.startDirectChallenge({ contactFingerprint, startedAt: 1000 }), true);
+    assert.equal(store.advanceDirectChallengeProgress({
+      contactFingerprint,
+      expectedQuestionIndex: 0,
+      nextQuestionIndex: 1,
+      updatedAt: 2000,
+      completedAt: null
+    }), true);
+    assert.equal(store.advanceDirectChallengeProgress({
+      contactFingerprint,
+      expectedQuestionIndex: 0,
+      nextQuestionIndex: 2,
+      updatedAt: 3000,
+      completedAt: null
+    }), false);
+    assert.deepEqual(store.reserveBotHintCooldown({
+      channel: '#thetomb', requestedAt: 4000, cooldownMs: 60 * 60 * 1000
+    }), { allowed: true, retryAfterMs: 0 });
+    store.close();
+
+    store = new MetricsStore({ dbPath });
+    assert.deepEqual(store.getDirectChallengeProgress(contactFingerprint), {
+      contactFingerprint, questionIndex: 1, updatedAt: 2000, completedAt: null
+    });
+    assert.deepEqual(store.reserveBotHintCooldown({
+      channel: '#thetomb', requestedAt: 5000, cooldownMs: 60 * 60 * 1000
+    }), { allowed: false, retryAfterMs: 3_599_000 });
+    assert.deepEqual(store.reserveBotHintCooldown({
+      channel: '#thetomb', requestedAt: 3_604_000, cooldownMs: 60 * 60 * 1000
+    }), { allowed: true, retryAfterMs: 0 });
+  } finally {
+    store?.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('migrates a v5 database without losing pending replies or resolved reply history', () => {
   const dir = mkdtempSync(join(tmpdir(), 'meshcore-metrics-v5-'));
   const dbPath = join(dir, 'metrics.sqlite3');
@@ -816,7 +882,7 @@ test('migrates a v5 database without losing pending replies or resolved reply hi
     store.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 23);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 26);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map((column) => column.name);
     assert.ok(columns.includes('handler_state_json'));
     assert.ok(!columns.includes('lookup_outcome'));
@@ -842,6 +908,11 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
       DROP TABLE advert_events;
       DROP TABLE advert_fingerprints;
       DROP TABLE nodes;
+      DROP TABLE bot_hint_cooldowns;
+      DROP TABLE qcc_tomb_players;
+      DROP TABLE bot_command_list_cooldowns;
+      DROP TABLE bot_command_discoveries;
+      DROP TABLE direct_welcome_contacts;
       CREATE TABLE nodes (public_key_hex TEXT PRIMARY KEY,name TEXT NOT NULL,type TEXT,
         first_heard_at INTEGER NOT NULL,last_heard_at INTEGER NOT NULL);
       DROP INDEX idx_bot_replies_status_enqueued;
@@ -899,7 +970,7 @@ test('migration 8 converts a v7 reply table and preserves lifecycle queries and 
     migratedStore.close();
 
     const migratedDb = new DatabaseSync(dbPath);
-    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 23);
+    assert.equal(migratedDb.prepare('PRAGMA user_version').get().user_version, 26);
     const columns = migratedDb.prepare('PRAGMA table_info(bot_replies)').all().map(({ name }) => name);
     assert.deepEqual(columns, [
       'id', 'bot_name', 'channel', 'trigger', 'sender', 'hop_count', 'path', 'hash', 'handler_state_json',

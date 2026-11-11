@@ -16,7 +16,7 @@ export const configSchema = {
   $id: 'meshcore-observer/config',
   type: 'object',
   additionalProperties: false,
-  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions', 'knownRegionScopes', 'telemetry', 'telemetryPolling'],
+  required: ['radio', 'observer', 'brokers', 'bots', 'logging', 'metricsUi', 'botReplyQueue', 'floodAdvert', 'zeroHopAdvert', 'nodeObservations', 'topology', 'remoteRequests', 'regions', 'knownRegionScopes', 'telemetry', 'telemetryPolling'],
   properties: {
     telemetryPolling: telemetryPollConfigSchema,
     telemetry: telemetryConfigSchema,
@@ -82,8 +82,16 @@ export const configSchema = {
       properties: {
         intervalHours: {
           type: 'integer',
-          anyOf: [{ const: 0 }, { minimum: 47, maximum: 168 }]
+          anyOf: [{ const: 0 }, { minimum: 1, maximum: 168 }]
         }
+      }
+    },
+    zeroHopAdvert: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['intervalMinutes'],
+      properties: {
+        intervalMinutes: { type: 'integer', minimum: 0, maximum: 10080 }
       }
     },
     nodeObservations: {
