@@ -359,25 +359,40 @@ export class DirectMessageBot {
   }
 
   async #sendPrivateText(text, publicKeyHex, generation) {
+    await this.#sendFlood(publicKeyHex, text, generation);
+    this.#repliesSent += 1;
+  }
+
+  /**
+   * Sends a private reply as a flood. Resetting the contact's stored outbound
+   * path immediately before the send leaves the Companion with no direct route,
+   * so firmware floods the message instead of trusting a possibly stale path.
+   * Both commands run in one queued radio command so nothing can interleave.
+   * A failed reset is not fatal: the send still goes out on the stored path.
+   */
+  async #sendFlood(publicKeyHex, text, generation) {
     await this.#radioManager.runCommand(
-      (connection) => connection.sendTextMessage(
-        Buffer.from(publicKeyHex, 'hex'), text, Constants.TxtTypes.Plain
-      ),
+      async (connection) => {
+        const recipientKey = Buffer.from(publicKeyHex, 'hex');
+        try {
+          await connection.resetPath(recipientKey);
+        } catch (error) {
+          this.#logger.warn('bots.directMessageBot', 'could not reset contact path before private reply; sending on stored path', {
+            bot: this.name,
+            error: error?.message ?? 'Companion rejected the path reset'
+          });
+        }
+        return connection.sendTextMessage(recipientKey, text, Constants.TxtTypes.Plain);
+      },
       { generation, requireReady: true, timeoutMs: 10000 }
     );
-    this.#repliesSent += 1;
   }
 
   async #sendFirstContactWelcome(publicKeyHex, fingerprint, generation, advertisedName) {
     if (this.#welcomingContacts.has(fingerprint)) return;
     this.#welcomingContacts.add(fingerprint);
     try {
-      await this.#radioManager.runCommand(
-        (connection) => connection.sendTextMessage(
-          Buffer.from(publicKeyHex, 'hex'), this.#botConfig.welcomeMessage, Constants.TxtTypes.Plain
-        ),
-        { generation, requireReady: true, timeoutMs: 10000 }
-      );
+      await this.#sendFlood(publicKeyHex, this.#botConfig.welcomeMessage, generation);
 
       // The welcome is considered complete only after the Companion accepts
       // the send. This follows the requested send-then-record ordering.
@@ -453,12 +468,7 @@ export class DirectMessageBot {
       handler: matchedHandler.kind
     });
 
-    await this.#radioManager.runCommand(
-      (connection) => connection.sendTextMessage(
-        Buffer.from(publicKeyHex, 'hex'), response, Constants.TxtTypes.Plain
-      ),
-      { generation: message.generation, requireReady: true, timeoutMs: 10000 }
-    );
+    await this.#sendFlood(publicKeyHex, response, message.generation);
     this.#repliesSent += 1;
     this.#logger.info('bots.directMessageBot', 'sent configured private reply', {
       bot: this.name,

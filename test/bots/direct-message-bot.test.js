@@ -9,12 +9,18 @@ const publicKey = new Uint8Array(32).fill(0x42);
 const publicKeyHex = Buffer.from(publicKey).toString('hex').toUpperCase();
 const contactFingerprint = createHash('sha256').update(publicKey).digest('hex').toUpperCase();
 
-function createRadioManager(contacts = [{ publicKey, advName: 'QCC-Player' }]) {
+function createRadioManager(contacts = [{ publicKey, advName: 'QCC-Player' }], { failReset = false } = {}) {
   const events = new EventEmitter();
   const sentMessages = [];
+  const callOrder = [];
   const connection = {
     getContacts: async () => contacts,
+    resetPath: async (recipientKey) => {
+      callOrder.push({ call: 'resetPath', recipientKey: Buffer.from(recipientKey).toString('hex').toUpperCase() });
+      if (failReset) throw undefined; // the SDK rejects with no value on a Companion Err
+    },
     sendTextMessage: async (recipientKey, text) => {
+      callOrder.push({ call: 'sendTextMessage' });
       sentMessages.push({ recipientKey: Buffer.from(recipientKey).toString('hex').toUpperCase(), text });
       return { accepted: true };
     }
@@ -22,6 +28,7 @@ function createRadioManager(contacts = [{ publicKey, advName: 'QCC-Player' }]) {
   return {
     events,
     sentMessages,
+    callOrder,
     on: (...args) => events.on(...args),
     off: (...args) => events.off(...args),
     getConnectionSnapshot: () => ({ ready: true, generation: 1 }),
@@ -93,6 +100,43 @@ test('welcomes once, starts the private Q&A on the next DM, and advances only on
   await sendContactMessage(radioManager, 4, '  2019  ');
   assert.equal(radioManager.sentMessages[3].text, 'Which organization puts on Queen City Con?');
   assert.equal(store.getDirectChallengeProgress(contactFingerprint).questionIndex, 1);
+
+  bot.stop();
+  store.close();
+});
+
+test('resets the contact path before every private reply so it is sent as a flood', async () => {
+  const radioManager = createRadioManager();
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const bot = createBot({ radioManager, store });
+  bot.start();
+  radioManager.events.emit('radio.connected');
+
+  await sendContactMessage(radioManager, 1, 'hello');
+  await sendContactMessage(radioManager, 2, 'start');
+
+  assert.deepEqual(radioManager.callOrder, [
+    { call: 'resetPath', recipientKey: publicKeyHex },
+    { call: 'sendTextMessage' },
+    { call: 'resetPath', recipientKey: publicKeyHex },
+    { call: 'sendTextMessage' }
+  ]);
+
+  bot.stop();
+  store.close();
+});
+
+test('still sends the private reply when the path reset is rejected', async () => {
+  const radioManager = createRadioManager(undefined, { failReset: true });
+  const store = new MetricsStore({ dbPath: ':memory:' });
+  const bot = createBot({ radioManager, store });
+  bot.start();
+  radioManager.events.emit('radio.connected');
+
+  await sendContactMessage(radioManager, 1, 'hello');
+
+  assert.equal(radioManager.sentMessages[0].text, 'Welcome to QCC 0x4.');
+  assert.equal(store.hasCompletedDirectWelcome(contactFingerprint), true);
 
   bot.stop();
   store.close();
