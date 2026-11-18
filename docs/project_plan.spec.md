@@ -682,11 +682,12 @@ Preserve the current logical shape where data is available:
 }
 ```
 
-Observer status refreshes use `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`,
-independently of RF quiet-air delays. The default is 47 hours; `0` disables
-periodic refreshes, while broker/radio reconnects still refresh immediately.
-Reads use the existing serialized Companion command queue and issue only local
-device-query and core/radio-statistics commands, never remote telemetry probes.
+Observer status refreshes use `PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES`,
+independently of RF flood adverts and quiet-air delays. The default is 30
+minutes; `0` disables periodic refreshes, while broker/radio reconnects still
+refresh immediately. Reads use the existing serialized Companion command
+queue and issue only local device-query and core/radio-statistics commands,
+never remote telemetry probes.
 
 When available, include top-level `repeat` (the device's boolean repeating
 setting) and `stats: { battery_mv, uptime_secs, noise_floor }`. Uptime is the
@@ -759,6 +760,7 @@ JWTs must:
 * be short-lived;
 * exist only in memory;
 * be refreshed before expiration;
+* be force-refreshed after an MQTT authentication rejection, followed by a bounded broker retry with capped backoff;
 * never appear in logs.
 
 ---

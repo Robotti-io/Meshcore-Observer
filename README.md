@@ -567,7 +567,8 @@ zero-hop advert.
 
 | Variable | Purpose |
 | --- | --- |
-| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic flood advert and observer-status refresh interval in whole hours; default and local community recommendation `47`, valid values `1` through `168`. Set to `0` for startup/connect-only. Status refreshes read firmware/relay settings and local battery, device uptime, and noise floor without RF traffic. Zero-hop adverts use a separate interval setting. |
+| `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS` | Periodic RF flood advert interval in whole hours; default and local community recommendation `47`, currently accepted values `1` through `168`. Set to `0` for startup-only flood adverts. This setting does not control retained observer-status refreshes. Zero-hop adverts use a separate interval setting. |
+| `PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES` | Refresh retained observer status, including firmware/radio settings and local battery, device uptime, and noise floor, without RF traffic. Default `30`; valid values `1` through `10080`. Set to `0` for reconnect-only status refreshes. Broker and radio reconnects still refresh status immediately. |
 | `PACKETCAPTURE_ZERO_HOP_ADVERT_INTERVAL_MINUTES` | Zero-hop advert interval in whole minutes; default `30`, valid values `1` through `10080`. Set to `0` to send once after the first radio connection, then disable recurring zero-hop adverts. This separate scheduler uses the shared quiet-air window and coalesces overdue work while disconnected or busy. |
 
 ### 3. Metrics UI (optional)

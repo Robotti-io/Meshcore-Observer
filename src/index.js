@@ -226,7 +226,8 @@ async function main() {
       }
       return {
         getUsername: () => `v1_${radioManager.getDeviceInfo().publicKey.toUpperCase()}`,
-        getPassword: () => auth.refreshIfNeeded()
+        getPassword: () => auth.refreshIfNeeded(),
+        refreshCredentials: () => auth.createToken()
       };
     }
   });
@@ -236,7 +237,7 @@ async function main() {
     clientVersion: packageInfo.version
   });
   const observerStatusScheduler = new ObserverStatusScheduler({ radioManager, mqttManager,
-    publisher: observerPublisher, logger, intervalHours: config.floodAdvert.intervalHours });
+    publisher: observerPublisher, logger, intervalMinutes: config.observerStatusRefresh.intervalMinutes });
   observerStatusScheduler.start();
   const regionPublisher=new RegionPublisher({ store:metricsStore,runId:runHistory.runId,radio:radioManager,
     mqttManager,brokers:config.brokers,logger });

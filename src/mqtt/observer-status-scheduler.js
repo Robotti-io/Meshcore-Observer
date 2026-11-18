@@ -1,9 +1,9 @@
 import { compileSchema } from '../validation/ajv.js';
 import { configSchema } from '../config/schema.js';
 
-const intervalValid = compileSchema(configSchema.properties.floodAdvert);
+const intervalValid = compileSchema(configSchema.properties.observerStatusRefresh);
 
-/** Refresh local readings and retained status on the advertisement cadence.
+/** Refresh local readings and retained status on the configured status cadence.
  * Requests coalesce while busy; there is no replay queue or RF transmission.
  */
 export class ObserverStatusScheduler {
@@ -12,10 +12,10 @@ export class ObserverStatusScheduler {
   #generation = null; #publishing = false; #pending = false;
   #onReady;
 
-  constructor({ radioManager, mqttManager, publisher, logger, intervalHours }) {
-    if (!intervalValid({ intervalHours })) throw new Error('Invalid observer status interval');
+  constructor({ radioManager, mqttManager, publisher, logger, intervalMinutes }) {
+    if (!intervalValid({ intervalMinutes })) throw new Error('Invalid observer status interval');
     this.#radio = radioManager; this.#mqtt = mqttManager;
-    this.#publisher = publisher; this.#logger = logger; this.#intervalMs = intervalHours * 3600000;
+    this.#publisher = publisher; this.#logger = logger; this.#intervalMs = intervalMinutes * 60000;
     this.#onReady = () => this.#refresh();
   }
 

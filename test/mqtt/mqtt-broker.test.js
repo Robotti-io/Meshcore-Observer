@@ -204,6 +204,42 @@ test('invokes onConnect every time the client (re)connects', async () => {
   assert.equal(connectCount, 2);
 });
 
+test('refreshes token credentials and retries after an MQTT authentication rejection', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const clients = [];
+  const connectionOptions = [];
+  let currentToken = 'old-token';
+  let refreshCount = 0;
+  const broker = new MqttBroker({
+    config: baseBrokerConfig({ auth: { method: 'token', username: null, password: null, audience: 'mesh.example', tokenTtlSeconds: null } }),
+    logger: silentLogger(),
+    getUsername: () => 'v1_AA',
+    getPassword: () => currentToken,
+    refreshCredentials: async () => { refreshCount += 1; currentToken = 'fresh-token'; return currentToken; },
+    createClient: (options) => {
+      connectionOptions.push(options);
+      const client = createFakeClient();
+      clients.push(client);
+      return client;
+    }
+  });
+
+  broker.connect();
+  await flush();
+  assert.equal(connectionOptions[0].password, 'old-token');
+  clients[0].emit('error', Object.assign(new Error('Connection refused: Not authorized'), { code: 5 }));
+  await flush();
+
+  assert.equal(refreshCount, 1);
+  assert.equal(clients[0].endCalls, 1);
+  assert.equal(broker.getState(), 'retrying');
+
+  await vi.advanceTimersByTimeAsync(5000);
+  await flush();
+  assert.equal(clients.length, 2);
+  assert.equal(connectionOptions[1].password, 'fresh-token');
+});
+
 test('close() ends the client and settles into disconnected, ignoring further close events', async () => {
   const client = createFakeClient();
   const broker = new MqttBroker({

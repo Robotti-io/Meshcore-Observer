@@ -19,7 +19,7 @@ export class MqttManager extends EventEmitter {
   #regionBrokerIds;
 
   /**
-   * @param {(brokerConfig: object) => {getUsername?: Function, getPassword?: Function}} [getCredentialHooks]
+   * @param {(brokerConfig: object) => {getUsername?: Function, getPassword?: Function, refreshCredentials?: () => Promise<string>}} [getCredentialHooks]
    * Per-broker async credential resolvers (used for LetsMesh's on-device-
    * signed token auth; see index.js). Keeping this a caller-supplied
    * function, rather than anything MqttManager/MqttBroker know about JWTs

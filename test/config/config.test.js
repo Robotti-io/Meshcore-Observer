@@ -279,6 +279,22 @@ test('accepts startup-only and 47-to-168-hour flood advert intervals', () => {
   assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS: '168' })).floodAdvert.intervalHours, 168);
 });
 
+test('observer status refresh defaults to 30 minutes and accepts a separate bounded cadence', () => {
+  assert.equal(loadConfig(baseEnv()).observerStatusRefresh.intervalMinutes, 30);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES: '0' }))
+    .observerStatusRefresh.intervalMinutes, 0);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES: '60' }))
+    .observerStatusRefresh.intervalMinutes, 60);
+  assert.equal(loadConfig(baseEnv({ PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES: '10080' }))
+    .observerStatusRefresh.intervalMinutes, 10080);
+});
+
+test('rejects invalid observer status refresh intervals', () => {
+  for (const value of ['-1', '10081', '30.5', 'half-hour']) {
+    assert.throws(() => loadConfig(baseEnv({ PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES: value })), ConfigError);
+  }
+});
+
 test('rejects flood advert intervals below 47 hours except zero and above 168 hours', () => {
   for (const value of ['-1', '1', '2', '3', '46', '169', '47.5', 'hourly']) {
     assert.throws(

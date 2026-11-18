@@ -30,7 +30,7 @@ The default interval is 47 hours, following local mesh community guidance for fl
 - Add a one-slot/coalescing `FloodAdvertScheduler`. On the first `radio.connected` event it requests the startup advert; while disconnected or awaiting quiet air, any periodic due events coalesce into one pending request. Once radio and air are available, it calls `radioManager.runCommand((connection) => connection.sendFloodAdvert())` under the shared reservation.
 - Reset shared activity when an outbound send is initiated, following the existing reply queue's self-activity behavior. Do not queue a separate advert for every missed interval and do not send multiple startup adverts on reconnect.
 - Persist a singleton flood-advert job state in `MetricsStore`, separate from `bot_replies`. Startup must resume an existing pending job instead of creating another. Record when an attempt starts and when the device accepts a send so a restart during an uncertain in-flight command does not immediately retransmit it; defer that uncertain retry until the configured interval has elapsed.
-- Add `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`, default `47`, validated as either `0` or an integer from `47` through `168`. Zero means startup-only; values 47 through 168 set the recurring interval. This value controls observer scheduling and does not modify device firmware settings.
+- Add `PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS`, default `47`, validated as either `0` or an integer from `47` through `168`. Zero means startup-only; values 47 through 168 set the recurring RF flood-advert interval. This value does not modify device firmware settings or control retained observer-status refreshes.
 - Start and stop the scheduler explicitly in `src/index.js`. Stop it before the radio manager closes, and wait for an in-flight command to settle as part of bounded shutdown.
 - Log standalone scheduler outcomes with stable sources and no request ID. Log success, skipped/coalesced/reconnected behavior only when operationally useful, and never log packet contents or secrets.
 
@@ -108,6 +108,21 @@ This approach shares one source of truth for observed quiet air without mixing r
 - **Updated guidance:** Local mesh community guidance recommends a 47-hour flood interval. One-hour zero-hop adverts are a separate behavior and are not configured by this scheduler.
 - **Resolved:** Manual device testing is restricted to COM4. Do not connect to or disrupt the active COM3 instance.
 - **Execution check:** Confirm target Companion firmware supports `sendFloodAdvert()` and returns its response reliably enough for the serialized command queue, using COM4 only.
+
+## Current implementation follow-up (2026-11-17)
+
+The flood-advert interval now controls RF flood adverts only. Retained observer
+status has its own `PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES`
+setting, defaulting to 30 minutes; `0` disables periodic status refreshes while
+preserving refreshes on radio or broker reconnect. This keeps frequent status
+updates separate from RF transmissions. See the current [operator configuration
+reference](../../../README.md#configuration) and [project specification](../../project_plan.spec.md).
+
+**Open validation discrepancy:** The planned/config-test lower bound is 47
+hours, but `src/config/schema.js` currently accepts flood intervals from 1 to
+168 hours (or 0). The documentation describes the runtime-accepted range; the
+47-hour minimum remains an unimplemented plan requirement pending an explicitly
+approved configuration-contract change.
 
 ### 8. Suggested Execution Order
 

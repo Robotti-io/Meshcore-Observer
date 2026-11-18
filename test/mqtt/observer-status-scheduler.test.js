@@ -5,7 +5,7 @@ import { ObserverStatusScheduler } from '../../src/mqtt/observer-status-schedule
 
 const active = [];
 async function flush() { for (let i = 0; i < 100; i++) await Promise.resolve(); }
-function rig(intervalHours = 47) {
+function rig(intervalMinutes = 30) {
   vi.useFakeTimers(); const radio = new EventEmitter(), mqtt = new EventEmitter();
   const f = { radio, mqtt, connected: true, ready: true, generation: 1, value: 100 };
   radio.getConnectionSnapshot = () => ({ ready: f.ready, generation: f.generation });
@@ -14,7 +14,7 @@ function rig(intervalHours = 47) {
   f.publisher = { publishStatus: vi.fn(async () => [{ outcome: 'sent' }]) };
   f.logger = { info: vi.fn(), warn: vi.fn() };
   f.scheduler = new ObserverStatusScheduler({ radioManager: radio, mqttManager: mqtt,
-    publisher: f.publisher, logger: f.logger, intervalHours });
+    publisher: f.publisher, logger: f.logger, intervalMinutes });
   active.push(f); f.scheduler.start(); return f;
 }
 afterEach(async () => {
@@ -25,24 +25,24 @@ afterEach(async () => {
   assert.equal(vi.getTimerCount(), 0); vi.useRealTimers();
 });
 
-test('broker connect and exact advertisement interval refresh readings before publishing retained status', async () => {
+test('broker connect and exact status interval refresh readings before publishing retained status', async () => {
   const f = rig(); f.mqtt.emit('broker.connected'); await flush();
   assert.equal(f.publisher.publishStatus.mock.calls[0][0].stats.uptime_secs, 101);
-  await vi.advanceTimersByTimeAsync(47 * 3600000 - 1); assert.equal(f.publisher.publishStatus.mock.calls.length, 1);
+  await vi.advanceTimersByTimeAsync(30 * 60000 - 1); assert.equal(f.publisher.publishStatus.mock.calls.length, 1);
   await vi.advanceTimersByTimeAsync(1); assert.equal(f.publisher.publishStatus.mock.calls.length, 2);
   assert.equal(f.publisher.publishStatus.mock.calls[1][0].stats.uptime_secs, 102);
 });
 
-test('startup-only advertisements disable periodic refresh but retain reconnect refreshes', async () => {
+test('zero status interval disables periodic refresh but retains reconnect refreshes', async () => {
   const f = rig(0); f.mqtt.emit('broker.connected'); await flush();
-  await vi.advanceTimersByTimeAsync(168 * 3600000);
+  await vi.advanceTimersByTimeAsync(7 * 24 * 3600000);
   assert.equal(f.publisher.publishStatus.mock.calls.length, 1);
   f.radio.emit('radio.connected'); await flush(); assert.equal(f.publisher.publishStatus.mock.calls.length, 2);
 });
 
 test('disconnects suppress reads and reconnect uses the current generation', async () => {
   const f = rig(); f.connected = false;
-  await vi.advanceTimersByTimeAsync(47 * 3600000); assert.equal(f.radio.refreshObserverStatus.mock.calls.length, 0);
+  await vi.advanceTimersByTimeAsync(30 * 60000); assert.equal(f.radio.refreshObserverStatus.mock.calls.length, 0);
   f.connected = true; f.ready = false; f.mqtt.emit('broker.connected'); await flush();
   assert.equal(f.radio.refreshObserverStatus.mock.calls.length, 0);
   f.ready = true; f.generation = 2; f.radio.emit('radio.connected'); await flush();
@@ -53,7 +53,7 @@ test('concurrent triggers coalesce and a generation change discards old readings
   const f = rig(); let resolve;
   f.radio.refreshObserverStatus = vi.fn(() => new Promise(done => { resolve = done; }));
   f.mqtt.emit('broker.connected'); f.mqtt.emit('broker.connected'); await flush();
-  await vi.advanceTimersByTimeAsync(47 * 3600000);
+  await vi.advanceTimersByTimeAsync(30 * 60000);
   assert.equal(f.radio.refreshObserverStatus.mock.calls.length, 1);
   f.generation = 2; resolve({ publicKey: 'AA', stats: { uptime_secs: 100 } }); await flush();
   assert.equal(f.publisher.publishStatus.mock.calls.length, 0);
@@ -62,7 +62,7 @@ test('concurrent triggers coalesce and a generation change discards old readings
 test('failed reads never publish stale data and the next scheduled refresh recovers without exposing errors', async () => {
   const f = rig(); f.radio.refreshObserverStatus.mockRejectedValueOnce(new Error('PRIVATE'));
   f.mqtt.emit('broker.connected'); await flush(); assert.equal(f.publisher.publishStatus.mock.calls.length, 0);
-  await vi.advanceTimersByTimeAsync(47 * 3600000); assert.equal(f.publisher.publishStatus.mock.calls.length, 1);
+  await vi.advanceTimersByTimeAsync(30 * 60000); assert.equal(f.publisher.publishStatus.mock.calls.length, 1);
   assert.doesNotMatch(JSON.stringify(f.logger.warn.mock.calls), /PRIVATE/);
 });
 

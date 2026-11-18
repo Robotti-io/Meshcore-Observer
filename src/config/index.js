@@ -138,6 +138,10 @@ function readFloodAdvert(env) {
   return { intervalHours: readInteger(env, 'PACKETCAPTURE_FLOOD_ADVERT_INTERVAL_HOURS', 47) };
 }
 
+function readObserverStatusRefresh(env) {
+  return { intervalMinutes: readInteger(env, 'PACKETCAPTURE_OBSERVER_STATUS_REFRESH_INTERVAL_MINUTES', 30) };
+}
+
 function readZeroHopAdvert(env) {
   return { intervalMinutes: readInteger(env, 'PACKETCAPTURE_ZERO_HOP_ADVERT_INTERVAL_MINUTES', 30) };
 }
@@ -342,6 +346,7 @@ export function loadConfig(env = process.env) {
     metricsUi: readMetricsUi(env),
     botReplyQueue: readBotReplyQueue(env),
     floodAdvert: readFloodAdvert(env),
+    observerStatusRefresh: readObserverStatusRefresh(env),
     zeroHopAdvert: readZeroHopAdvert(env),
     nodeObservations: readNodeObservations(env),
     topology: readTopology(env),

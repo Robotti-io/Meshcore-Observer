@@ -1,6 +1,7 @@
 import mqtt from 'mqtt';
 
 const RECONNECT_PERIOD_MS = 5000;
+const MAX_AUTH_RECOVERY_DELAY_MS = 5 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 10000;
 // Captured packets have no local replay store. Reject excess work explicitly
 // instead of retaining an unbounded application/MQTT.js outgoing queue.
@@ -22,6 +23,11 @@ function randomSuffix() {
   return Math.random().toString(16).slice(2, 10);
 }
 
+function isAuthenticationRejection(error) {
+  // MQTT 3.1.1 return codes 4/5 and MQTT 5 reason codes 0x86/0x87.
+  return [4, 5, 0x86, 0x87].includes(error?.code);
+}
+
 /**
  * Owns one broker's MQTT.js client and its connection state (disabled,
  * connecting, connected, disconnected, retrying, failed). Reconnection is
@@ -35,6 +41,7 @@ export class MqttBroker {
   #createClient;
   #getUsername;
   #getPassword;
+  #refreshCredentials;
   #onConnect;
   #client = null;
   #state;
@@ -45,9 +52,11 @@ export class MqttBroker {
   #boundedReject = null;
   #packetRejects = new Set();
   #ackTimeouts = 0;
+  #authRecoveryPending = false;
+  #authRecoveryAttempts = 0;
 
   /**
-   * @param {{config: object, logger: object, createClient?: typeof mqtt.connect, getUsername?: () => (string|Promise<string>), getPassword?: () => (string|Promise<string>), onConnect?: () => void}} options
+   * @param {{config: object, logger: object, createClient?: typeof mqtt.connect, getUsername?: () => (string|Promise<string>), getPassword?: () => (string|Promise<string>), refreshCredentials?: () => Promise<string>, onConnect?: () => void}} options
    * `getUsername`/`getPassword`, when given, resolve the MQTT credentials at
    * each *initial* connect() call, and may be async (LetsMesh's username is
    * derived from the device's own public key, and its password is a
@@ -59,12 +68,14 @@ export class MqttBroker {
    * `onConnect` fires every time this broker (re)connects, so a caller can
    * republish retained state (e.g. observer status) to it specifically.
    */
-  constructor({ config, logger, createClient = mqtt.connect, getUsername = null, getPassword = null, onConnect = null }) {
+  constructor({ config, logger, createClient = mqtt.connect, getUsername = null, getPassword = null,
+    refreshCredentials = null, onConnect = null }) {
     this.#config = config;
     this.#logger = logger;
     this.#createClient = createClient;
     this.#getUsername = getUsername;
     this.#getPassword = getPassword;
+    this.#refreshCredentials = refreshCredentials;
     this.#onConnect = onConnect;
     this.#state = config.enabled ? 'disconnected' : 'disabled';
   }
@@ -125,14 +136,14 @@ export class MqttBroker {
       });
   }
 
-  #scheduleRecovery(generation = this.#generation) {
+  #scheduleRecovery(generation = this.#generation, delayMs = RECONNECT_PERIOD_MS) {
     if (this.#stopping || this.#recoveryTimer) return;
     this.#recoveryTimer = setTimeout(() => {
       this.#recoveryTimer = null;
       if (!this.#stopping && generation === this.#generation) {
         this.connect(this.#lastWill);
       }
-    }, RECONNECT_PERIOD_MS);
+    }, delayMs);
     this.#recoveryTimer.unref();
   }
 
@@ -235,6 +246,7 @@ export class MqttBroker {
     client.on('connect', () => {
       if(this.#client !== client || this.#stopping) return;
       this.#state = 'connected';
+      this.#authRecoveryAttempts = 0;
       this.#logger.info('services.mqtt', 'broker connected', { broker: this.#config.id });
       this.#onConnect?.();
     });
@@ -255,6 +267,7 @@ export class MqttBroker {
     client.on('error', (err) => {
       if(this.#client !== client) return;
       this.#logger.warn('services.mqtt', 'broker connection error', { broker: this.#config.id, error: err.message });
+      this.#recoverRejectedToken(client, err);
     });
 
     client.on('close', () => {
@@ -262,6 +275,39 @@ export class MqttBroker {
       if (this.#stopping) {
         this.#state = 'disconnected';
       }
+    });
+  }
+
+  #recoverRejectedToken(client, error) {
+    if (this.#config.auth.method !== 'token' || !this.#refreshCredentials
+      || !isAuthenticationRejection(error) || this.#authRecoveryPending) return;
+
+    this.#authRecoveryPending = true;
+    const generation = ++this.#generation;
+    const retryDelayMs = Math.min(
+      RECONNECT_PERIOD_MS * (2 ** this.#authRecoveryAttempts),
+      MAX_AUTH_RECOVERY_DELAY_MS
+    );
+    this.#authRecoveryAttempts += 1;
+    this.#client = null;
+    this.#state = 'retrying';
+    try { client.end(true, {}, () => {}); } catch { /* the bounded retry remains available */ }
+
+    void Promise.resolve().then(() => this.#refreshCredentials()).then(() => {
+      if (this.#stopping || generation !== this.#generation) return;
+      this.#logger.info('services.mqtt.letsmesh', 'broker rejected token; refreshed credentials for retry', {
+        broker: this.#config.id
+      });
+      this.#scheduleRecovery(generation, retryDelayMs);
+    }).catch((err) => {
+      if (this.#stopping || generation !== this.#generation) return;
+      this.#logger.warn('services.mqtt.letsmesh', 'credential refresh after broker rejection failed', {
+        broker: this.#config.id,
+        error: err.message
+      });
+      this.#scheduleRecovery(generation, retryDelayMs);
+    }).finally(() => {
+      this.#authRecoveryPending = false;
     });
   }
 

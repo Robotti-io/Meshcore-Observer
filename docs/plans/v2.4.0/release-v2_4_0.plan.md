@@ -511,6 +511,12 @@ Prefer deterministic clock advancement over waiting for wall-clock time.
 
 Use Vitest fake timers where they accurately represent the component being tested. Continue using explicitly injected clocks where doing so keeps domain behavior clearer and less coupled to the testing framework.
 
+**Implementation follow-up (2026-11-17):** Token-auth broker rejection
+recovery now force-signs a fresh on-device token and schedules a bounded retry
+with capped backoff. A focused MQTT broker regression test was added; test
+execution remains pending, so the token-refresh review checkbox above stays
+open until that test is run.
+
 #### 4.11.5 edium priority — persistence/query correctness
 
 Add focused boundary tests around:
