@@ -198,6 +198,7 @@ function renderSnapshot(snapshot) {
 function renderReplyQueueTotals(replyQueueResponse) {
   const totals = replyQueueResponse.totals;
   document.getElementById('queue-sent').textContent = totals.sent;
+  document.getElementById('queue-delivery-unknown').textContent = totals['delivery-unknown'] ?? 0;
   document.getElementById('queue-expired').textContent = totals.expired;
   document.getElementById('queue-failed').textContent = totals.failed;
 }
@@ -422,6 +423,7 @@ function renderBotReporting(usageResponse, outcomeResponse) {
     ['bot-accepted', summary.accepted],
     ['bot-distinct-senders', summary.distinctSenderNames],
     ['bot-outcome-sent', summary.outcomes.sent],
+    ['bot-outcome-delivery-unknown', summary.outcomes.deliveryUnknown],
     ['bot-outcome-failed', summary.outcomes.failed],
     ['bot-outcome-expired', summary.outcomes.expired],
     ['bot-outcome-cancelled', summary.outcomes.cancelled]
@@ -438,6 +440,49 @@ function renderBotReporting(usageResponse, outcomeResponse) {
     (row) => row.outcome ?? 'Unknown',
     (row) => row.count
   ], 'No completed bot outcomes in this range.');
+}
+
+function renderCompanionChannelSendHistory(response) {
+  if (!response) {
+    setReportingStatus('companion-send-history-status', 'loading', 'Loading Companion send history…');
+    return;
+  }
+
+  const items = response.items ?? [];
+  const summary = response.summary ?? {};
+  for (const [id, key] of [
+    ['companion-sends-total', 'total'],
+    ['companion-sends-errors', 'errors'],
+    ['companion-sends-bad-state', 'badStateErrors'],
+    ['companion-sends-echoes', 'echoConfirmed'],
+    ['companion-sends-no-response', 'noResponse']
+  ]) {
+    const value = summary[key];
+    document.getElementById(id).textContent = Number.isInteger(value) ? value.toLocaleString() : 'Unavailable';
+  }
+  renderBoundedRows('companion-send-history-table', items, [
+    (row) => formatTimestamp(row.dispatchedAt),
+    (row) => row.replyId,
+    (row) => `${row.botName ?? 'Unknown'} / ${row.channel ?? 'internal'}`,
+    (row) => row.trigger,
+    (row) => `CMD ${row.commandCode} · channel ${row.channelIndex}`,
+    (row) => row.sendStatus === 'no-response' ? 'No response'
+      : row.sendStatus === 'late-ok' ? 'Late OK (0)'
+        : row.sendStatus === 'late-err' ? `Late ERR (1)${row.deviceErrorCode === null ? '' : ` · device ${row.deviceErrorCode}`}`
+      : row.responseCode === 0 ? 'OK (0)'
+        : row.responseCode === 1 ? `ERR (1)${row.deviceErrorCode === null ? '' : ` · device ${row.deviceErrorCode}`}`
+          : 'Awaiting response',
+    (row) => row.responseAt === null ? '—' : formatTimestamp(row.responseAt),
+    (row) => row.responseCorrelation === 'untagged-active-command-window'
+      ? 'Observed during send wait; untagged'
+      : row.responseCorrelation === 'untagged-after-timeout' ? 'Observed after timeout; untagged'
+      : row.responseCorrelation === 'no-response' ? 'No response in timeout' : 'Pending',
+    (row) => row.replyOutcome ?? 'Unavailable',
+    (row) => row.meshEchoHash ? `${row.meshEchoHash} · ${formatTimestamp(row.meshEchoAt)}` : 'No matching echo recorded'
+  ], 'No channel-send diagnostics have been recorded yet.');
+  setReportingStatus('companion-send-history-status', 'ready',
+    items.length ? `Showing ${items.length} most recent channel sends. Refreshes with dashboard metrics.`
+      : 'No channel-send diagnostics have been recorded yet.');
 }
 
 function renderOperationalReporting(historyResponse, samplesResponse, runtimeResponse, observationsResponse, outcomesResponse) {
@@ -511,7 +556,8 @@ function reportingRequestDefinitions(view, params) {
   if (view === 'bots') {
     return [
       { key: 'bots-usage', path: '/api/metrics/bots/usage?' + range + '&limit=25' },
-      { key: 'bots-outcomes', path: '/api/metrics/bots/outcomes?' + range + '&limit=25' }
+      { key: 'bots-outcomes', path: '/api/metrics/bots/outcomes?' + range + '&limit=25' },
+      { key: 'bots-companion-sends', path: '/api/metrics/companion/channel-sends?limit=50' }
     ];
   }
   if (view === 'repeaters') {
@@ -534,6 +580,7 @@ function renderReportingSection(view, rangeKey) {
       data('overview-runtime-events'), data('overview-telemetry-observations'), data('overview-telemetry-outcomes'));
   } else if (view === 'bots') {
     renderBotReporting(data('bots-usage'), data('bots-outcomes'));
+    renderCompanionChannelSendHistory(data('bots-companion-sends'));
   } else if (view === 'repeaters') {
     renderRepeaterReporting(data('repeaters-adverts'), data('repeaters-topology-paths'),
       data('repeaters-topology-coverage'), data('repeaters-telemetry-observations'),
@@ -570,6 +617,7 @@ function renderOverview(summary) {
   document.getElementById('packets-received').textContent = summary.packets.received;
   document.getElementById('packets-decoded').textContent = summary.packets.decoded;
   document.getElementById('overview-replies-sent').textContent = summary.replies.outcomes.sent;
+  document.getElementById('overview-replies-unknown').textContent = summary.replies.outcomes['delivery-unknown'] ?? 0;
   document.getElementById('overview-replies-expired').textContent = summary.replies.outcomes.expired;
   document.getElementById('overview-replies-failed').textContent = summary.replies.outcomes.failed;
 

@@ -1,3 +1,5 @@
+import { signWithCompanion, SIGN_COMMAND_TIMEOUT_MS } from '../radio/companion-signing.js';
+
 const DEFAULT_TTL_SECONDS = 86400;
 const DEFAULT_REFRESH_THRESHOLD_SECONDS = 300;
 
@@ -81,7 +83,9 @@ export class LetsMeshAuth {
 
     let signature;
     try {
-      signature = await this.#radioManager.runCommand((connection) => connection.sign(signingInputBytes));
+      signature = await this.#radioManager.runCommand((connection, context) =>
+        signWithCompanion(connection, signingInputBytes, context.signal),
+      { timeoutMs: SIGN_COMMAND_TIMEOUT_MS });
     } catch (err) {
       throw new LetsMeshAuthError(`on-device JWT signing failed: ${err.message}`, { cause: err });
     }

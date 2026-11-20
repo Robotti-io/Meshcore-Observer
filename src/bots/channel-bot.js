@@ -1,4 +1,4 @@
-import { Packet } from '@liamcottle/meshcore.js';
+import { Constants, Packet } from '@liamcottle/meshcore.js';
 import { randomUUID } from 'node:crypto';
 import { normalizeRawPacketEvent } from '../packets/packet-normalizer.js';
 import { calculatePacketHash } from '../packets/packet-hash.js';
@@ -13,6 +13,8 @@ import { decryptGroupText } from './group-text-crypto.js';
 import { ensureChannel } from './channel-setup.js';
 import { renderResponse, DEFAULT_MAX_MESSAGE_BYTES } from './response-template.js';
 import { ONBOARDING_TRIGGER } from './command-handlers/onboarding.js';
+import { compileSchema } from '../validation/ajv.js';
+import { channelSendErrorResponseSchema } from './schemas.js';
 
 const PAYLOAD_TYPE_GRP_TXT = 0x05;
 const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
@@ -21,12 +23,128 @@ const DIRECT_ROUTES = new Set(['DIRECT', 'TRANSPORT_DIRECT']);
 // the configured value through.
 const DEFAULT_REPEAT_CHECK_TIMEOUT_MS = 10000;
 const DEFAULT_SCOPE_COMMAND_TIMEOUT_MS = 5000;
+const CHANNEL_SEND_DIAGNOSTIC_TIMEOUT_MS = 5000;
+const validateChannelSendErrorResponse = compileSchema(channelSendErrorResponseSchema);
 
 class ScopeCommandTimeoutError extends Error {
   constructor(phase) {
     super(`Companion did not acknowledge the scope ${phase} command`);
     this.name = 'ScopeCommandTimeoutError';
     this.phase = phase;
+  }
+}
+
+class ChannelSendRejectedError extends Error {
+  constructor(errCode, options) {
+    const detail = errCode === null ? 'without a device error code' : `with device error code ${errCode}`;
+    super(`Companion returned ERR while the channel-send acknowledgement was pending ${detail}`, options);
+    this.name = 'ChannelSendRejectedError';
+    this.errCode = errCode;
+    this.awaitedCommandCode = Constants.CommandCodes.SendChannelTxtMsg;
+    this.responseCode = Constants.ResponseCodes.Err;
+    this.replyReason = 'delivery-unknown';
+  }
+}
+
+/**
+ * The SDK's sendChannelTextMessage rejects with no value on Companion ERR.
+ * Subscribe before the SDK's one-shot listener so the caller can distinguish
+ * an explicit device rejection from a local error. meshcore.js uses its own
+ * emitter, which exposes on/off but not Node's prependListener API.
+ */
+async function sendChannelTextMessage(connection, channelIdx, message, onRejected, diagnosticContext) {
+  if (typeof connection.on !== 'function' || typeof connection.off !== 'function') {
+    return connection.sendChannelTextMessage(channelIdx, message);
+  }
+
+  let sawErrorResponse = false;
+  let errCode = null;
+  let diagnosticId = null;
+  let diagnosticTimer = null;
+  let responseCaptured = false;
+  let diagnosticTimedOut = false;
+  const { store, replyId, generation, logger } = diagnosticContext;
+  const reportDiagnosticFailure = (error, action) => {
+    logger.warn('bots.channelBot', `could not ${action} Companion channel-send diagnostic`, {
+      bot: diagnosticContext.botName,
+      replyId,
+      error: error instanceof Error ? error.message : 'non-Error failure'
+    });
+  };
+  const resolveDiagnostic = (status, responseCode, deviceErrorCode, responseAt, correlation) => {
+    if (diagnosticId === null) return;
+    if (responseCaptured) return;
+    const lateResponse = diagnosticTimedOut && status !== 'no-response';
+    if (lateResponse) {
+      status = status === 'ok' ? 'late-ok' : status === 'err' ? 'late-err' : status;
+      correlation = 'untagged-after-timeout';
+    }
+    if (status !== 'no-response') {
+      responseCaptured = true;
+      diagnosticTimedOut = false;
+    }
+    clearTimeout(diagnosticTimer);
+    try {
+      store.resolveCompanionChannelSend({
+        id: diagnosticId,
+        status,
+        responseCode,
+        deviceErrorCode,
+        responseAt,
+        completedAt: Date.now(),
+        correlation
+      });
+    } catch (error) {
+      reportDiagnosticFailure(error, 'resolve');
+    }
+  };
+  const onTransmit = (frame) => {
+    if (!store || frame?.[0] !== Constants.CommandCodes.SendChannelTxtMsg || diagnosticId !== null) return;
+    try {
+      diagnosticId = store.recordCompanionChannelSend({
+        replyId,
+        generation,
+        commandCode: frame[0],
+        channelIndex: frame[2],
+        dispatchedAt: Date.now()
+      });
+      diagnosticTimer = setTimeout(() => {
+        diagnosticTimedOut = true;
+        resolveDiagnostic('no-response', null, null, null, 'no-response');
+      }, CHANNEL_SEND_DIAGNOSTIC_TIMEOUT_MS);
+    } catch (error) {
+      reportDiagnosticFailure(error, 'record');
+    }
+  };
+  const onOkResponse = () => resolveDiagnostic('ok', Constants.ResponseCodes.Ok, null, Date.now(), 'untagged-active-command-window');
+  const onErrorResponse = (response = {}) => {
+    sawErrorResponse = true;
+    if (validateChannelSendErrorResponse(response)) {
+      errCode = response.errCode;
+    }
+    resolveDiagnostic('err', Constants.ResponseCodes.Err, errCode, Date.now(), 'untagged-active-command-window');
+    try {
+      onRejected?.(errCode);
+    } catch {
+      // A local tracker/logger failure must not block the SDK's own ERR handler.
+    }
+  };
+
+  connection.on('tx', onTransmit);
+  connection.on(Constants.ResponseCodes.Ok, onOkResponse);
+  connection.on(Constants.ResponseCodes.Err, onErrorResponse);
+  try {
+    await connection.sendChannelTextMessage(channelIdx, message);
+  } catch (error) {
+    if (sawErrorResponse) {
+      throw new ChannelSendRejectedError(errCode, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(diagnosticTimer);
+    connection.off('tx', onTransmit);
+    connection.off(Constants.ResponseCodes.Ok, onOkResponse);
+    connection.off(Constants.ResponseCodes.Err, onErrorResponse);
   }
 }
 
@@ -427,7 +545,7 @@ export class ChannelBot {
     // First remove our own known reply echoes from the response evidence
     // stream. They may arrive after a newer request is queued and must not
     // accidentally satisfy that newer interaction.
-    const isOwnReplyEcho = this.#checkForRepeat(decrypted.text, hopCountFor(packet), decrypted.sender);
+    const isOwnReplyEcho = this.#checkForRepeat(decrypted.text, hopCountFor(packet), decrypted.sender, hash);
     if (!isOwnReplyEcho && [...this.#commands.values()].some((command) => command.suppressIfAnswered === true)) {
       try {
         await this.#replySuppression({
@@ -727,10 +845,10 @@ export class ChannelBot {
    * A send failure here is deliberately left to propagate to that
    * dispatcher rather than being caught locally: ReplyQueue's own
    * dispatch step (see reply-queue.js #tick()) already catches it,
-   * counts it in totalFailed, and logs it with channel/sender context
+   * records the terminal outcome, and logs it with channel/sender context
    * this method would otherwise have to duplicate - catching and
    * swallowing it here too would either double-log the same failure or,
-   * worse, let the queue miscount a failed send as sent. Bot failure
+   * worse, let the queue miscount an uncertain send as sent. Bot failure
    * still can't stop packet capture/MQTT (Section 21): the queue's catch
    * is what provides that guarantee for this path, one level up from
    * where every other public method here still catches locally.
@@ -798,8 +916,29 @@ export class ChannelBot {
     }
 
     const transaction = { failure: null };
+    let rejectionTracked = false;
+    const trackRejectedReply = () => {
+      if (rejectionTracked) return;
+      rejectionTracked = true;
+      const { expired, evicted } = this.#repeatCheckTracker.register(message, {
+        sender,
+        trigger,
+        hash,
+        replyId: item.id,
+        deliveryReconciliation: Number.isInteger(item.id)
+      });
+      this.#reportExpiredRepeatChecks(expired);
+      this.#reportCapacityEvictions(evicted);
+    };
     try {
       await this.#radioManager.runCommand(async (connection, context) => {
+        const diagnosticContext = {
+          store: this.#store,
+          replyId: item.id,
+          generation: context.generation,
+          botName: this.#name,
+          logger: this.#logger
+        };
         const runScopeCommand = async (phase, action) => {
           transaction.phase = phase;
           this.#assertScopeContext(context);
@@ -819,8 +958,8 @@ export class ChannelBot {
           try {
             await Promise.race([Promise.resolve().then(action), aborted, timeout]);
             // The SDK's resolved send promise is the Companion's explicit OK
-            // acknowledgment. Preserve that evidence even if disconnect is
-            // observed immediately afterward while restoration is still due.
+            // acknowledgment. Preserve that evidence if the connection check
+            // immediately afterward observes a changed session.
             if (phase === 'send') transaction.sendAccepted = true;
             this.#assertScopeContext(context);
           } catch (error) {
@@ -853,7 +992,7 @@ export class ChannelBot {
           }
 
           if (applyError) {
-            await this.#restoreDeviceScope(connection, context, runScopeCommand, transaction);
+            await this.#clearDeviceScope(connection, context, runScopeCommand, transaction);
             if (mayUseFallback && deliveryPolicy.fallback.mode === 'region') {
               this.#logger.info('bots.channelBot', 'using explicitly configured region fallback after scope apply failure', {
                 bot: this.#name,
@@ -869,35 +1008,17 @@ export class ChannelBot {
             throw new ReplyPolicyError('scope-unavailable', 'Companion could not apply the configured reply region scope', { cause: applyError });
           }
 
-          let sendError = null;
-          try {
-            await runScopeCommand('send', () => connection.sendChannelTextMessage(this.#channelIdx, message));
-          } catch (error) {
-            if (transaction.failure || context.signal.aborted || error instanceof ReplyPolicyError) throw error;
-            sendError = error ?? new Error('Companion rejected the channel reply');
-          }
-
-          let restoreError = null;
-          try {
-            await this.#restoreDeviceScope(connection, context, runScopeCommand, transaction);
-          } catch (error) {
-            restoreError = error;
-          }
-          if (restoreError) {
-            if (sendError) throw sendError;
-            this.#logger.error('bots.channelBot', 'Companion accepted a scoped reply but scope restoration failed; connection was retired', {
-              bot: this.#name,
-              trigger,
-              generation: context.generation,
-              reason: 'scope-restore-failed'
-            });
-            return;
-          }
-          if (sendError) throw sendError;
+          // Flood scope is connection-session state. Leave the selected
+          // region active; the next channel reply will either set its own
+          // region or clear back to the device default before sending.
+          await runScopeCommand('send', () => sendChannelTextMessage(connection, this.#channelIdx, message,
+            trackRejectedReply, diagnosticContext));
         };
 
         if (deliveryPolicy.scope.mode === 'device-default') {
-          await runScopeCommand('send', () => connection.sendChannelTextMessage(this.#channelIdx, message));
+          await this.#clearDeviceScope(connection, context, runScopeCommand, transaction);
+          await runScopeCommand('send', () => sendChannelTextMessage(connection, this.#channelIdx, message,
+            trackRejectedReply, diagnosticContext));
         } else if (deliveryPolicy.scope.mode === 'region') {
           await sendScoped(deliveryPolicy.scope.region, true);
         } else if (deliveryPolicy.scope.mode === 'unscoped') {
@@ -915,10 +1036,19 @@ export class ChannelBot {
           { cause: error }
         );
       }
-      if (transaction.failure && !transaction.sendAccepted) throw transaction.failure;
-      if (transaction.failure && transaction.sendAccepted) {
-        // The channel command was accepted, so preserve that delivery result;
-        // restoration failure is separately logged and the connection retired.
+      if (transaction.sendAccepted) {
+        // A later connection-state check cannot revoke the Companion's
+        // explicit acceptance of this channel send.
+        this.#logger.warn('bots.channelBot', 'Companion accepted a channel reply before the radio session changed', {
+          bot: this.#name,
+          trigger,
+          generation: this.#radioManager.getConnectionSnapshot()?.generation ?? null,
+          reason: error?.replyReason ?? error?.code ?? 'post-send-error'
+        });
+      } else if (error instanceof ChannelSendRejectedError) {
+        throw error;
+      } else if (transaction.failure) {
+        throw transaction.failure;
       } else {
         throw error;
       }
@@ -942,16 +1072,16 @@ export class ChannelBot {
     }
   }
 
-  async #restoreDeviceScope(connection, context, runScopeCommand, transaction) {
+  async #clearDeviceScope(connection, context, runScopeCommand, transaction) {
     try {
-      await runScopeCommand('restore', () => connection.clearFloodScope());
+      await runScopeCommand('clear', () => connection.clearFloodScope());
     } catch (error) {
       if (transaction.failure) throw transaction.failure;
-      transaction.failure = new ReplyPolicyError('scope-unavailable', 'Could not restore the Companion region scope after a bot reply', { cause: error });
-      // Region scope is connection-global. Never run later commands on a
-      // session whose scope restoration could not be confirmed.
+      transaction.failure = new ReplyPolicyError('scope-unavailable', 'Could not clear the Companion flood scope before a channel reply', { cause: error });
+      // Never send a device-default reply when the prior session scope may
+      // still be active, and retire the connection before another command.
       if (!context.signal.aborted) {
-        await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-restore-failed' });
+        await this.#radioManager.invalidateConnection({ generation: context.generation, reason: 'scope-clear-failed' });
       }
       throw transaction.failure;
     }
@@ -965,7 +1095,7 @@ export class ChannelBot {
    * (half-duplex), so an exact plaintext match here is necessarily a
    * rebroadcast of a reply this bot sent, not an echo of our own TX.
    */
-  #checkForRepeat(text, hopCount, sender = null) {
+  #checkForRepeat(text, hopCount, sender = null, packetHash = null) {
     let result = this.#repeatCheckTracker.checkAndConsume(text);
     if (!result.confirmed && sender) {
       result = this.#repeatCheckTracker.checkAndConsume(`${sender}: ${text}`);
@@ -977,14 +1107,59 @@ export class ChannelBot {
       return false;
     }
 
+    const deliveryReconciled = confirmed.meta.deliveryReconciliation === true
+      && Number.isInteger(confirmed.meta.replyId);
+    if (deliveryReconciled) {
+      this.#repliesSent += 1;
+      const occurredAt = this.#now();
+      try {
+        const persisted = this.#store?.confirmReplyEcho({
+          id: confirmed.meta.replyId,
+          occurredAt
+        });
+        if (!persisted) {
+          this.#logger.warn('bots.channelBot', 'mesh echo confirmed a device-rejected reply but its sent outcome was not persisted', {
+            bot: this.#name,
+            trigger: confirmed.meta.trigger,
+            replyId: confirmed.meta.replyId
+          });
+        } else {
+          try {
+            this.#store.confirmCompanionChannelSendEcho({
+              id: confirmed.meta.replyId,
+              occurredAt,
+              packetHash
+            });
+          } catch (error) {
+            this.#logger.warn('bots.channelBot', 'mesh echo confirmed the reply but its Companion diagnostic could not be updated', {
+              bot: this.#name,
+              trigger: confirmed.meta.trigger,
+              replyId: confirmed.meta.replyId,
+              error: error instanceof Error ? error.message : 'non-Error failure'
+            });
+          }
+        }
+      } catch (error) {
+        this.#logger.warn('bots.channelBot', 'mesh echo confirmed a device-rejected reply but its sent outcome could not be persisted', {
+          bot: this.#name,
+          trigger: confirmed.meta.trigger,
+          error: error instanceof Error ? error.message : 'non-Error failure'
+        });
+      }
+    }
+
     this.#repeatsConfirmed += 1;
-    this.#logger.info('bots.channelBot', 'confirmed reply was repeated on the mesh', {
+    this.#logger.info('bots.channelBot', deliveryReconciled
+      ? 'confirmed a device-rejected reply was repeated on the mesh'
+      : 'confirmed reply was repeated on the mesh', {
       bot: this.#name,
       sender: confirmed.meta.sender,
       trigger: confirmed.meta.trigger,
       hash: confirmed.meta.hash,
+      ...(deliveryReconciled && packetHash ? { echoPacketHash: packetHash } : {}),
       hopCount,
-      elapsedMs: confirmed.elapsedMs
+      elapsedMs: confirmed.elapsedMs,
+      ...(deliveryReconciled ? { deliveryReconciled: true } : {})
     });
     return true;
   }

@@ -307,13 +307,16 @@ such as `cvg,oki,OH.BUT.Fairfield.Celado`; put
 to every bot even when discovery has not found them. Since an incoming packet
 contains only a short transport code, a bot without a fixed region skips a
 scoped command if its region is unknown or ambiguous among the known names.
-For bots without an array allowlist, an unscoped command reply has no temporary
-region override and uses the Companion's configured default, if any. The
+For bots without a fixed region or array allowlist, an unscoped command reply
+uses the Companion's configured default, if any. The
 currently exposed Companion command cannot force an unscoped send when a device
-default region is configured. Scoped replies temporarily apply the matched
-region and then restore the Companion's default. These region-scope changes
-are serialized with radio commands; if the override cannot be restored, the
-radio connection is reset to prevent later traffic from inheriting it.
+default region is configured. Each scoped channel reply applies its matched
+region before sending and leaves that session override active. The next
+channel-bot reply applies its own region or clears the override to the
+Companion's configured default before sending. Private replies and scheduled
+flood adverts clear the override before their device-default transmissions.
+These scope changes are serialized with radio commands; if a required apply or
+clear fails, the radio connection is reset before another operation uses it.
 
 Commands may override inherited scope with an explicit policy:
 
@@ -469,11 +472,13 @@ seeing that quiet window:
 | --- | --- |
 | `PACKETCAPTURE_BOT_REPLY_QUIET_MS` | Required silence before a queued reply is sent; default `5000` |
 | `PACKETCAPTURE_BOT_REPLY_TTL_MS` | Drop a queued reply unsent after waiting this long; default `60000` |
-| `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS` | After a reply is sent, wait this long for its rebroadcast before counting it unconfirmed; default `10000` |
+| `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS` | After the Companion responds to a send, wait this long for its rebroadcast before counting it unconfirmed; default `10000` |
 
-The repeat-check window starts after a reply is sent, separately from the
-queue TTL above. Set `PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS=0` for an
-immediate timeout, which is counted on the next tracker sweep or operation.
+The repeat-check window starts after the Companion responds, separately from
+the queue TTL above. If the Companion returns `ERR`, the reply is recorded as
+delivery-unknown until a matching mesh rebroadcast confirms it was sent. Set
+`PACKETCAPTURE_BOT_REPLY_REPEAT_CHECK_MS=0` for an immediate timeout, which is
+counted on the next tracker sweep or operation.
 
 There's deliberately no size cap on the queue - sending a reply also
 counts as channel activity, so the next queued item always needs its own
@@ -664,8 +669,9 @@ live, all-time-since-start counters, unaffected by the duration selector.
 "Decoded" means a packet reached the publish pipeline, not that a broker
 actually received it - the store separately persists a per-broker
 sent/skipped/failed delivery breakdown, and a full reply-lifecycle history
-(sent/failed/expired/cancelled, per bot and per trigger, not just
-successful sends) for the shared reply queue. Broker delivery and bot outcome
+(sent/failed/expired/cancelled/delivery-unknown, per bot and per trigger,
+not just successful sends) for the shared reply queue. A matching mesh echo
+promotes an uncertain device-ERR reply to sent. Broker delivery and bot outcome
 summaries are available in their selected-range dashboard views, while the
 underlying bounded reads remain available through
 `MetricsStore#queryBrokerDeliveryTotals` and `#queryBotReplyOutcomeTotals`.
@@ -673,7 +679,7 @@ underlying bounded reads remain available through
 Bot interaction history also records accepted usage: an eligible command
 counts when the shared reply queue successfully persists it after duplicate
 filtering. Usage queries use Observer acceptance time; sent, failed, expired,
-and cancelled outcomes use completion time. Queue recovery updates the same
+cancelled, and delivery-unknown outcomes use completion time. Queue recovery updates the same
 interaction ID without adding another use. The existing bot-local duplicate
 window remains transient; history does not provide permanent RF deduplication.
 

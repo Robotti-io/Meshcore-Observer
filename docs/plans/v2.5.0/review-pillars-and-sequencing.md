@@ -71,7 +71,7 @@ Recommended sequence:
 1. Companion identity, Unicode/tag syntax, and command-level targeting.
 2. Agree on the small delivery-policy and lifecycle model needed by suppression, private messages, and scoped sends.
 3. Handler-aware cooperative suppression, with durable outcomes and reporting.
-4. Region-name/key and firmware research, then atomic scope/apply/send/restore behavior and explicit failure policy.
+4. Region-name/key and firmware research, then serialized scope/apply/send transitions, next-send scope selection, and explicit failure policy.
 5. Private command intake and private reply transport, then ACK correlation, bounded retries, and restart/reconnect behavior.
 6. Integrated bot reporting and real multi-bot/RF validation.
 

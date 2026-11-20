@@ -1,14 +1,15 @@
 const DEFAULT_MAX_ENTRIES = 200;
 
 /**
- * Tracks outbound channel-bot replies awaiting confirmation that they were
- * actually rebroadcast onto the mesh. MeshCore's GRP_TXT flood relaying
+ * Tracks channel-bot reply text awaiting confirmation that it was
+ * rebroadcast onto the mesh. MeshCore's GRP_TXT flood relaying
  * leaves the encrypted payload unchanged as it hops, so a later decrypted
- * plaintext identical to what we just sent is a repeat by another node - our
+ * plaintext identical to the reply text is a repeat by another node - our
  * own radio can't hear its own outgoing transmission (half-duplex). Keyed by
  * exact plaintext rather than a packet hash because the device (not this
- * process) performs the AES-ECB encryption, so the ciphertext/hash of our own
- * send can't be reproduced client-side.
+ * process) performs the AES-ECB encryption, so the ciphertext/hash can't be
+ * reproduced client-side. A device-rejected send is also tracked briefly;
+ * its echo can establish that the message went out despite the rejection.
  *
  * Bounded by both entry count and age, matching PacketDeduplicator's
  * eviction style, since it serves the same "don't grow unbounded on a
@@ -42,7 +43,21 @@ export class RepeatCheckTracker {
     const expired = this.#evictExpired(now);
 
     const entries = this.#pendingByText.get(text) ?? [];
-    entries.push({ meta, expiresAt: now + this.#timeoutMs, sentAt: now });
+    let registeredMeta = meta;
+    if (entries.length > 0) {
+      // Plaintext is the only available correlation key because the device
+      // performs encryption. Identical pending replies cannot be assigned
+      // safely to one send attempt, so none may reconcile an uncertain send.
+      for (const entry of entries) {
+        if (entry.meta.deliveryReconciliation === true) {
+          entry.meta = { ...entry.meta, deliveryReconciliation: false };
+        }
+      }
+      if (meta.deliveryReconciliation === true) {
+        registeredMeta = { ...meta, deliveryReconciliation: false };
+      }
+    }
+    entries.push({ meta: registeredMeta, expiresAt: now + this.#timeoutMs, sentAt: now });
     this.#pendingByText.set(text, entries);
     this.#totalPending += 1;
 

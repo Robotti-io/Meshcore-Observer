@@ -54,6 +54,12 @@ export const decryptedGroupTextSchema = {
   }
 };
 
+export const channelSendErrorResponseSchema = {
+  $id: 'meshcore-observer/bots/channel-send-error-response',
+  type: 'object', additionalProperties: false, required: ['errCode'],
+  properties: { errCode: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { type: 'null' }] } }
+};
+
 export const satisfactoryChannelResponseSchema = {
   $id: 'meshcore-observer/bots/satisfactory-channel-response',
   type: 'object',

@@ -852,6 +852,21 @@ it must converge on one canonical message identifier before bot business logic.
 
 This intentionally improves on the current implementation, where separate event paths can potentially represent the same underlying message.
 
+### Companion channel-send diagnostics
+
+For each channel-bot reply, retain the actual transmitted Companion command
+code and channel index, the first generic OK/ERR response observed while the
+send is pending, and any later exact-text mesh-echo confirmation. Link the
+diagnostic to the persisted bot reply ID and store the echo packet hash so it
+can be compared with packet-capture records. Companion responses do not carry
+command IDs; report this as an untagged response observed during the active
+send window, not as protocol-level proof that a particular command produced
+it.
+
+Expose the latest 50 transactions and a rolling 24-hour summary through the
+Bots dashboard and `/api/metrics/companion/channel-sends`. Do not retain
+message text, encrypted payloads, or raw Companion frames.
+
 ---
 
 ## 22. Graceful Shutdown

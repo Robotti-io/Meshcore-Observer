@@ -24,7 +24,7 @@
     "task:unregister": "powershell -ExecutionPolicy Bypass -File scripts/unregister-scheduled-task.ps1"
   },
   "dependencies": {
-    "@liamcottle/meshcore.js": "^1.15.0",
+    "@liamcottle/meshcore.js": "^1.15.1",
     "ajv": "^8.20.0",
     "mqtt": "^5.16.0"
   },

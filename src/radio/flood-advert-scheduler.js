@@ -100,7 +100,12 @@ export class FloodAdvertScheduler {
       const attempt = this.#airtimeCoordinator.tryRunWhenQuiet(async () => {
         if (!this.#running || !this.#connected || !this.#store.startFloodAdvertAttempt(this.#now())) return;
         try {
-          await this.#radioManager.runCommand((connection) => connection.sendFloodAdvert(), { timeoutMs: COMMAND_TIMEOUT_MS });
+          await this.#radioManager.runCommand(async (connection) => {
+            // A channel bot may have left a region scope active for its next
+            // reply; flood adverts always use the Companion's device default.
+            await connection.clearFloodScope();
+            return connection.sendFloodAdvert();
+          }, { timeoutMs: COMMAND_TIMEOUT_MS });
           this.#store.resolveFloodAdvertAttempt({ resolvedAt: this.#now(), intervalMs: this.#intervalMs, sent: true });
           this.#logger.info('services.floodAdvert', 'flood advert accepted by Companion');
         } catch (err) {

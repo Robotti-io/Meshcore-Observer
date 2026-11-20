@@ -53,6 +53,11 @@ export const botOutcomeQuerySchema = reportingQuerySchema('bot-outcome-query', {
   ...REPORTING_PAGE, botName: REPORTING_TEXT, channel: REPORTING_TEXT,
   trigger: REPORTING_TEXT, sender: REPORTING_TEXT
 });
+export const companionChannelSendsQuerySchema = {
+  $id: 'meshcore-observer/web/companion-channel-sends-query',
+  type: 'object', additionalProperties: false,
+  properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } }
+};
 export const advertReportQuerySchema = reportingQuerySchema('advert-report-query', {
   ...REPORTING_PAGE, type: { enum: ['CHAT', 'REPEATER'] }
 });
@@ -163,6 +168,7 @@ export const validateNodeTotalsQuery = compileSchema(nodeTotalsQuerySchema);
 export const validateDashboardQuery = compileSchema(dashboardQuerySchema);
 export const validateBotUsageQuery = compileSchema(botUsageQuerySchema);
 export const validateBotOutcomeQuery = compileSchema(botOutcomeQuerySchema);
+export const validateCompanionChannelSendsQuery = compileSchema(companionChannelSendsQuerySchema);
 export const validateAdvertReportQuery = compileSchema(advertReportQuerySchema);
 export const validateProcessHistoryQuery = compileSchema(processHistoryQuerySchema);
 export const validateProcessSamplesQuery = compileSchema(processSamplesQuerySchema);

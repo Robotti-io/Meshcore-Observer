@@ -16,6 +16,7 @@ import {
   validateNodesListQuery,
   validateBotUsageQuery,
   validateBotOutcomeQuery,
+  validateCompanionChannelSendsQuery,
   validateAdvertReportQuery,
   validateProcessHistoryQuery,
   validateProcessSamplesQuery,
@@ -365,6 +366,11 @@ export class MetricsServer {
       return;
     }
 
+    if (pathname === '/api/metrics/companion/channel-sends') {
+      this.#handleCompanionChannelSends(res, searchParams);
+      return;
+    }
+
     if (pathname === '/api/metrics/bots/commands') {
       this.#handleBotCommands(res, searchParams);
       return;
@@ -690,7 +696,7 @@ export class MetricsServer {
   }
 
   /**
-   * Reply-lifecycle outcome totals (sent/failed/expired/cancelled) summed
+   * Reply-lifecycle outcome totals (sent/failed/expired/cancelled/delivery-unknown) summed
    * across every bot, for the requested range - unlike queue depth (a live
    * gauge, served via /api/metrics), these are historical counts and so
    * follow the same duration-selector pattern as packet-types/history.
@@ -704,6 +710,19 @@ export class MetricsServer {
 
     const totals = this.#metricsStore.queryReplyOutcomeTotals(window);
     this.#sendJson(res, 200, { start: window.start, end: window.end, totals });
+  }
+
+  #handleCompanionChannelSends(res, searchParams) {
+    const query = parseRangeQuery(searchParams);
+    if (!validateCompanionChannelSendsQuery(query)) {
+      this.#sendJson(res, 400, { error: `invalid query: ${validateCompanionChannelSendsQuery.errors.map((error) => error.message).join('; ')}` });
+      return;
+    }
+    const items = this.#metricsStore.queryRecentCompanionChannelSends({ limit: query.limit ?? 50 });
+    const end = Date.now();
+    const start = Math.max(0, end - 86_400_000);
+    const summary = this.#metricsStore.queryCompanionChannelSendSummary({ start, end });
+    this.#sendJson(res, 200, { start, end, summary, items });
   }
 
   /**

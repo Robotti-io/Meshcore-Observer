@@ -124,6 +124,49 @@ export const botReplyResolutionSchema = {
   }
 };
 
+export const botReplyEchoConfirmationSchema = {
+  $id: 'meshcore-observer/metrics/bot-reply-echo-confirmation',
+  type: 'object', additionalProperties: false, required: ['id','occurredAt'],
+  properties: { id: { type: 'integer', minimum: 1 }, occurredAt: epochMs }
+};
+
+export const companionChannelSendSchema = {
+  $id: 'meshcore-observer/metrics/companion-channel-send',
+  type: 'object', additionalProperties: false,
+  required: ['replyId','generation','commandCode','channelIndex','dispatchedAt'],
+  properties: {
+    replyId: { type: 'integer', minimum: 1 }, generation: { type: 'integer', minimum: 1 },
+    commandCode: { const: 3 }, channelIndex: { type: 'integer', minimum: 0, maximum: 255 },
+    dispatchedAt: epochMs
+  }
+};
+
+export const companionChannelSendResolutionSchema = {
+  $id: 'meshcore-observer/metrics/companion-channel-send-resolution',
+  type: 'object', additionalProperties: false,
+  required: ['id','status','responseCode','deviceErrorCode','responseAt','completedAt','correlation'],
+  properties: {
+    id: { type: 'integer', minimum: 1 }, status: { enum: ['ok','err','late-ok','late-err','no-response'] },
+    responseCode: { anyOf: [{ const: 0 }, { const: 1 }, { type: 'null' }] },
+    deviceErrorCode: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { type: 'null' }] },
+    responseAt: { anyOf: [epochMs, { type: 'null' }] }, completedAt: epochMs,
+    correlation: { enum: ['untagged-active-command-window','untagged-after-timeout','no-response'] }
+  }
+};
+
+export const companionChannelSendEchoSchema = {
+  $id: 'meshcore-observer/metrics/companion-channel-send-echo',
+  type: 'object', additionalProperties: false, required: ['id','occurredAt','packetHash'],
+  properties: { id: { type: 'integer', minimum: 1 }, occurredAt: epochMs,
+    packetHash: { type: 'string', pattern: '^[0-9A-F]{16}$' } }
+};
+
+export const companionChannelSendQuerySchema = {
+  $id: 'meshcore-observer/metrics/companion-channel-send-query',
+  type: 'object', additionalProperties: false,
+  properties: { limit: { type: 'integer', minimum: 1, maximum: 100 } }
+};
+
 export const botReplyDispatchClaimSchema = {
   $id: 'meshcore-observer/metrics/bot-reply-dispatch-claim',
   type: 'object', additionalProperties: false, required: ['id','dispatchStartedAt'],

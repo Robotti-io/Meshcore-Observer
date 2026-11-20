@@ -590,10 +590,13 @@ resolve the packet scope without region discovery or the observer-wide
 resolvable incoming scope using recent discovery and the observer-wide list;
 unknown or ambiguous scoped commands are skipped.
 
-All channel-bot replies continue to use flood routing. Scoped sends temporarily
-apply the region transport key and clear the override to restore the Companion's
-configured default within the serialized radio command. Failure to restore scope resets the radio
-connection. This bot-level behavior is the current baseline; it does not yet
+All channel-bot replies continue to use flood routing. Each channel reply
+applies its resolved region before sending and leaves that session override
+active. The next channel reply applies its own region or clears to the
+Companion's configured default before sending. Private replies and scheduled
+flood adverts clear the override before their device-default sends. Failure to
+apply or clear scope retires the radio connection. This bot-level behavior is
+the current baseline; it does not yet
 provide per-command scope selection, explicit fallback policy, or the broader
 failure/recovery validation described in this feature plan. See the operator
 contract in the [README](../../../README.md#2-channel-bots).
@@ -1252,7 +1255,7 @@ This pillar-level plan covers the 14 scoped child issues. Each child remains a s
 - `src/bots/reply-dispatcher.js` dispatches persisted plain-data items to the configured bot instance.
 - `src/bots/schemas.js` and `src/bots/bots-config-loader.js` define and strictly validate bot/command configuration. Runtime environment configuration is centralized in `src/config/`.
 - `src/radio/radio-manager.js` serializes Companion commands through `CommandQueue`, exposes normalized radio events and device info, and can invalidate an unsafe connection generation. Its current events and identity exposure do not establish private-message or ACK support.
-- `src/bots/region-scope.js` derives and resolves channel region scopes. `ChannelBot` already supports bot-level fixed/allowlisted region scope, mirrors recognized incoming scoped commands, and clears scope after a serialized send; failure to restore invalidates that radio connection.
+- `src/bots/region-scope.js` derives and resolves channel region scopes. `ChannelBot` supports bot-level fixed/allowlisted region scope and mirrors recognized incoming scoped commands. A channel send leaves an accepted region active until the next channel send applies another region or clears to device default; private replies and scheduled flood adverts clear before their device-default transmissions.
 - `src/metrics/store.js` owns the always-on SQLite `bot_replies` lifecycle table and migrations. It has a region-scope field but not the broader targeting, suppression, private transport, attempt, or ACK lifecycle requested here.
 - Existing test seams are under `test/bots/`, `test/radio/`, and `test/metrics/`. Reporting seams are in `src/metrics/`, `src/web/`, and their tests.
 
@@ -1327,10 +1330,21 @@ This work stays in JavaScript ES modules, uses centralized strict AJV schemas fo
 
 #### T8: P3-08 / #59 — Make scoped sends one safe radio transaction
 - Objective: Preserve scope ownership through apply, send, and restoration for every competing radio consumer.
-- Specific changes: Review the existing serialized `setFloodScope` → send → `clearFloodScope` path against T1 and P1-08; add required scope acknowledgement, cancellation/disconnect handling, generation checks, observable failure outcome, and reconnect-safe restoration without assuming firmware state.
-- Definition of done: Scope cannot leak between bots or into later normal traffic; apply/send/restore failures follow approved fallback policy; normal capture, advert, and command coordination remain intact. Connection retirement may temporarily pause radio capture while the existing reconnect path runs.
-- Expected tests / validation: Interleavings with scoped/unscoped work, failures at each transaction step, reconnect/generation changes, mixed workload, and existing radio consumers; `npm test` and `npm run lint`. Hardware checks only under separately authorized validation.
-- Implementation record: Complete. The scoped transaction waits for Companion acknowledgments for apply, send, and restore; checks the active generation and cancellation signal at every boundary; and retires the connection after a five-second acknowledgment timeout or unconfirmed restoration. Explicit regional fallback remains limited to a proven pre-send apply failure followed by acknowledged restoration. If send acceptance is confirmed but restoration fails, lifecycle status remains `sent`, while the restoration error is logged and the connection is retired. Tests cover apply/send/restore failures and timeouts, disconnect and stale generation, accepted send with failed restoration, and competing command serialization. Full `npm test` passed (115 files / 1,615 tests); lint and `git diff --check` passed. Hardware validation was not performed.
+- Specific changes: Serialize region application and channel send; retain an accepted region for the next channel-bot reply to replace or clear. Clear to device default before device-default channel replies, private replies, and scheduled flood adverts. Preserve acknowledgment, cancellation/disconnect handling, generation checks, failure outcomes, and connection retirement without assuming firmware state.
+- Definition of done: Each channel reply uses its queued scope policy; no non-channel default flood sender inherits a channel scope; apply/send/clear failures follow approved failure policy; normal capture, advert, and command coordination remain intact. Connection retirement may temporarily pause radio capture while the existing reconnect path runs.
+- Expected tests / validation: Interleavings with consecutive same/different region replies and device-default sends, private reply and advert interleaving, failures at each command step, reconnect/generation changes, mixed workload, and existing radio consumers; `npm test` and `npm run lint`. Hardware checks only under separately authorized validation.
+- Previous implementation record: Complete for the then-current set/send/clear lifecycle. The old validation covered apply/send/restore failures, timeouts, disconnect and stale generation, accepted send with failed restoration, and command serialization. Its test results and hardware-validation statement describe that earlier implementation and are not validation of the persistent-scope behavior below.
+
+#### Persistent scope lifecycle update — 2026-11-18
+
+Following operator direction, channel replies now leave the accepted region
+override active. Each subsequent channel reply applies its own region or clears
+to device default before sending. Private replies and scheduled flood adverts
+clear scope before their device-default transmissions. The reply is counted as
+sent once the Companion acknowledges it, even if the radio session changes
+immediately afterward. Default-scope clearing and region application fail
+closed and retire the uncertain connection. This is a local implementation
+update; no live hardware validation was performed in this change.
 
 #### T9: P3-09 / #60 — Receive private commands through shared handlers
 - Objective: Accept supported private contact messages without duplicating command semantics.

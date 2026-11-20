@@ -225,9 +225,16 @@ export class ReplyQueue {
       const resolved = this.#store.resolveReplyItem(item.id, {
         status, resolvedAt: occurredAt, queuedMs: occurredAt - item.enqueuedAt, ...(reason ? { reason } : {})
       });
-      if (!resolved) this.#logger.warn('bots.replyQueue', 'reply terminal state was not committed; restart will recover it as delivery-unknown', {
-        bot: item.botName, trigger: item.trigger, status
-      });
+      if (!resolved) {
+        const current = this.#store.getReplyById(item.id);
+        // The channel bot may have confirmed a matching rebroadcast while
+        // this queue was recording the Companion's ambiguous ERR response.
+        if (current?.status !== 'sent') {
+          this.#logger.warn('bots.replyQueue', 'reply terminal state was not committed; restart will recover it as delivery-unknown', {
+            bot: item.botName, trigger: item.trigger, status
+          });
+        }
+      }
     } catch (err) {
       this.#logger.warn('bots.replyQueue', 'failed to mark a reply resolved; restart will recover it as delivery-unknown', {
         bot: item.botName,
@@ -288,19 +295,28 @@ export class ReplyQueue {
       const dispatched = await transmission;
       if (dispatched) this.#resolve(next, 'sent', this.#now());
     } catch (err) {
+      const deliveryUnknown = err?.replyReason === 'delivery-unknown';
       const reason = ['scope-unavailable', 'unsupported-policy'].includes(err?.replyReason)
         ? err.replyReason
         : 'send-failed';
+      const outcome = deliveryUnknown ? 'delivery-unknown' : 'failed';
       // Commit the outcome before logging so a logger failure cannot leave
       // an otherwise resolved dispatch without its terminal result.
-      this.#resolve(next, 'failed', this.#now(), reason);
-      this.#logger.warn('bots.replyQueue', 'failed to send a queued reply', {
+      this.#resolve(next, outcome, this.#now(), reason);
+      this.#logger.warn('bots.replyQueue', deliveryUnknown
+        ? 'Companion returned ERR while the channel-send acknowledgement was pending; waiting for a matching mesh echo'
+        : 'failed to send a queued reply', {
         bot: next.botName,
+        replyId: next.id,
         channel: next.channel,
         trigger: next.trigger,
         sender: next.sender,
         error: describeThrownValue(err),
-        reason
+        reason: deliveryUnknown ? 'delivery-unknown' : reason,
+        ...(Number.isInteger(err?.awaitedCommandCode) ? { awaitedCommandCode: err.awaitedCommandCode } : {}),
+        ...(Number.isInteger(err?.responseCode) ? { responseCode: err.responseCode } : {}),
+        ...(Number.isInteger(err?.responseCode) ? { responseCorrelation: 'untagged-response-during-awaited-command' } : {}),
+        ...(Number.isInteger(err?.errCode) ? { deviceErrorCode: err.errCode } : {})
       });
     } finally {
       this.#sending = false;

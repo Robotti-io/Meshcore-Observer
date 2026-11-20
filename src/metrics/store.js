@@ -4,10 +4,12 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { compileSchema, formatErrors } from '../validation/ajv.js';
 import { botInteractionSchema, botReplyDeliveryPolicySchema, botReplyAcknowledgementSchema,
-  botReplyResolutionSchema, botReplyDispatchClaimSchema, botReplyRecoverySchema,
+  botReplyResolutionSchema, botReplyEchoConfirmationSchema, botReplyDispatchClaimSchema, botReplyRecoverySchema,
   botReplySuppressionCandidatesSchema,
   botReplySuppressionSchema,
   botReplyLifecycleRangeSchema,
+  companionChannelSendSchema, companionChannelSendResolutionSchema, companionChannelSendQuerySchema,
+  companionChannelSendEchoSchema,
   botUsageFiltersSchema, botUsageRangeSchema, botUsagePageSchema,
   directWelcomeCompletionSchema, directWelcomeLookupSchema,
   botCommandDiscoverySchema, botCommandDiscoveryQuerySchema, botCommandListRequestSchema,
@@ -96,6 +98,11 @@ const validateDirectChallengeProgressUpdate = compileSchema(directChallengeProgr
 const validateBotHintCooldownRequest = compileSchema(botHintCooldownRequestSchema);
 const validateBotReplyAcknowledgement = compileSchema(botReplyAcknowledgementSchema);
 const validateBotReplyResolution = compileSchema(botReplyResolutionSchema);
+const validateBotReplyEchoConfirmation = compileSchema(botReplyEchoConfirmationSchema);
+const validateCompanionChannelSend = compileSchema(companionChannelSendSchema);
+const validateCompanionChannelSendResolution = compileSchema(companionChannelSendResolutionSchema);
+const validateCompanionChannelSendQuery = compileSchema(companionChannelSendQuerySchema);
+const validateCompanionChannelSendEcho = compileSchema(companionChannelSendEchoSchema);
 const validateBotReplyDispatchClaim = compileSchema(botReplyDispatchClaimSchema);
 const validateBotReplyRecovery = compileSchema(botReplyRecoverySchema);
 const validateBotReplySuppressionCandidates = compileSchema(botReplySuppressionCandidatesSchema);
@@ -672,7 +679,34 @@ const MIGRATIONS = [
   botReplySuppressionMigration,
   directWelcomeMigration,
   botCommandDiscoveryMigration,
-  qccTombChallengeMigration
+  qccTombChallengeMigration,
+  { version: 27, statements: [
+    `CREATE TABLE companion_channel_sends (
+      id INTEGER PRIMARY KEY,
+      reply_id INTEGER NOT NULL UNIQUE REFERENCES bot_replies(id) ON DELETE CASCADE,
+      generation INTEGER NOT NULL CHECK(generation BETWEEN 1 AND 9007199254740991),
+      command_code INTEGER NOT NULL CHECK(command_code=3),
+      channel_index INTEGER NOT NULL CHECK(channel_index BETWEEN 0 AND 255),
+      dispatched_at INTEGER NOT NULL CHECK(dispatched_at BETWEEN 0 AND 9007199254740991),
+      send_status TEXT NOT NULL CHECK(send_status IN ('awaiting','ok','err','late-ok','late-err','no-response')),
+      response_code INTEGER CHECK(response_code IN (0,1)),
+      device_error_code INTEGER CHECK(device_error_code BETWEEN 0 AND 255),
+      response_at INTEGER CHECK(response_at BETWEEN 0 AND 9007199254740991),
+      completed_at INTEGER CHECK(completed_at BETWEEN 0 AND 9007199254740991),
+      response_correlation TEXT CHECK(response_correlation IN ('untagged-active-command-window','no-response')),
+      mesh_echo_at INTEGER CHECK(mesh_echo_at BETWEEN 0 AND 9007199254740991),
+      mesh_echo_hash TEXT CHECK(mesh_echo_hash IS NULL OR (length(mesh_echo_hash)=16 AND mesh_echo_hash NOT GLOB '*[^0-9A-F]*')),
+      CHECK((send_status='awaiting' AND response_code IS NULL AND response_at IS NULL AND completed_at IS NULL)
+        OR (send_status IN ('ok','late-ok') AND response_code=0 AND device_error_code IS NULL AND response_at IS NOT NULL AND completed_at IS NOT NULL)
+        OR (send_status IN ('err','late-err') AND response_code=1 AND response_at IS NOT NULL AND completed_at IS NOT NULL)
+        OR (send_status='no-response' AND response_code IS NULL AND device_error_code IS NULL AND response_at IS NULL AND completed_at IS NOT NULL)),
+      CHECK((response_code IS NULL AND response_correlation IS NULL)
+        OR (response_code IS NOT NULL AND response_correlation IN ('untagged-active-command-window','untagged-after-timeout'))
+        OR (send_status='no-response' AND response_correlation='no-response'))
+    )`,
+    'CREATE INDEX idx_companion_channel_sends_dispatched ON companion_channel_sends(dispatched_at DESC,id DESC)',
+    'CREATE INDEX idx_companion_channel_sends_error ON companion_channel_sends(device_error_code,dispatched_at DESC)'
+  ] }
 ];
 
 // Shared by every bot_replies SELECT below so the camelCase shape handed
@@ -781,6 +815,7 @@ export class MetricsStore {
   #selectPendingBotReplyCandidatesStmt;
   #claimBotReplyDispatchStmt;
   #resolveBotReplyStmt;
+  #confirmBotReplyEchoStmt;
   #recoverBotReplyDispatchStmt;
   #resolveBotReplyAckStmt;
   #selectFloodAdvertStateStmt;
@@ -799,6 +834,10 @@ export class MetricsStore {
   #advanceDirectChallengeStmt;
   #getBotHintCooldownStmt;
   #setBotHintCooldownStmt;
+  #insertCompanionChannelSendStmt;
+  #resolveCompanionChannelSendStmt;
+  #confirmCompanionChannelSendEchoStmt;
+  #recoverCompanionChannelSendsStmt;
 
   /** @param {{dbPath: string}} options */
   constructor({ dbPath }) {
@@ -917,6 +956,13 @@ export class MetricsStore {
     this.#resolveBotReplyStmt = this.#db.prepare(`UPDATE bot_replies SET status=?,resolved_at=?,queued_ms=?,outcome_reason=?,
       recipient_public_key=NULL WHERE id=? AND ((? IN ('sent','failed','delivery-unknown') AND status='dispatching')
         OR (? IN ('expired','cancelled','suppressed') AND status='pending'))`);
+    this.#confirmBotReplyEchoStmt = this.#db.prepare(`UPDATE bot_replies SET status='sent',resolved_at=?,
+      queued_ms=?-enqueued_at,outcome_reason=NULL,recipient_public_key=NULL
+      WHERE id=? AND enqueued_at IS NOT NULL AND (
+        status='dispatching' OR
+        (status='delivery-unknown' AND outcome_reason='send-failed') OR
+        (status='failed' AND outcome_reason='send-failed')
+      )`);
     this.#recoverBotReplyDispatchStmt = this.#db.prepare(`UPDATE bot_replies SET status='delivery-unknown',resolved_at=?,
       queued_ms=?-enqueued_at,outcome_reason='process-restart',recipient_public_key=NULL
       WHERE status='dispatching'`);
@@ -984,6 +1030,24 @@ export class MetricsStore {
       INSERT INTO bot_hint_cooldowns (channel, last_hint_at) VALUES (?, ?)
       ON CONFLICT(channel) DO UPDATE SET last_hint_at = excluded.last_hint_at
     `);
+    this.#insertCompanionChannelSendStmt = this.#db.prepare(`
+      INSERT INTO companion_channel_sends
+        (reply_id, generation, command_code, channel_index, dispatched_at, send_status)
+      VALUES (?, ?, ?, ?, ?, 'awaiting')
+    `);
+    this.#resolveCompanionChannelSendStmt = this.#db.prepare(`
+      UPDATE companion_channel_sends SET send_status=?,response_code=?,device_error_code=?,response_at=?,
+        completed_at=?,response_correlation=?
+      WHERE id=? AND send_status IN ('awaiting','no-response')
+    `);
+    this.#confirmCompanionChannelSendEchoStmt = this.#db.prepare(`
+      UPDATE companion_channel_sends SET mesh_echo_at=?,mesh_echo_hash=? WHERE reply_id=? AND mesh_echo_at IS NULL
+    `);
+    this.#recoverCompanionChannelSendsStmt = this.#db.prepare(`
+      UPDATE companion_channel_sends SET send_status='no-response',completed_at=?,response_correlation='no-response'
+      WHERE send_status='awaiting'
+    `);
+    this.#recoverCompanionChannelSendsStmt.run(Date.now());
     this.#recoverFloodAdvertAttemptStmt = this.#db.prepare(`
       UPDATE flood_advert_state
       SET status = 'idle', requested_at = NULL, attempt_started_at = NULL,
@@ -1482,19 +1546,20 @@ export class MetricsStore {
 
   /**
    * Reply-lifecycle outcome totals over [start, end), summed across every
-   * bot - backs the dashboard's reply-queue tiles (see metrics-server.js),
+   * bot, including sends whose device acknowledgment conflicts with later
+   * radio evidence - backs the dashboard's reply-queue tiles (see metrics-server.js),
    * which - like every other historical chart on the dashboard - are
    * scoped to whatever duration is currently selected, and survive a
    * restart the way an in-memory counter can't. Dispatching is omitted
    * from terminal totals until its send result or restart recovery is recorded.
    *
    * @param {{start: number, end: number}} options
-   * @returns {{sent: number, failed: number, expired: number, cancelled: number}}
+   * @returns {{sent: number, failed: number, expired: number, cancelled: number, 'delivery-unknown': number}}
    */
   queryReplyOutcomeTotals({ start, end }) {
-    const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0 };
+    const totals = { sent: 0, failed: 0, expired: 0, cancelled: 0, 'delivery-unknown': 0 };
     const rows = this.#db
-      .prepare("SELECT status AS outcome, COUNT(*) AS total FROM bot_replies WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ? GROUP BY status")
+      .prepare("SELECT status AS outcome, COUNT(*) AS total FROM bot_replies WHERE status IN ('sent','failed','expired','cancelled','delivery-unknown') AND resolved_at >= ? AND resolved_at < ? GROUP BY status")
       .all(start, end);
     for (const row of rows) {
       totals[row.outcome] = Number(row.total);
@@ -1520,7 +1585,7 @@ export class MetricsStore {
 
   /**
    * Per-bot, per-outcome reply-lifecycle totals over [start, end) - sent,
-   * failed, expired, and cancelled counts broken down by bot. Not yet
+   * failed, expired, cancelled, and delivery-unknown counts broken down by bot. Not yet
    * surfaced on the dashboard; structured so a future "queue health" view
    * can query it directly rather than needing a schema change.
    *
@@ -1643,11 +1708,11 @@ export class MetricsStore {
     }) };
   }
 
-  /** Bounded outcomes by completion time, including sent/failed/expired/cancelled. */
+  /** Bounded outcomes by completion time, including device-ERR replies awaiting mesh confirmation. */
   queryBotOutcomeGroups(query) {
     const page = { limit: 100, offset: 0, ...query };
     assertBotQuery(validateBotUsagePage, page);
-    const where = `WHERE status IN ('sent','failed','expired','cancelled') AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
+    const where = `WHERE status IN ('sent','failed','expired','cancelled','delivery-unknown') AND resolved_at >= ? AND resolved_at < ? AND ${BOT_FILTER_SQL}`;
     const values = [page.start, page.end, ...botFilterValues(page)];
     const group = 'GROUP BY bot_name COLLATE BINARY, channel COLLATE BINARY, trigger COLLATE BINARY, sender COLLATE BINARY, sender_identifier COLLATE BINARY, status';
     const { total } = this.#db.prepare(`SELECT COUNT(*) AS total FROM (SELECT 1 FROM bot_replies ${where} ${group})`).get(...values);
@@ -2342,10 +2407,88 @@ export class MetricsStore {
    * @param {{status: 'sent'|'failed', resolvedAt: number, queuedMs: number}} resolution
    */
   resolveReplyItem(id, { status, resolvedAt, queuedMs, reason: requestedReason }) {
-    const reason = status === 'failed' ? (requestedReason ?? 'send-failed') : undefined;
+    const reason = ['failed', 'delivery-unknown'].includes(status) ? (requestedReason ?? 'send-failed') : undefined;
     const input = { id, status, resolvedAt, queuedMs, ...(reason ? { reason } : {}) };
     if (!validateBotReplyResolution(input)) throw new Error(`Invalid bot reply resolution: ${formatErrors(validateBotReplyResolution.errors)}`);
     return this.#resolveBotReplyStmt.run(status, resolvedAt, queuedMs, reason ?? null, id, status, status).changes === 1;
+  }
+
+  /** Promotes a device-ERR send to sent only after its exact channel reply is heard rebroadcast. */
+  confirmReplyEcho(input) {
+    if (!validateBotReplyEchoConfirmation(input)) {
+      throw new Error(`Invalid bot reply echo confirmation: ${formatErrors(validateBotReplyEchoConfirmation.errors)}`);
+    }
+    return this.#confirmBotReplyEchoStmt.run(input.occurredAt, input.occurredAt, input.id).changes === 1;
+  }
+
+  /** Records the actual Companion TX frame for one channel reply, without its payload. */
+  recordCompanionChannelSend(input) {
+    if (!validateCompanionChannelSend(input)) {
+      throw new Error(`Invalid Companion channel-send diagnostic: ${formatErrors(validateCompanionChannelSend.errors)}`);
+    }
+    const result = this.#insertCompanionChannelSendStmt.run(input.replyId, input.generation, input.commandCode,
+      input.channelIndex, input.dispatchedAt);
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Records the generic Companion response observed during the send window, or its timeout. */
+  resolveCompanionChannelSend(input) {
+    if (!validateCompanionChannelSendResolution(input)) {
+      throw new Error(`Invalid Companion channel-send resolution: ${formatErrors(validateCompanionChannelSendResolution.errors)}`);
+    }
+    return this.#resolveCompanionChannelSendStmt.run(input.status, input.responseCode, input.deviceErrorCode,
+      input.responseAt, input.completedAt, input.correlation, input.id).changes === 1;
+  }
+
+  /** Associates a later exact-text echo with the device command evidence. */
+  confirmCompanionChannelSendEcho(input) {
+    if (!validateCompanionChannelSendEcho(input)) {
+      throw new Error(`Invalid Companion channel-send echo confirmation: ${formatErrors(validateCompanionChannelSendEcho.errors)}`);
+    }
+    return this.#confirmCompanionChannelSendEchoStmt.run(input.occurredAt, input.packetHash, input.id).changes === 1;
+  }
+
+  /** Latest bounded protocol evidence for channel replies; message/frame payloads are never selected. */
+  queryRecentCompanionChannelSends(query = {}) {
+    const input = { limit: 50, ...query };
+    if (!validateCompanionChannelSendQuery(input)) {
+      throw new Error(`Invalid Companion channel-send query: ${formatErrors(validateCompanionChannelSendQuery.errors)}`);
+    }
+    return this.#db.prepare(`
+      SELECT c.id AS diagnosticId, c.reply_id AS replyId, c.generation, c.command_code AS commandCode,
+        c.channel_index AS channelIndex, c.dispatched_at AS dispatchedAt, c.send_status AS sendStatus,
+        c.response_code AS responseCode, c.device_error_code AS deviceErrorCode,
+        c.response_at AS responseAt, c.completed_at AS completedAt,
+        c.response_correlation AS responseCorrelation, c.mesh_echo_at AS meshEchoAt, c.mesh_echo_hash AS meshEchoHash,
+        r.bot_name AS botName, r.channel, r.trigger,
+        r.status AS replyOutcome, r.outcome_reason AS replyReason
+      FROM companion_channel_sends c JOIN bot_replies r ON r.id=c.reply_id
+      ORDER BY c.dispatched_at DESC, c.id DESC LIMIT ?
+    `).all(input.limit).map(row => ({
+      ...row,
+      diagnosticId: Number(row.diagnosticId), replyId: Number(row.replyId), generation: Number(row.generation),
+      commandCode: Number(row.commandCode), channelIndex: Number(row.channelIndex), dispatchedAt: Number(row.dispatchedAt),
+      responseCode: toNumberOrNull(row.responseCode), deviceErrorCode: toNumberOrNull(row.deviceErrorCode),
+      responseAt: toNumberOrNull(row.responseAt), completedAt: toNumberOrNull(row.completedAt),
+      meshEchoAt: toNumberOrNull(row.meshEchoAt)
+    }));
+  }
+
+  /** Fixed-window command health counts for the bot dashboard. */
+  queryCompanionChannelSendSummary(query) {
+    if (!validateBotReplyLifecycleRange(query)) {
+      throw new Error(`Invalid Companion channel-send summary range: ${formatErrors(validateBotReplyLifecycleRange.errors)}`);
+    }
+    if (query.start > query.end) throw new Error('Invalid Companion channel-send summary range: start must not exceed end');
+    const row = this.#db.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(send_status IN ('err','late-err')),0) AS errors,
+        COALESCE(SUM(device_error_code=4),0) AS badStateErrors,
+        COALESCE(SUM(mesh_echo_at IS NOT NULL),0) AS echoConfirmed,
+        COALESCE(SUM(send_status='no-response'),0) AS noResponse
+      FROM companion_channel_sends WHERE dispatched_at >= ? AND dispatched_at < ?
+    `).get(query.start, query.end);
+    return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value)]));
   }
 
   /** One reply by id, in the same shape as the pending-item queries above - for diagnostics/tests. */

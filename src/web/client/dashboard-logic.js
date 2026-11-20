@@ -143,6 +143,7 @@ export function summarizeBotReporting(usage = {}, outcomes = {}) {
     distinctSenderNames: usageTotals.distinctSenderNames ?? null,
     outcomes: {
       sent: outcomeTotals.sent ?? null,
+      deliveryUnknown: outcomeTotals['delivery-unknown'] ?? null,
       failed: outcomeTotals.failed ?? null,
       expired: outcomeTotals.expired ?? null,
       cancelled: outcomeTotals.cancelled ?? null

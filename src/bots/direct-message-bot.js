@@ -374,6 +374,9 @@ export class DirectMessageBot {
     await this.#radioManager.runCommand(
       async (connection) => {
         const recipientKey = Buffer.from(publicKeyHex, 'hex');
+        // Channel replies may leave a connection-session flood scope active.
+        // Private replies use the Companion's device-default routing policy.
+        await connection.clearFloodScope();
         try {
           await connection.resetPath(recipientKey);
         } catch (error) {

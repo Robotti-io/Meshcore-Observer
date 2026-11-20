@@ -80,12 +80,13 @@ export function renderDashboardHtml() {
 <main id="dashboard-views">
 <section class="dashboard-view" id="view-overview" data-view="overview">
   <h2 tabindex="-1">Overview</h2>
-  <p class="section-note">Summary metrics use the reporting range above. Trend indicators compare with the previous equivalent period; connectivity and uptime are live.</p>
+  <p class="section-note">Summary metrics use the reporting range above. Trend indicators compare with the previous equivalent period; connectivity and uptime are live. Delivery-unknown replies have no matching mesh echo yet.</p>
   <p class="section-note" id="overview-comparison-note"></p>
   <div id="overview-tiles" class="tile-grid">
     <div class="tile"><h2>Packets received</h2><p class="metric-value"><span id="packets-received">0</span><span id="packets-received-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
     <div class="tile"><h2>Packets decoded</h2><p class="metric-value"><span id="packets-decoded">0</span><span id="packets-decoded-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
     <div class="tile"><h2>Replies sent</h2><p class="metric-value"><span id="overview-replies-sent">0</span><span id="overview-replies-sent-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
+    <div class="tile"><h2>Replies with unknown delivery</h2><p id="overview-replies-unknown">0</p></div>
     <div class="tile"><h2>Replies expired</h2><p class="metric-value"><span id="overview-replies-expired">0</span><span id="overview-replies-expired-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
     <div class="tile"><h2>Replies failed</h2><p class="metric-value"><span id="overview-replies-failed">0</span><span id="overview-replies-failed-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
     <div class="tile"><h2>Broker deliveries sent</h2><p class="metric-value"><span id="overview-broker-sent">0</span><span id="overview-broker-sent-trend" class="metric-trend" aria-label="No prior period comparison available">—</span></p></div>
@@ -155,10 +156,11 @@ export function renderDashboardHtml() {
 
 <section class="dashboard-view" id="view-bots" data-view="bots" hidden>
   <h2 tabindex="-1">Channel bots</h2>
-  <p class="section-note">Queued now is live; sent/expired/failed and per-bot command counts reflect the range selected above.</p>
+  <p class="section-note">Queued now is live; sent/unknown/expired/failed and per-bot command counts reflect the range selected above. Unknown means the Companion rejected the command but the observer has not yet heard a matching mesh echo.</p>
   <div id="reply-queue-tiles" class="tile-grid">
     <div class="tile"><h2>Queued now <span class="scope-label">Live</span></h2><p id="queue-size">0</p></div>
     <div class="tile"><h2>Sent</h2><p id="queue-sent">0</p></div>
+    <div class="tile"><h2>Delivery unknown</h2><p id="queue-delivery-unknown">0</p></div>
     <div class="tile"><h2>Expired</h2><p id="queue-expired">0</p></div>
     <div class="tile"><h2>Failed</h2><p id="queue-failed">0</p></div>
   </div>
@@ -169,6 +171,7 @@ export function renderDashboardHtml() {
       <div class="tile"><h4>Accepted</h4><p id="bot-accepted">Unavailable</p></div>
       <div class="tile"><h4>Distinct sender names</h4><p id="bot-distinct-senders">Unavailable</p></div>
       <div class="tile"><h4>Sent</h4><p id="bot-outcome-sent">Unavailable</p></div>
+      <div class="tile"><h4>Delivery unknown</h4><p id="bot-outcome-delivery-unknown">Unavailable</p></div>
       <div class="tile"><h4>Failed</h4><p id="bot-outcome-failed">Unavailable</p></div>
       <div class="tile"><h4>Expired</h4><p id="bot-outcome-expired">Unavailable</p></div>
       <div class="tile"><h4>Cancelled</h4><p id="bot-outcome-cancelled">Unavailable</p></div>
@@ -181,6 +184,21 @@ export function renderDashboardHtml() {
       <div class="table-scroll" role="region" aria-label="Bot outcome groups" tabindex="0">
         <table id="bot-outcomes-table"><caption class="sr-only">Bot delivery outcome groups in the selected reporting range</caption><thead><tr><th>Bot</th><th>Command</th><th>Outcome</th><th>Count</th></tr></thead><tbody></tbody></table>
       </div>
+    </div>
+  </section>
+  <section class="reporting-panel" aria-labelledby="companion-send-history-heading">
+    <h3 id="companion-send-history-heading">Recent Companion channel sends</h3>
+    <p class="section-note">Latest 50 channel-send transactions. Command and response codes are captured without message payloads. Companion responses are untagged, so a response observed during a send window is useful evidence, not a protocol-level command ID match. Exact mesh echoes include their packet hash.</p>
+    <div class="tile-grid">
+      <div class="tile"><h4>TX frames · 24h</h4><p id="companion-sends-total">Unavailable</p></div>
+      <div class="tile"><h4>ERR responses · 24h</h4><p id="companion-sends-errors">Unavailable</p></div>
+      <div class="tile"><h4>Error code 4 · 24h</h4><p id="companion-sends-bad-state">Unavailable</p></div>
+      <div class="tile"><h4>Echo confirmed · 24h</h4><p id="companion-sends-echoes">Unavailable</p></div>
+      <div class="tile"><h4>No response · 24h</h4><p id="companion-sends-no-response">Unavailable</p></div>
+    </div>
+    <p class="data-status" id="companion-send-history-status" role="status" aria-live="polite" aria-atomic="true" aria-busy="true">Loading Companion send history…</p>
+    <div class="table-scroll" role="region" aria-label="Recent Companion channel-send diagnostics" tabindex="0">
+      <table id="companion-send-history-table"><caption class="sr-only">Recent Companion channel-send command, response, and mesh-echo evidence</caption><thead><tr><th>TX time</th><th>Reply ID</th><th>Bot / channel</th><th>Trigger</th><th>TX</th><th>Response</th><th>Response time</th><th>Correlation</th><th>Reply outcome</th><th>Mesh echo</th></tr></thead><tbody></tbody></table>
     </div>
   </section>
   <p id="bots-empty-state" class="empty-state" hidden>No channel bots are configured.</p>
